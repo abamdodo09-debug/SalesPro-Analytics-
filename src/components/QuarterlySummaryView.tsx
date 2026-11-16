@@ -12,6 +12,7 @@ import {
   QUARTER_MONTHS,
   exportQuarterlyToExcel,
 } from '../services/quarterlySummaryService';
+import { TARGETS_UPDATED_EVENT } from '../services/targetManagementService';
 import { formatRupiah, formatPercent } from '../utils/analytics';
 import {
   Award,
@@ -119,6 +120,18 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
     return Array.from(set).sort();
   }, [sourceRecords]);
 
+  const [targetSyncVersion, setTargetSyncVersion] = useState<number>(0);
+
+  useEffect(() => {
+    const onTargetsUpdated = () => setTargetSyncVersion((v) => v + 1);
+    window.addEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
+    window.addEventListener('storage', onTargetsUpdated);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
+      window.removeEventListener('storage', onTargetsUpdated);
+    };
+  }, []);
+
   // Compute quarterly calculations
   const rawSummaryData = useMemo(() => {
     return calculateQuarterlySummary(
@@ -128,7 +141,7 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
       selectedArea,
       selectedSpv
     );
-  }, [sourceRecords, selectedQuarter, selectedYear, selectedArea, selectedSpv]);
+  }, [sourceRecords, selectedQuarter, selectedYear, selectedArea, selectedSpv, targetSyncVersion]);
 
   const { overall: baseOverall, salesList, baList, trainerList } = rawSummaryData;
 

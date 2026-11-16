@@ -26,11 +26,41 @@ import {
   Calendar,
   RotateCcw,
   GraduationCap,
+  FileText,
+  FileDown,
 } from 'lucide-react';
 import { TransactionRecord, DashboardFilters, SalesSalaryItem, BaSalaryItem, TrainerSalaryItem, KpiTrainerScorecardItem } from '../types/dashboard';
 import { formatRupiah, formatNumber, formatPercent } from '../utils/analytics';
 import { aggregateAreaCost, calculateSalesSalary, calculateBaSalary, calculateTrainerSalary, DEFAULT_TRAINERS_DATA } from '../utils/costCalculations';
 import { loadKpiTrainerData } from '../services/kpiTrainerService';
+import {
+  loadSalesTargets,
+  loadBaNonLavojoyTargets,
+  loadBaLavojoyTargets,
+  loadBaFocusTargets,
+  loadTrainerConfigs,
+  loadTrainerTargets,
+  setSingleTargetOverride,
+  setSingleTrainerTargetOverride,
+  resetMonthTargets,
+  TARGETS_UPDATED_EVENT,
+} from '../services/targetManagementService';
+import {
+  SalarySlipCompanyHeader,
+  SalarySlipData,
+  loadCompanyHeader,
+  loadSlipOverrides,
+  makeSlipKey,
+  formatSlipPeriodLabel,
+  buildSlipFromSales,
+  buildDefaultSlipFromSales,
+  buildSlipFromBa,
+  buildDefaultSlipFromBa,
+  buildSlipFromTrainer,
+  buildDefaultSlipFromTrainer,
+  downloadBatchSalarySlipsPdf,
+} from '../services/salarySlipService';
+import { SalarySlipModal } from './SalarySlipModal';
 import * as XLSX from 'xlsx';
 
 // Helper to robustly parse date strings in either M/D/YYYY or YYYY-MM-DD
@@ -105,32 +135,11 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
   const [defaultBaNonLavojoyTarget, setDefaultBaNonLavojoyTarget] = useState<number>(30000000); // 30 Jt default
   const [defaultBaLavojoyTarget, setDefaultBaLavojoyTarget] = useState<number>(5000000); // 5 Jt default
 
-  const [customSalesTargets, setCustomSalesTargets] = useState<Record<string, number>>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY_SALES_TARGETS);
-      return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
-  });
+  const [targetSyncVersion, setTargetSyncVersion] = useState<number>(0);
 
-  const [customBaNonLavojoyTargets, setCustomBaNonLavojoyTargets] = useState<Record<string, number>>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY_BA_NON_LAVOJOY);
-      return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
-  });
-
-  const [customBaLavojoyTargets, setCustomBaLavojoyTargets] = useState<Record<string, number>>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY_BA_LAVOJOY);
-      return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
-  });
+  const [customSalesTargets, setCustomSalesTargets] = useState<Record<string, number>>(() => loadSalesTargets(filters.BULAN));
+  const [customBaNonLavojoyTargets, setCustomBaNonLavojoyTargets] = useState<Record<string, number>>(() => loadBaNonLavojoyTargets(filters.BULAN));
+  const [customBaLavojoyTargets, setCustomBaLavojoyTargets] = useState<Record<string, number>>(() => loadBaLavojoyTargets(filters.BULAN));
 
   const [customSalesBonuses, setCustomSalesBonuses] = useState<Record<string, number>>(() => {
     try {
@@ -204,12 +213,26 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
     }
   });
 
-  // Save to LocalStorage when changed
+  // Reload month-resolved targets whenever active month filter or Pusat Kelola Target changes
+  useEffect(() => {
+    const syncMonthTargets = () => {
+      setCustomSalesTargets(loadSalesTargets(filters.BULAN));
+      setCustomBaNonLavojoyTargets(loadBaNonLavojoyTargets(filters.BULAN));
+      setCustomBaLavojoyTargets(loadBaLavojoyTargets(filters.BULAN));
+      setTargetSyncVersion((v) => v + 1);
+    };
+    syncMonthTargets();
+    window.addEventListener(TARGETS_UPDATED_EVENT, syncMonthTargets);
+    window.addEventListener('storage', syncMonthTargets);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, syncMonthTargets);
+      window.removeEventListener('storage', syncMonthTargets);
+    };
+  }, [filters.BULAN]);
+
+  // Save cost-specific LocalStorage overrides (bonuses, penalties, trainer KPI) without overwriting monthly target store
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY_SALES_TARGETS, JSON.stringify(customSalesTargets));
-      localStorage.setItem(STORAGE_KEY_BA_NON_LAVOJOY, JSON.stringify(customBaNonLavojoyTargets));
-      localStorage.setItem(STORAGE_KEY_BA_LAVOJOY, JSON.stringify(customBaLavojoyTargets));
       localStorage.setItem(STORAGE_KEY_SALES_BONUSES, JSON.stringify(customSalesBonuses));
       localStorage.setItem(STORAGE_KEY_SALES_PENALTIES, JSON.stringify(customSalesPenalties));
       localStorage.setItem(STORAGE_KEY_TRAINER_FOCUS, JSON.stringify(customTrainerFocusTargets));
@@ -222,9 +245,6 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
       // ignore storage error
     }
   }, [
-    customSalesTargets,
-    customBaNonLavojoyTargets,
-    customBaLavojoyTargets,
     customSalesBonuses,
     customSalesPenalties,
     customTrainerFocusTargets,
@@ -298,6 +318,23 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
   const [editTrainerKpiPenalty, setEditTrainerKpiPenalty] = useState<number | null>(null);
   const [editTrainerNotes, setEditTrainerNotes] = useState<string>('');
 
+  // Slip Gaji PDF & Kop PT JALUR MANDIRI UTAMA State
+  const [companyHeader, setCompanyHeader] = useState<SalarySlipCompanyHeader>(() =>
+    loadCompanyHeader()
+  );
+  const [slipOverridesMap, setSlipOverridesMap] = useState<Record<string, SalarySlipData>>(() =>
+    loadSlipOverrides()
+  );
+  const [slipModalOpen, setSlipModalOpen] = useState(false);
+  const [slipModalInitialTab, setSlipModalInitialTab] = useState<'slip' | 'kop'>('slip');
+  const [activeSlipData, setActiveSlipData] = useState<SalarySlipData | null>(null);
+  const [activeDefaultSlipData, setActiveDefaultSlipData] = useState<SalarySlipData | null>(null);
+
+  const slipPeriodLabel = useMemo(
+    () => formatSlipPeriodLabel(filters.BULAN, filters.TAHUN),
+    [filters.BULAN, filters.TAHUN]
+  );
+
   // Interactive Simulator State
   const [simRole, setSimRole] = useState<'sales' | 'ba' | 'trainer'>('ba');
   const [simTarget, setSimTarget] = useState<number>(150000000);
@@ -313,6 +350,17 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
   const [simTrainerFocusTarget, setSimTrainerFocusTarget] = useState<number>(500);
   const [simTrainerFocusActual, setSimTrainerFocusActual] = useState<number>(480);
   const [simTrainerKpiScore, setSimTrainerKpiScore] = useState<number>(95);
+
+  // Resolved monthly BA Focus & Trainer Configs / Monthly Targets from Pusat Kelola Target
+  const baFocusTargetsMap = useMemo(
+    () => loadBaFocusTargets(filters.BULAN),
+    [filters.BULAN, targetSyncVersion]
+  );
+  const dynamicTrainerConfigs = useMemo(() => loadTrainerConfigs(), [targetSyncVersion]);
+  const trainerMonthlyTargets = useMemo(
+    () => loadTrainerTargets(trainerMonthPeriod || filters.BULAN),
+    [trainerMonthPeriod, filters.BULAN, targetSyncVersion]
+  );
 
   // Calculate aggregated area cost
   const costSummary = useMemo(() => {
@@ -334,7 +382,10 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
       customTrainerKpiScores,
       customTrainerKpiIncentives,
       customTrainerKpiPenalties,
-      trainerMonthPeriod
+      trainerMonthPeriod,
+      dynamicTrainerConfigs,
+      trainerMonthlyTargets,
+      baFocusTargetsMap
     );
   }, [
     records,
@@ -353,6 +404,9 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
     customTrainerKpiIncentives,
     customTrainerKpiPenalties,
     trainerMonthPeriod,
+    dynamicTrainerConfigs,
+    trainerMonthlyTargets,
+    baFocusTargetsMap,
   ]);
 
   // Filtered records for BA date range
@@ -390,7 +444,10 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
       customTrainerKpiScores,
       customTrainerKpiIncentives,
       customTrainerKpiPenalties,
-      trainerMonthPeriod
+      trainerMonthPeriod,
+      dynamicTrainerConfigs,
+      trainerMonthlyTargets,
+      baFocusTargetsMap
     );
   }, [
     effectiveBaRecords,
@@ -409,6 +466,9 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
     customTrainerKpiIncentives,
     customTrainerKpiPenalties,
     trainerMonthPeriod,
+    dynamicTrainerConfigs,
+    trainerMonthlyTargets,
+    baFocusTargetsMap,
   ]);
 
   // Filtered records for Trainer date range
@@ -446,7 +506,10 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
       customTrainerKpiScores,
       customTrainerKpiIncentives,
       customTrainerKpiPenalties,
-      trainerMonthPeriod
+      trainerMonthPeriod,
+      dynamicTrainerConfigs,
+      trainerMonthlyTargets,
+      baFocusTargetsMap
     );
   }, [
     effectiveTrainerRecords,
@@ -465,6 +528,9 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
     customTrainerKpiIncentives,
     customTrainerKpiPenalties,
     trainerMonthPeriod,
+    dynamicTrainerConfigs,
+    trainerMonthlyTargets,
+    baFocusTargetsMap,
   ]);
 
   // Simulator result calculation
@@ -613,6 +679,8 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
   // Save BA Edit
   const handleSaveEditBa = () => {
     if (!editingBa) return;
+    setSingleTargetOverride('baNonLavojoy', editingBa.storeName, editBaNonLavojoyTarget, filters.BULAN);
+    setSingleTargetOverride('baLavojoy', editingBa.storeName, editBaLavojoyTarget, filters.BULAN);
     setCustomBaNonLavojoyTargets((prev) => ({
       ...prev,
       [editingBa.storeName]: editBaNonLavojoyTarget,
@@ -635,6 +703,7 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
   // Save Sales Edit
   const handleSaveEditSales = () => {
     if (!editingSales) return;
+    setSingleTargetOverride('sales', editingSales.salesName, editSalesTarget, filters.BULAN);
     setCustomSalesTargets((prev) => ({
       ...prev,
       [editingSales.salesName]: editSalesTarget,
@@ -666,6 +735,14 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
   // Save Trainer Edit
   const handleSaveEditTrainer = () => {
     if (!editingTrainer) return;
+    const trainerCfg = dynamicTrainerConfigs.find(
+      (t) => t.trainerName.toUpperCase() === editingTrainer.trainerName.toUpperCase()
+    );
+    setSingleTrainerTargetOverride(
+      trainerCfg?.id || editingTrainer.id || editingTrainer.trainerName,
+      { targetProdukFokusPcs: editTrainerFocusTarget, notes: editTrainerNotes },
+      trainerMonthPeriod || filters.BULAN
+    );
     setCustomTrainerFocusTargets((prev) => ({
       ...prev,
       [editingTrainer.trainerName]: editTrainerFocusTarget,
@@ -699,6 +776,91 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
       }));
     }
     setEditingTrainer(null);
+  };
+
+  // Refresh saved slip overrides badge map
+  const refreshSlipOverrides = () => {
+    setSlipOverridesMap(loadSlipOverrides());
+  };
+
+  // Slip Gaji & Kop Handlers
+  const handleOpenKopEditor = () => {
+    setActiveSlipData(null);
+    setActiveDefaultSlipData(null);
+    setSlipModalInitialTab('kop');
+    setSlipModalOpen(true);
+  };
+
+  const handleOpenSalesSlip = (item: SalesSalaryItem, index: number) => {
+    setActiveSlipData(buildSlipFromSales(item, slipPeriodLabel, index));
+    setActiveDefaultSlipData(buildDefaultSlipFromSales(item, slipPeriodLabel, index));
+    setSlipModalInitialTab('slip');
+    setSlipModalOpen(true);
+  };
+
+  const handleOpenBaSlip = (item: BaSalaryItem, index: number) => {
+    setActiveSlipData(buildSlipFromBa(item, slipPeriodLabel, index));
+    setActiveDefaultSlipData(buildDefaultSlipFromBa(item, slipPeriodLabel, index));
+    setSlipModalInitialTab('slip');
+    setSlipModalOpen(true);
+  };
+
+  const handleOpenTrainerSlip = (item: TrainerSalaryItem, index: number) => {
+    const period = item.monthPeriod || trainerMonthPeriod || slipPeriodLabel;
+    setActiveSlipData(buildSlipFromTrainer(item, period, index));
+    setActiveDefaultSlipData(buildDefaultSlipFromTrainer(item, period, index));
+    setSlipModalInitialTab('slip');
+    setSlipModalOpen(true);
+  };
+
+  const handleDownloadSalesSlipsPdf = () => {
+    const slips = filteredSalesList.map((s, idx) =>
+      buildSlipFromSales(s, slipPeriodLabel, idx)
+    );
+    downloadBatchSalarySlipsPdf(
+      slips,
+      companyHeader,
+      `Slip_Gaji_Sales_PT_JMU_${slipPeriodLabel.replace(/\s+/g, '_')}.pdf`
+    );
+  };
+
+  const handleDownloadBaSlipsPdf = () => {
+    const slips = filteredBaList.map((b, idx) =>
+      buildSlipFromBa(b, slipPeriodLabel, idx)
+    );
+    downloadBatchSalarySlipsPdf(
+      slips,
+      companyHeader,
+      `Slip_Gaji_BA_Toko_PT_JMU_${slipPeriodLabel.replace(/\s+/g, '_')}.pdf`
+    );
+  };
+
+  const handleDownloadTrainerSlipsPdf = () => {
+    const slips = filteredTrainerList.map((t, idx) =>
+      buildSlipFromTrainer(t, t.monthPeriod || trainerMonthPeriod || slipPeriodLabel, idx)
+    );
+    downloadBatchSalarySlipsPdf(
+      slips,
+      companyHeader,
+      `Slip_Gaji_Trainer_PT_JMU_${(trainerMonthPeriod || slipPeriodLabel).replace(/\s+/g, '_')}.pdf`
+    );
+  };
+
+  const handleDownloadAllSlipsPdf = () => {
+    const salesSlips = filteredSalesList.map((s, idx) =>
+      buildSlipFromSales(s, slipPeriodLabel, idx)
+    );
+    const baSlips = filteredBaList.map((b, idx) =>
+      buildSlipFromBa(b, slipPeriodLabel, idx)
+    );
+    const trainerSlips = filteredTrainerList.map((t, idx) =>
+      buildSlipFromTrainer(t, t.monthPeriod || trainerMonthPeriod || slipPeriodLabel, idx)
+    );
+    downloadBatchSalarySlipsPdf(
+      [...salesSlips, ...baSlips, ...trainerSlips],
+      companyHeader,
+      `Semua_Slip_Gaji_PT_JMU_${slipPeriodLabel.replace(/\s+/g, '_')}.pdf`
+    );
   };
 
   // Export to Excel handler
@@ -893,8 +1055,24 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
             </p>
           </div>
 
-          {/* Quick Actions: Export & Target Setting */}
+          {/* Quick Actions: Export, Slip Gaji PDF, Kop & Target Setting */}
           <div className="flex items-center flex-wrap gap-2">
+            <button
+              onClick={handleOpenKopEditor}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-300 bg-white text-slate-800 hover:bg-slate-100 transition-colors shadow-2xs cursor-pointer"
+              title="Edit Kop Surat Resmi PT JALUR MANDIRI UTAMA"
+            >
+              <Building2 className="w-3.5 h-3.5 text-slate-700" />
+              <span>Edit Kop Slip Gaji (PT JMU)</span>
+            </button>
+            <button
+              onClick={handleDownloadAllSlipsPdf}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg bg-rose-600 hover:bg-rose-500 text-white transition-colors shadow-sm cursor-pointer"
+              title="Download semua slip gaji Sales, BA & Trainer dalam 1 file PDF"
+            >
+              <FileDown className="w-3.5 h-3.5" />
+              <span>Semua Slip Gaji (.PDF)</span>
+            </button>
             <button
               onClick={() => setIsSettingOpen(!isSettingOpen)}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border border-indigo-200 bg-white text-indigo-700 hover:bg-indigo-50 transition-colors shadow-2xs cursor-pointer"
@@ -969,14 +1147,12 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                   setDefaultSalesTarget(150000000);
                   setDefaultBaNonLavojoyTarget(30000000);
                   setDefaultBaLavojoyTarget(5000000);
+                  resetMonthTargets(filters.BULAN);
                   setCustomSalesTargets({});
                   setCustomBaNonLavojoyTargets({});
                   setCustomBaLavojoyTargets({});
                   setCustomSalesBonuses({});
                   setCustomSalesPenalties({});
-                  localStorage.removeItem(STORAGE_KEY_SALES_TARGETS);
-                  localStorage.removeItem(STORAGE_KEY_BA_NON_LAVOJOY);
-                  localStorage.removeItem(STORAGE_KEY_BA_LAVOJOY);
                   localStorage.removeItem(STORAGE_KEY_SALES_BONUSES);
                   localStorage.removeItem(STORAGE_KEY_SALES_PENALTIES);
                 }}
@@ -1465,9 +1641,20 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                 Gaji Pokok Rp 4.900.000 + Insentif Sell In (≥100%: 4% | 80-99%: 0,2%) + Bonus BA (45-54M: +500rb, ≥55M: +1Jt) - Denda BA (&lt;35M: -300rb, SP1)
               </p>
             </div>
-            <div className="text-xs text-slate-500 font-mono">
-              Total Personil: <strong className="text-slate-800">{costSummary.salesCount}</strong> | Total Beban:{' '}
-              <strong className="text-indigo-700 font-bold">{formatRupiah(costSummary.totalSalesCost)}</strong>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="text-xs text-slate-500 font-mono">
+                Total Personil: <strong className="text-slate-800">{costSummary.salesCount}</strong> | Total Beban:{' '}
+                <strong className="text-indigo-700 font-bold">{formatRupiah(costSummary.totalSalesCost)}</strong>
+              </div>
+              {filteredSalesList.length > 0 && (
+                <button
+                  onClick={handleDownloadSalesSlipsPdf}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-bold rounded-lg bg-rose-600 hover:bg-rose-500 text-white shadow-2xs cursor-pointer"
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  <span>PDF Semua Sales</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -1588,13 +1775,27 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                         {formatRupiah(item.totalSalary)}
                       </td>
                       <td className="py-3 px-3 text-center">
-                        <button
-                          onClick={() => handleOpenEditSales(item)}
-                          className="p-1.5 rounded-lg border border-indigo-200 text-indigo-600 hover:bg-indigo-50 transition-colors shadow-2xs cursor-pointer"
-                          title="Edit Target & Insentif Sales"
-                        >
-                          <Edit3 className="w-3.5 h-3.5" />
-                        </button>
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            onClick={() => handleOpenEditSales(item)}
+                            className="p-1.5 rounded-lg border border-indigo-200 text-indigo-600 hover:bg-indigo-50 transition-colors shadow-2xs cursor-pointer"
+                            title="Edit Target & Insentif Sales"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleOpenSalesSlip(item, idx)}
+                            className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border text-[11px] font-bold transition-colors shadow-2xs cursor-pointer ${
+                              slipOverridesMap[makeSlipKey('sales', item.salesName, slipPeriodLabel)]
+                                ? 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                                : 'border-rose-200 bg-rose-50/70 text-rose-700 hover:bg-rose-100'
+                            }`}
+                            title="Preview, Edit & Download Slip Gaji PDF"
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                            <span>Slip</span>
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1618,9 +1819,20 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                 Non-Lavojoy: ≥120% (2%+3.9Jt) | 100-119% (2%+3.9Jt) | 70-99% (2.925Jt) | 1-25Jt (2Jt) + Khusus Lavojoy: 4% jika capai ≥ 100%
               </p>
             </div>
-            <div className="text-xs text-slate-500 font-mono">
-              Total Gerai BA: <strong className="text-slate-800">{baCostSummary.baCount}</strong> | Total Beban:{' '}
-              <strong className="text-teal-700 font-bold">{formatRupiah(baCostSummary.totalBaCost)}</strong>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="text-xs text-slate-500 font-mono">
+                Total Gerai BA: <strong className="text-slate-800">{baCostSummary.baCount}</strong> | Total Beban:{' '}
+                <strong className="text-teal-700 font-bold">{formatRupiah(baCostSummary.totalBaCost)}</strong>
+              </div>
+              {filteredBaList.length > 0 && (
+                <button
+                  onClick={handleDownloadBaSlipsPdf}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-bold rounded-lg bg-rose-600 hover:bg-rose-500 text-white shadow-2xs cursor-pointer"
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  <span>PDF Semua BA</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -1897,13 +2109,29 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                         {formatRupiah(item.totalSalary)}
                       </td>
                       <td className="py-3 px-3 text-center">
-                        <button
-                          onClick={() => handleOpenEditBa(item)}
-                          className="p-1.5 rounded-lg border border-teal-200 text-teal-600 hover:bg-teal-50 transition-colors shadow-2xs cursor-pointer"
-                          title="Edit Target Non-Lavojoy & Lavojoy"
-                        >
-                          <Edit3 className="w-3.5 h-3.5" />
-                        </button>
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            onClick={() => handleOpenEditBa(item)}
+                            className="p-1.5 rounded-lg border border-teal-200 text-teal-600 hover:bg-teal-50 transition-colors shadow-2xs cursor-pointer"
+                            title="Edit Target Non-Lavojoy & Lavojoy"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleOpenBaSlip(item, idx)}
+                            className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border text-[11px] font-bold transition-colors shadow-2xs cursor-pointer ${
+                              slipOverridesMap[
+                                makeSlipKey('ba', `${item.baName}__${item.storeName}`, slipPeriodLabel)
+                              ]
+                                ? 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                                : 'border-rose-200 bg-rose-50/70 text-rose-700 hover:bg-rose-100'
+                            }`}
+                            title="Preview, Edit & Download Slip Gaji PDF"
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                            <span>Slip</span>
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1927,9 +2155,20 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                 Pokok Rp 3.9Jt + Transport Rp 500rb + Insentif Fokus + Insentif Poin KPI (100%: +2Jt | 90-99%: +1Jt | 80-89%: +500rb | 70-79%: Aman | &lt;70%: SP1 &amp; Denda -300rb)
               </p>
             </div>
-            <div className="text-xs text-slate-500 font-mono">
-              Total Personil: <strong className="text-slate-800">{trainerCostSummary.trainerCount || 4}</strong> | Total Beban:{' '}
-              <strong className="text-purple-700 font-bold">{formatRupiah(trainerCostSummary.totalTrainerCost || 0)}</strong>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="text-xs text-slate-500 font-mono">
+                Total Personil: <strong className="text-slate-800">{trainerCostSummary.trainerCount || 4}</strong> | Total Beban:{' '}
+                <strong className="text-purple-700 font-bold">{formatRupiah(trainerCostSummary.totalTrainerCost || 0)}</strong>
+              </div>
+              {filteredTrainerList.length > 0 && (
+                <button
+                  onClick={handleDownloadTrainerSlipsPdf}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-bold rounded-lg bg-rose-600 hover:bg-rose-500 text-white shadow-2xs cursor-pointer"
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  <span>PDF Semua Trainer</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -2209,13 +2448,33 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                         {formatRupiah(item.totalSalary)}
                       </td>
                       <td className="py-3 px-3 text-center">
-                        <button
-                          onClick={() => handleOpenEditTrainer(item)}
-                          className="p-1.5 rounded-lg border border-purple-200 text-purple-600 hover:bg-purple-50 transition-colors shadow-2xs cursor-pointer"
-                          title="Edit Target, Realisasi & Poin KPI Trainer"
-                        >
-                          <Edit3 className="w-3.5 h-3.5" />
-                        </button>
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            onClick={() => handleOpenEditTrainer(item)}
+                            className="p-1.5 rounded-lg border border-purple-200 text-purple-600 hover:bg-purple-50 transition-colors shadow-2xs cursor-pointer"
+                            title="Edit Target, Realisasi & Poin KPI Trainer"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleOpenTrainerSlip(item, idx)}
+                            className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border text-[11px] font-bold transition-colors shadow-2xs cursor-pointer ${
+                              slipOverridesMap[
+                                makeSlipKey(
+                                  'trainer',
+                                  item.trainerName,
+                                  item.monthPeriod || trainerMonthPeriod || slipPeriodLabel
+                                )
+                              ]
+                                ? 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                                : 'border-rose-200 bg-rose-50/70 text-rose-700 hover:bg-rose-100'
+                            }`}
+                            title="Preview, Edit & Download Slip Gaji PDF"
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                            <span>Slip</span>
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -2916,6 +3175,18 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
           </div>
         </div>
       )}
+
+      {/* MODAL PREVIEW, EDIT & DOWNLOAD PDF SLIP GAJI (KOP PT JALUR MANDIRI UTAMA) */}
+      <SalarySlipModal
+        isOpen={slipModalOpen}
+        initialTab={slipModalInitialTab}
+        initialSlip={activeSlipData}
+        defaultSlip={activeDefaultSlipData}
+        companyHeader={companyHeader}
+        onCompanyHeaderSaved={(updated) => setCompanyHeader(updated)}
+        onSlipSaved={refreshSlipOverrides}
+        onClose={() => setSlipModalOpen(false)}
+      />
     </div>
   );
 };

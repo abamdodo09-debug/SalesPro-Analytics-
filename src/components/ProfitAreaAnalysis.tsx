@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   TrendingUp,
   DollarSign,
@@ -36,6 +36,18 @@ import { formatRupiah, formatPercent } from '../utils/analytics';
 import { calculateProfitArea } from '../utils/profitCalculations';
 import * as XLSX from 'xlsx';
 import { loadSpvConsolidatedConfig } from '../services/spvSellInSellOutService';
+import {
+  loadSalesTargets,
+  loadBaNonLavojoyTargets,
+  loadBaLavojoyTargets,
+  loadBaFocusTargets,
+  loadTrainerConfigs,
+  loadTrainerTargets,
+  DEFAULT_SALES_TARGET,
+  DEFAULT_BA_NON_LAVOJOY_TARGET,
+  DEFAULT_BA_LAVOJOY_TARGET,
+  TARGETS_UPDATED_EVENT,
+} from '../services/targetManagementService';
 
 export interface MonthlyPnlCustomOverride {
   sellIn?: number;
@@ -85,14 +97,41 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
   const [simMarginPct, setSimMarginPct] = useState<number>(55);
   const [simOpsCostPct, setSimOpsCostPct] = useState<number>(33);
 
-  // Calculate Profit Area Summary
+  // Sync version when targets updated across app
+  const [targetSyncVersion, setTargetSyncVersion] = useState<number>(0);
+
+  useEffect(() => {
+    const onTargetsUpdated = () => setTargetSyncVersion((v) => v + 1);
+    window.addEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
+    window.addEventListener('storage', onTargetsUpdated);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
+      window.removeEventListener('storage', onTargetsUpdated);
+    };
+  }, []);
+
+  // Calculate Profit Area Summary using synchronized targets for active month
   const profitSummary = useMemo(() => {
+    const activeM = filters.BULAN;
     return calculateProfitArea(
       records,
       marginPercent / 100,
-      operatingCostPercent / 100
+      operatingCostPercent / 100,
+      loadSalesTargets(activeM),
+      loadBaNonLavojoyTargets(activeM),
+      loadBaLavojoyTargets(activeM),
+      undefined,
+      undefined,
+      DEFAULT_SALES_TARGET,
+      DEFAULT_BA_NON_LAVOJOY_TARGET,
+      DEFAULT_BA_LAVOJOY_TARGET,
+      undefined,
+      loadTrainerConfigs(),
+      loadTrainerTargets(activeM),
+      activeM && activeM !== 'ALL' ? `${activeM.toUpperCase()} 2026` : 'OKTOBER 2026',
+      loadBaFocusTargets(activeM)
     );
-  }, [records, marginPercent, operatingCostPercent]);
+  }, [records, marginPercent, operatingCostPercent, filters.BULAN, targetSyncVersion]);
 
   // Selected Month for 12-Month Graphic Inspection
   const [selectedPnlMonth, setSelectedPnlMonth] = useState<string>(() => {
@@ -141,6 +180,7 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
     ];
 
     const allRecs = allRecords && allRecords.length > 0 ? allRecords : records;
+    const trainerConfigs = loadTrainerConfigs();
 
     const data = months.map((m) => {
       const monthRecs = allRecs.filter(
@@ -155,7 +195,20 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
         mSummary = calculateProfitArea(
           monthRecs,
           marginPercent / 100,
-          operatingCostPercent / 100
+          operatingCostPercent / 100,
+          loadSalesTargets(m.key),
+          loadBaNonLavojoyTargets(m.key),
+          loadBaLavojoyTargets(m.key),
+          undefined,
+          undefined,
+          DEFAULT_SALES_TARGET,
+          DEFAULT_BA_NON_LAVOJOY_TARGET,
+          DEFAULT_BA_LAVOJOY_TARGET,
+          undefined,
+          trainerConfigs,
+          loadTrainerTargets(m.key),
+          `${m.key} 2026`,
+          loadBaFocusTargets(m.key)
         );
       }
 
@@ -259,7 +312,7 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
       avgMonthlySalary,
       avgNetMarginPct,
     };
-  }, [records, allRecords, marginPercent, operatingCostPercent, monthlyPnlOverrides]);
+  }, [records, allRecords, marginPercent, operatingCostPercent, monthlyPnlOverrides, targetSyncVersion]);
 
   // Handlers for Editing Monthly P&L
   const openEditPnlModal = (monthKey: string) => {

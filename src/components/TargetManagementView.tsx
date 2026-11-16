@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Target,
   MapPin,
@@ -14,14 +14,13 @@ import {
   RotateCcw,
   Download,
   Search,
-  ArrowUpDown,
   Calculator,
   Sparkles,
   TrendingUp,
   X,
   Plus,
-  HelpCircle,
   Save,
+  Copy,
 } from 'lucide-react';
 import {
   TransactionRecord,
@@ -37,61 +36,90 @@ import {
   saveAreaTargets,
   saveSpvTargets,
   saveSalesTargets,
+  saveSalesSellOutTargets,
   saveBaNonLavojoyTargets,
   saveBaLavojoyTargets,
+  saveBaFocusTargets,
   saveTrainerTargets,
-  loadAreaTargets,
-  loadSpvTargets,
-  loadSalesTargets,
-  loadBaNonLavojoyTargets,
-  loadBaLavojoyTargets,
   loadTrainerTargets,
+  setSingleTargetOverride,
+  setSingleTrainerTargetOverride,
+  copyMonthTargets,
+  resetMonthTargets,
+  getMonthCustomizationSummary,
+  getMonthDisplayLabel,
+  normalizeMonthKey,
+  MONTH_OPTIONS_2026,
+  TARGETS_UPDATED_EVENT,
   DEFAULT_AREA_TARGET,
   DEFAULT_SPV_TARGET,
   DEFAULT_SALES_TARGET,
+  DEFAULT_SALES_SELLOUT_TARGET,
   DEFAULT_BA_NON_LAVOJOY_TARGET,
   DEFAULT_BA_LAVOJOY_TARGET,
   DEFAULT_TRAINER_SELL_OUT_TARGET,
   DEFAULT_TRAINER_FOCUS_TARGET_PCS,
   loadTrainerConfigs,
   saveTrainerConfigs,
+  loadCustomBaProfiles,
+  saveCustomBaProfiles,
   TrainerTargetConfig,
 } from '../services/targetManagementService';
 import {
-  loadFocusOverrides,
-  saveFocusOverrides,
   DEFAULT_FOCUS_TARGET_PCS,
 } from '../services/focusProductService';
-import { formatRupiah, formatNumber, formatPercent } from '../utils/analytics';
+import { formatRupiah } from '../utils/analytics';
 import * as XLSX from 'xlsx';
 
 interface TargetManagementViewProps {
   records: TransactionRecord[];
+  allRecords?: TransactionRecord[];
   filters: DashboardFilters;
   onTargetUpdated?: () => void;
 }
 
 export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
   records,
+  allRecords,
   filters,
   onTargetUpdated,
 }) => {
+  const sourceRecords = useMemo(() => {
+    return allRecords && allRecords.length > 0 ? allRecords : records;
+  }, [allRecords, records]);
+
   // Active sub-tab: area | spv | sales | ba | trainer
   const [subTab, setSubTab] = useState<'area' | 'spv' | 'sales' | 'ba' | 'trainer'>('sales');
 
-  // Selected Target Month (Setiap bulan memiliki target tersendiri untuk sales, ba, dan trainer)
-  const [selectedMonth, setSelectedMonth] = useState<string>('2026-10');
+  // Selected Target Month (Setiap bulan Januari-Desember memiliki target tersendiri untuk seluruh menu)
+  const [selectedMonth, setSelectedMonth] = useState<string>(() => {
+    if (filters.BULAN && filters.BULAN !== 'ALL') {
+      const norm = normalizeMonthKey(filters.BULAN);
+      if (norm !== 'ALL') return norm;
+    }
+    return '2026-10';
+  });
 
-  // Trigger re-render when local storage updates
+  // Sync if top FilterBar month changes explicitly
+  useEffect(() => {
+    if (filters.BULAN && filters.BULAN !== 'ALL') {
+      const norm = normalizeMonthKey(filters.BULAN);
+      if (norm !== 'ALL') setSelectedMonth(norm);
+    }
+  }, [filters.BULAN]);
+
+  // Trigger re-render when local storage updates (from here or any other menu)
   const [refreshKey, setRefreshKey] = useState<number>(0);
+
+  useEffect(() => {
+    const handler = () => setRefreshKey((k) => k + 1);
+    window.addEventListener(TARGETS_UPDATED_EVENT, handler);
+    return () => window.removeEventListener(TARGETS_UPDATED_EVENT, handler);
+  }, []);
 
   // Search & Status filters
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'achieved' | 'on_track' | 'lagging'>('all');
-
-  // Sorting
-  const [sortField, setSortField] = useState<'name' | 'target' | 'actual' | 'pct' | 'gap'>('actual');
-  const [sortAsc, setSortAsc] = useState(false);
 
   // Toast
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'info' | 'error' } | null>(null);
@@ -110,9 +138,10 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
   const [editingSpv, setEditingSpv] = useState<SpvTargetItem | null>(null);
   const [spvTargetInput, setSpvTargetInput] = useState<number>(DEFAULT_SPV_TARGET);
 
-  // 3. Edit Sales Modal
+  // 3. Edit Sales Modal (Sell In & Sell Out per bulan)
   const [editingSales, setEditingSales] = useState<SalesTargetItem | null>(null);
   const [salesTargetInput, setSalesTargetInput] = useState<number>(DEFAULT_SALES_TARGET);
+  const [salesSellOutInput, setSalesSellOutInput] = useState<number>(DEFAULT_SALES_SELLOUT_TARGET);
 
   // 4. Edit BA Modal
   const [editingBa, setEditingBa] = useState<BaTargetItem | null>(null);
@@ -153,82 +182,108 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
   const [newTrainerNotes, setNewTrainerNotes] = useState('');
 
   // KET Filter (Semua, SELL IN, SELL OUT)
-  const [ketFilter, setKetFilter] = useState<'ALL' | 'SELL IN' | 'SELL OUT'>('ALL');
+  const [ketFilter, setKetFilter] = useState<'ALL' | 'SELL IN' | 'SELL OUT'>(() => {
+    if (filters.KET === 'SELL IN' || filters.KET === 'SELL OUT') return filters.KET;
+    return 'ALL';
+  });
 
   // 6. Batch Target Modal
   const [isBatchOpen, setIsBatchOpen] = useState(false);
   const [batchTargetType, setBatchTargetType] = useState<
-    'area' | 'spv' | 'sales' | 'ba_non' | 'ba_lav' | 'ba_focus' | 'trainer_so' | 'trainer_focus'
+    'area' | 'spv' | 'sales' | 'sales_out' | 'ba_non' | 'ba_lav' | 'ba_focus' | 'trainer_so' | 'trainer_focus'
   >('sales');
   const [batchTargetValue, setBatchTargetValue] = useState<number>(150000000);
 
-  // Aggregate target matrix data respecting selectedMonth
-  const matrixData = useMemo(() => {
-    return aggregateTargetMatrix(records, selectedMonth);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [records, selectedMonth, refreshKey]);
+  // 7. Copy Month Targets Modal
+  const [isCopyMonthOpen, setIsCopyMonthOpen] = useState(false);
+  const [copySourceMonth, setCopySourceMonth] = useState<string>('2026-10');
+  const [copyDestMonths, setCopyDestMonths] = useState<string[]>([]);
 
-  // Handlers for Saving Single Targets
+  // 8. Reset Confirm Modal
+  const [isResetModalOpen, setIsResetModalOpen] = useState(false);
+
+  // Aggregate target matrix data respecting selectedMonth (using full sourceRecords)
+  const matrixData = useMemo(() => {
+    return aggregateTargetMatrix(sourceRecords, selectedMonth);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceRecords, selectedMonth, refreshKey]);
+
+  const monthCustomCounts = useMemo(() => {
+    return getMonthCustomizationSummary();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
+
+  const activeMonthLabel = useMemo(() => getMonthDisplayLabel(selectedMonth), [selectedMonth]);
+
+  // Handlers for Saving Single Targets (All scoped per selectedMonth!)
   const handleSaveAreaTarget = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingArea) return;
-    const current = loadAreaTargets();
-    current[editingArea.coverArea] = areaTargetInput;
-    saveAreaTargets(current);
+    setSingleTargetOverride('area', editingArea.coverArea, areaTargetInput, selectedMonth);
     setEditingArea(null);
     setRefreshKey((k) => k + 1);
     if (onTargetUpdated) onTargetUpdated();
-    showNotification(`Target Area "${editingArea.coverArea}" berhasil diupdate: ${formatRupiah(areaTargetInput)}`);
+    showNotification(
+      `Target Area "${editingArea.coverArea}" (${activeMonthLabel}) disimpan: ${formatRupiah(areaTargetInput)}`
+    );
   };
 
   const handleSaveSpvTarget = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSpv) return;
-    const current = loadSpvTargets();
-    current[editingSpv.spvName] = spvTargetInput;
-    saveSpvTargets(current);
+    setSingleTargetOverride('spv', editingSpv.spvName, spvTargetInput, selectedMonth);
     setEditingSpv(null);
     setRefreshKey((k) => k + 1);
     if (onTargetUpdated) onTargetUpdated();
-    showNotification(`Target SPV "${editingSpv.spvName}" berhasil diupdate: ${formatRupiah(spvTargetInput)}`);
+    showNotification(
+      `Target SPV "${editingSpv.spvName}" (${activeMonthLabel}) disimpan: ${formatRupiah(spvTargetInput)}`
+    );
   };
 
   const handleSaveSalesTarget = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSales) return;
-    const current = loadSalesTargets(selectedMonth);
-    current[editingSales.salesName] = salesTargetInput;
-    saveSalesTargets(current, selectedMonth);
+    setSingleTargetOverride('sales', editingSales.salesName, salesTargetInput, selectedMonth);
+    setSingleTargetOverride('salesSellOut', editingSales.salesName, salesSellOutInput, selectedMonth);
     setEditingSales(null);
     setRefreshKey((k) => k + 1);
     if (onTargetUpdated) onTargetUpdated();
-    showNotification(`Target Sell In Sales "${editingSales.salesName}" (${selectedMonth}) berhasil diupdate: ${formatRupiah(salesTargetInput)}`);
+    showNotification(
+      `Target Sales "${editingSales.salesName}" (${activeMonthLabel}) disimpan — Sell In: ${formatRupiah(salesTargetInput)}, Sell Out: ${formatRupiah(salesSellOutInput)}`
+    );
   };
 
   const handleSaveBaTarget = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingBa) return;
-    const currentNon = loadBaNonLavojoyTargets(selectedMonth);
-    const currentLav = loadBaLavojoyTargets(selectedMonth);
-    const currentFocus = loadFocusOverrides();
 
-    const targetStoreKey = baStoreNameInput.trim() || editingBa.storeName;
-    currentNon[targetStoreKey] = baNonLavojoyInput;
-    currentLav[targetStoreKey] = baLavojoyInput;
+    const targetStoreKey = baStoreNameInput.trim().toUpperCase() || editingBa.storeName;
+    const updatedBaName = baNameInput.trim().toUpperCase() || editingBa.baName;
+    const updatedSalesName = baSalesNameInput.trim().toUpperCase() || editingBa.salesName;
 
-    if (!currentFocus[targetStoreKey]) {
-      currentFocus[targetStoreKey] = { storeName: targetStoreKey };
-    }
-    currentFocus[targetStoreKey].targetPcs = baFocusInput;
+    // Persist profile changes (BA Name, Store Name, Sales)
+    const profiles = loadCustomBaProfiles();
+    profiles[targetStoreKey] = {
+      originalStoreName: editingBa.storeName !== targetStoreKey ? editingBa.storeName : profiles[editingBa.storeName]?.originalStoreName,
+      storeName: targetStoreKey,
+      baName: updatedBaName,
+      baNumber: editingBa.baNumber,
+      coverArea: editingBa.coverArea,
+      region: editingBa.region,
+      salesName: updatedSalesName,
+      spv: editingBa.spv,
+    };
+    saveCustomBaProfiles(profiles);
 
-    saveBaNonLavojoyTargets(currentNon, selectedMonth);
-    saveBaLavojoyTargets(currentLav, selectedMonth);
-    saveFocusOverrides(currentFocus);
+    // Save month-specific BA targets
+    setSingleTargetOverride('baNonLavojoy', targetStoreKey, baNonLavojoyInput, selectedMonth);
+    setSingleTargetOverride('baLavojoy', targetStoreKey, baLavojoyInput, selectedMonth);
+    setSingleTargetOverride('baFocus', targetStoreKey, baFocusInput, selectedMonth);
 
     setEditingBa(null);
     setRefreshKey((k) => k + 1);
     if (onTargetUpdated) onTargetUpdated();
-    showNotification(`Target & Data Toko/BA "${targetStoreKey}" (${selectedMonth}) berhasil diperbarui!`);
+    showNotification(`Target & Data Toko/BA "${targetStoreKey}" (${activeMonthLabel}) berhasil diperbarui!`);
   };
 
   const handleAddNewStoreBa = (e: React.FormEvent) => {
@@ -236,21 +291,24 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     if (!newBaStoreName.trim()) return;
     const storeName = newBaStoreName.trim().toUpperCase();
     const baName = newBaName.trim().toUpperCase() || 'BA BARU';
+    const areaName = newBaArea.trim().toUpperCase() || 'PEKANBARU';
+    const salesName = newBaSales.trim().toUpperCase() || 'ILHAMSYAH';
 
-    const currentNon = loadBaNonLavojoyTargets(selectedMonth);
-    const currentLav = loadBaLavojoyTargets(selectedMonth);
-    const currentFocus = loadFocusOverrides();
-
-    currentNon[storeName] = newBaNonLavojoyTarget;
-    currentLav[storeName] = newBaLavojoyTarget;
-    currentFocus[storeName] = {
+    const profiles = loadCustomBaProfiles();
+    profiles[storeName] = {
       storeName,
-      targetPcs: newBaFocusTarget,
+      baName,
+      baNumber: newBaNumber.trim().toUpperCase() || 'BA-NEW',
+      coverArea: areaName,
+      region: areaName,
+      salesName,
+      spv: 'WIDODO',
     };
+    saveCustomBaProfiles(profiles);
 
-    saveBaNonLavojoyTargets(currentNon, selectedMonth);
-    saveBaLavojoyTargets(currentLav, selectedMonth);
-    saveFocusOverrides(currentFocus);
+    setSingleTargetOverride('baNonLavojoy', storeName, newBaNonLavojoyTarget, selectedMonth);
+    setSingleTargetOverride('baLavojoy', storeName, newBaLavojoyTarget, selectedMonth);
+    setSingleTargetOverride('baFocus', storeName, newBaFocusTarget, selectedMonth);
 
     setIsAddBaOpen(false);
     setNewBaStoreName('');
@@ -258,7 +316,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     setNewBaNumber('');
     setRefreshKey((k) => k + 1);
     if (onTargetUpdated) onTargetUpdated();
-    showNotification(`Toko & BA baru "${storeName}" (${baName}) berhasil ditambahkan ke daftar target!`);
+    showNotification(`Toko & BA baru "${storeName}" (${baName}) ditambahkan ke periode ${activeMonthLabel}!`);
   };
 
   // 5. Handler for Saving Trainer Target & Profile
@@ -266,7 +324,6 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     e.preventDefault();
     if (!editingTrainer) return;
 
-    // Update trainer config (name, area, region)
     const allTrainers = loadTrainerConfigs();
     const updatedTrainers = allTrainers.map((t) => {
       if (t.id === editingTrainer.id) {
@@ -282,19 +339,21 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     });
     saveTrainerConfigs(updatedTrainers);
 
-    const current = loadTrainerTargets(selectedMonth);
-    current[editingTrainer.id] = {
-      targetSellOut: trainerSellOutInput,
-      targetProdukFokusPcs: trainerFocusInput,
-      notes: trainerNotesInput,
-    };
-    saveTrainerTargets(current, selectedMonth);
+    setSingleTrainerTargetOverride(
+      editingTrainer.id,
+      {
+        targetSellOut: trainerSellOutInput,
+        targetProdukFokusPcs: trainerFocusInput,
+        notes: trainerNotesInput,
+      },
+      selectedMonth
+    );
 
     setEditingTrainer(null);
     setRefreshKey((k) => k + 1);
     if (onTargetUpdated) onTargetUpdated();
     showNotification(
-      `Target & Profil Trainer "${trainerNameInput || editingTrainer.trainerName}" (${selectedMonth}) berhasil disimpan: SO ${formatRupiah(trainerSellOutInput)} & Fokus ${trainerFocusInput} pcs`
+      `Target Trainer "${trainerNameInput || editingTrainer.trainerName}" (${activeMonthLabel}) disimpan: SO ${formatRupiah(trainerSellOutInput)} & Fokus ${trainerFocusInput} pcs`
     );
   };
 
@@ -316,14 +375,15 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     allTrainers.push(newConfig);
     saveTrainerConfigs(allTrainers);
 
-    // Save target for selected month
-    const currentTargets = loadTrainerTargets(selectedMonth);
-    currentTargets[newId] = {
-      targetSellOut: newTrainerSellOut,
-      targetProdukFokusPcs: newTrainerFocus,
-      notes: newTrainerNotes.trim(),
-    };
-    saveTrainerTargets(currentTargets, selectedMonth);
+    setSingleTrainerTargetOverride(
+      newId,
+      {
+        targetSellOut: newTrainerSellOut,
+        targetProdukFokusPcs: newTrainerFocus,
+        notes: newTrainerNotes.trim(),
+      },
+      selectedMonth
+    );
 
     setIsAddTrainerOpen(false);
     setNewTrainerName('');
@@ -331,10 +391,10 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     setNewTrainerNotes('');
     setRefreshKey((k) => k + 1);
     if (onTargetUpdated) onTargetUpdated();
-    showNotification(`Trainer baru "${newConfig.trainerName}" berhasil ditambahkan!`);
+    showNotification(`Trainer baru "${newConfig.trainerName}" berhasil ditambahkan untuk ${activeMonthLabel}!`);
   };
 
-  // Handler for Batch Target Setting
+  // Handler for Batch Target Setting (per selectedMonth!)
   const handleApplyBatchTarget = (e: React.FormEvent) => {
     e.preventDefault();
     if (batchTargetType === 'area') {
@@ -342,44 +402,50 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
       matrixData.areas.forEach((a) => {
         current[a.coverArea] = batchTargetValue;
       });
-      saveAreaTargets(current);
-      showNotification(`Target serentak ${formatRupiah(batchTargetValue)} diterapkan ke ${matrixData.areas.length} Area!`);
+      saveAreaTargets(current, selectedMonth);
+      showNotification(`Target serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.areas.length} Area!`);
     } else if (batchTargetType === 'spv') {
       const current: Record<string, number> = {};
       matrixData.spvs.forEach((s) => {
         current[s.spvName] = batchTargetValue;
       });
-      saveSpvTargets(current);
-      showNotification(`Target serentak ${formatRupiah(batchTargetValue)} diterapkan ke ${matrixData.spvs.length} SPV!`);
+      saveSpvTargets(current, selectedMonth);
+      showNotification(`Target serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.spvs.length} SPV!`);
     } else if (batchTargetType === 'sales') {
       const current: Record<string, number> = {};
       matrixData.sales.forEach((sl) => {
         current[sl.salesName] = batchTargetValue;
       });
       saveSalesTargets(current, selectedMonth);
-      showNotification(`Target serentak ${formatRupiah(batchTargetValue)} (${selectedMonth}) diterapkan ke ${matrixData.sales.length} Sales!`);
+      showNotification(`Target Sell In serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.sales.length} Sales!`);
+    } else if (batchTargetType === 'sales_out') {
+      const current: Record<string, number> = {};
+      matrixData.sales.forEach((sl) => {
+        current[sl.salesName] = batchTargetValue;
+      });
+      saveSalesSellOutTargets(current, selectedMonth);
+      showNotification(`Target Sell Out serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.sales.length} Sales!`);
     } else if (batchTargetType === 'ba_non') {
       const current: Record<string, number> = {};
       matrixData.bas.forEach((b) => {
         current[b.storeName] = batchTargetValue;
       });
       saveBaNonLavojoyTargets(current, selectedMonth);
-      showNotification(`Target Non-Lavojoy serentak ${formatRupiah(batchTargetValue)} (${selectedMonth}) diterapkan ke ${matrixData.bas.length} Toko BA!`);
+      showNotification(`Target Non-Lavojoy serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.bas.length} Toko BA!`);
     } else if (batchTargetType === 'ba_lav') {
       const current: Record<string, number> = {};
       matrixData.bas.forEach((b) => {
         current[b.storeName] = batchTargetValue;
       });
       saveBaLavojoyTargets(current, selectedMonth);
-      showNotification(`Target Lavojoy serentak ${formatRupiah(batchTargetValue)} (${selectedMonth}) diterapkan ke ${matrixData.bas.length} Toko BA!`);
+      showNotification(`Target Lavojoy serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.bas.length} Toko BA!`);
     } else if (batchTargetType === 'ba_focus') {
-      const current = loadFocusOverrides();
+      const current: Record<string, number> = {};
       matrixData.bas.forEach((b) => {
-        if (!current[b.storeName]) current[b.storeName] = { storeName: b.storeName };
-        current[b.storeName].targetPcs = batchTargetValue;
+        current[b.storeName] = batchTargetValue;
       });
-      saveFocusOverrides(current);
-      showNotification(`Target Produk Fokus serentak ${batchTargetValue} pcs diterapkan ke seluruh BA!`);
+      saveBaFocusTargets(current, selectedMonth);
+      showNotification(`Target Produk Fokus serentak ${batchTargetValue} pcs (${activeMonthLabel}) diterapkan ke seluruh BA!`);
     } else if (batchTargetType === 'trainer_so') {
       const current = loadTrainerTargets(selectedMonth);
       matrixData.trainers.forEach((t) => {
@@ -387,7 +453,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
         current[t.id].targetSellOut = batchTargetValue;
       });
       saveTrainerTargets(current, selectedMonth);
-      showNotification(`Target Trainer Sell Out serentak ${formatRupiah(batchTargetValue)} (${selectedMonth}) diterapkan ke seluruh Trainer!`);
+      showNotification(`Target Trainer Sell Out serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke seluruh Trainer!`);
     } else if (batchTargetType === 'trainer_focus') {
       const current = loadTrainerTargets(selectedMonth);
       matrixData.trainers.forEach((t) => {
@@ -395,7 +461,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
         current[t.id].targetProdukFokusPcs = batchTargetValue;
       });
       saveTrainerTargets(current, selectedMonth);
-      showNotification(`Target Trainer Produk Fokus serentak ${batchTargetValue} pcs (${selectedMonth}) diterapkan ke seluruh Trainer!`);
+      showNotification(`Target Trainer Produk Fokus serentak ${batchTargetValue} pcs (${activeMonthLabel}) diterapkan ke seluruh Trainer!`);
     }
 
     setIsBatchOpen(false);
@@ -403,19 +469,18 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     if (onTargetUpdated) onTargetUpdated();
   };
 
-  // Auto-Sum from Team
+  // Auto-Sum from Team (per selectedMonth!)
   const handleAutoSumSpvFromSales = (spvItem: SpvTargetItem) => {
-    // Sum target of all sales belonging to this SPV
     const teamSales = matrixData.sales.filter((s) => s.spv === spvItem.spvName);
     const sumTarget = teamSales.reduce((acc, s) => acc + s.targetSellIn, 0);
     const targetToSet = sumTarget > 0 ? sumTarget : DEFAULT_SPV_TARGET;
 
-    const current = loadSpvTargets();
-    current[spvItem.spvName] = targetToSet;
-    saveSpvTargets(current);
+    setSingleTargetOverride('spv', spvItem.spvName, targetToSet, selectedMonth);
     setRefreshKey((k) => k + 1);
     if (onTargetUpdated) onTargetUpdated();
-    showNotification(`Target SPV "${spvItem.spvName}" dihitung otomatis dari total target tim (${teamSales.length} sales): ${formatRupiah(targetToSet)}`);
+    showNotification(
+      `Target SPV "${spvItem.spvName}" (${activeMonthLabel}) dihitung otomatis dari ${teamSales.length} sales: ${formatRupiah(targetToSet)}`
+    );
   };
 
   const handleAutoSumAreaFromSales = (areaItem: AreaTargetItem) => {
@@ -423,29 +488,42 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     const sumTarget = areaSales.reduce((acc, s) => acc + s.targetSellIn, 0);
     const targetToSet = sumTarget > 0 ? sumTarget : DEFAULT_AREA_TARGET;
 
-    const current = loadAreaTargets();
-    current[areaItem.coverArea] = targetToSet;
-    saveAreaTargets(current);
+    setSingleTargetOverride('area', areaItem.coverArea, targetToSet, selectedMonth);
     setRefreshKey((k) => k + 1);
     if (onTargetUpdated) onTargetUpdated();
-    showNotification(`Target Area "${areaItem.coverArea}" dihitung otomatis dari total target tim sales (${areaSales.length} sales): ${formatRupiah(targetToSet)}`);
+    showNotification(
+      `Target Area "${areaItem.coverArea}" (${activeMonthLabel}) dihitung otomatis dari ${areaSales.length} sales: ${formatRupiah(targetToSet)}`
+    );
   };
 
-  // Reset Everything to Default
-  const handleResetAllTargets = () => {
-    if (!window.confirm('Reset semua target (Area, SPV, Sales, BA & Produk Fokus) ke default bawaan sistem?')) {
+  // Copy Targets Across Months
+  const handleApplyCopyMonth = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (copyDestMonths.length === 0) {
+      showNotification('Pilih minimal 1 bulan tujuan salin target.', 'error');
       return;
     }
-    localStorage.removeItem('salespro_custom_area_targets');
-    localStorage.removeItem('salespro_custom_spv_targets');
-    localStorage.removeItem('salespro_custom_sales_targets');
-    localStorage.removeItem('salespro_custom_ba_non_lavojoy_targets');
-    localStorage.removeItem('salespro_custom_ba_lavojoy_targets');
-    localStorage.removeItem('salespro_ba_focus_overrides_v2');
-
+    const count = copyMonthTargets(copySourceMonth, copyDestMonths, sourceRecords);
+    setIsCopyMonthOpen(false);
     setRefreshKey((k) => k + 1);
     if (onTargetUpdated) onTargetUpdated();
-    showNotification('Seluruh target Area, SPV, Sales, dan BA berhasil direset ke default!', 'info');
+    showNotification(
+      `Seluruh target dari ${getMonthDisplayLabel(copySourceMonth)} berhasil disalin ke ${count} bulan tujuan!`
+    );
+  };
+
+  // Execute Reset (Current Month vs All Months)
+  const executeResetTargets = (scope: 'current' | 'all') => {
+    if (scope === 'current') {
+      resetMonthTargets(selectedMonth);
+      showNotification(`Target khusus periode ${activeMonthLabel} dikembalikan ke baseline default.`, 'info');
+    } else {
+      resetMonthTargets('ALL');
+      showNotification('Seluruh target (semua bulan & baseline) berhasil direset ke default sistem.', 'info');
+    }
+    setIsResetModalOpen(false);
+    setRefreshKey((k) => k + 1);
+    if (onTargetUpdated) onTargetUpdated();
   };
 
   // Export Target Matrix to Excel
@@ -667,22 +745,15 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 value={selectedMonth}
                 onChange={(e) => {
                   setSelectedMonth(e.target.value);
-                  showNotification(`Beralih mengelola target periode ${e.target.value}`);
+                  showNotification(`Mengelola target periode ${getMonthDisplayLabel(e.target.value)}`);
                 }}
                 className="bg-transparent font-black text-white focus:outline-hidden cursor-pointer"
               >
-                <option value="2026-10" className="text-slate-900">Oktober 2026 (Aktif)</option>
-                <option value="2026-11" className="text-slate-900">November 2026</option>
-                <option value="2026-12" className="text-slate-900">Desember 2026</option>
-                <option value="2026-09" className="text-slate-900">September 2026</option>
-                <option value="2026-08" className="text-slate-900">Agustus 2026</option>
-                <option value="2026-07" className="text-slate-900">Juli 2026</option>
-                <option value="2026-06" className="text-slate-900">Juni 2026</option>
-                <option value="2026-05" className="text-slate-900">Mei 2026</option>
-                <option value="2026-04" className="text-slate-900">April 2026</option>
-                <option value="2026-03" className="text-slate-900">Maret 2026</option>
-                <option value="2026-02" className="text-slate-900">Februari 2026</option>
-                <option value="2026-01" className="text-slate-900">Januari 2026</option>
+                {MONTH_OPTIONS_2026.map((m) => (
+                  <option key={m.key} value={m.key} className="text-slate-900">
+                    {m.label}{monthCustomCounts[m.key] > 0 ? ` (${monthCustomCounts[m.key]} custom)` : ''}
+                  </option>
+                ))}
                 <option value="ALL" className="text-slate-900">Semua Bulan (Baseline Global)</option>
               </select>
             </div>
@@ -699,39 +770,56 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 }}
                 className="bg-transparent font-black text-white focus:outline-hidden cursor-pointer"
               >
-                <option value="ALL" className="text-slate-900">Semua (Konsolidasi)</option>
+                <option value="ALL" className="text-slate-900">Semua (Sell In &amp; Sell Out)</option>
                 <option value="SELL IN" className="text-slate-900">SELL IN (Target Distributor)</option>
-                <option value="SELL OUT" className="text-slate-900">SELL OUT (Target Kasir BA/Toko)</option>
+                <option value="SELL OUT" className="text-slate-900">SELL OUT (Target Kasir / Tim)</option>
               </select>
             </div>
 
             <button
               onClick={() => {
-                setBatchTargetType(
+                setCopySourceMonth(selectedMonth);
+                setCopyDestMonths([]);
+                setIsCopyMonthOpen(true);
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-xl bg-emerald-600/90 hover:bg-emerald-500 text-white shadow-sm transition-all cursor-pointer whitespace-nowrap shrink-0"
+              title="Salin seluruh target bulan ini ke bulan lainnya"
+            >
+              <Copy className="w-4 h-4" />
+              <span>Salin Target Bulan</span>
+            </button>
+
+            <button
+              onClick={() => {
+                const defaultBatchType =
                   subTab === 'area'
                     ? 'area'
                     : subTab === 'spv'
                     ? 'spv'
                     : subTab === 'sales'
-                    ? 'sales'
+                    ? ketFilter === 'SELL OUT'
+                      ? 'sales_out'
+                      : 'sales'
                     : subTab === 'trainer'
                     ? 'trainer_so'
-                    : 'ba_non'
-                );
+                    : 'ba_non';
+                setBatchTargetType(defaultBatchType);
                 setBatchTargetValue(
                   subTab === 'area'
                     ? DEFAULT_AREA_TARGET
                     : subTab === 'spv'
                     ? DEFAULT_SPV_TARGET
                     : subTab === 'sales'
-                    ? DEFAULT_SALES_TARGET
+                    ? ketFilter === 'SELL OUT'
+                      ? DEFAULT_SALES_SELLOUT_TARGET
+                      : DEFAULT_SALES_TARGET
                     : subTab === 'trainer'
                     ? DEFAULT_TRAINER_SELL_OUT_TARGET
                     : DEFAULT_BA_NON_LAVOJOY_TARGET
                 );
                 setIsBatchOpen(true);
               }}
-              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm shadow-indigo-600/30 transition-all cursor-pointer"
+              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm shadow-indigo-600/30 transition-all cursor-pointer whitespace-nowrap shrink-0"
             >
               <Sliders className="w-4 h-4 text-cyan-300" />
               <span>Atur Target Massal</span>
@@ -739,7 +827,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
 
             <button
               onClick={handleExportExcel}
-              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-xl bg-white/10 hover:bg-white/20 text-white border border-white/20 transition-all cursor-pointer"
+              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-xl bg-white/10 hover:bg-white/20 text-white border border-white/20 transition-all cursor-pointer whitespace-nowrap shrink-0"
               title="Unduh rekapitulasi seluruh target ke Excel"
             >
               <Download className="w-4 h-4 text-emerald-400" />
@@ -747,12 +835,69 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
             </button>
 
             <button
-              onClick={handleResetAllTargets}
-              className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 transition-all cursor-pointer"
-              title="Kembalikan semua target ke nilai default sistem"
+              onClick={() => setIsResetModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 transition-all cursor-pointer whitespace-nowrap shrink-0"
+              title="Kembalikan target ke nilai default sistem"
             >
               <RotateCcw className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Reset Default</span>
+            </button>
+          </div>
+        </div>
+
+        {/* 12-MONTH QUICK SELECTOR STRIP */}
+        <div className="mt-5 pt-4 border-t border-indigo-900/60 relative z-10">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+            <span className="text-[11px] font-bold text-cyan-300">
+              Setting Target Independen per Bulan (Otomatis Sinkron ke Semua Menu)
+            </span>
+            <span className="text-[11px] text-slate-300 font-mono tabular-nums">
+              Periode Aktif: <strong className="text-white">{activeMonthLabel}</strong>
+            </span>
+          </div>
+          <div className="grid grid-cols-4 sm:grid-cols-7 lg:grid-cols-13 gap-1.5">
+            {MONTH_OPTIONS_2026.map((m) => {
+              const count = monthCustomCounts[m.key] || 0;
+              const active = selectedMonth === m.key;
+              return (
+                <button
+                  key={m.key}
+                  type="button"
+                  onClick={() => {
+                    setSelectedMonth(m.key);
+                    showNotification(`Periode target beralih ke ${m.label}`);
+                  }}
+                  className={`px-2 py-2 rounded-xl text-[11px] font-bold transition-all cursor-pointer flex flex-col items-center justify-center border ${
+                    active
+                      ? 'bg-cyan-500 text-slate-950 border-cyan-300 shadow-md shadow-cyan-500/25'
+                      : count > 0
+                      ? 'bg-indigo-500/25 text-white border-indigo-400/50 hover:bg-indigo-500/40'
+                      : 'bg-white/5 text-slate-300 border-white/10 hover:bg-white/10'
+                  }`}
+                >
+                  <span className="whitespace-nowrap">{m.shortLabel}</span>
+                  <span className={`text-[9px] font-mono tabular-nums mt-0.5 ${active ? 'text-slate-900' : count > 0 ? 'text-cyan-300' : 'text-slate-400'}`}>
+                    {count > 0 ? `${count} edit` : 'Default'}
+                  </span>
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedMonth('ALL');
+                showNotification('Periode target beralih ke Baseline Global (Semua Bulan)');
+              }}
+              className={`px-2 py-2 rounded-xl text-[11px] font-bold transition-all cursor-pointer flex flex-col items-center justify-center border ${
+                selectedMonth === 'ALL'
+                  ? 'bg-amber-400 text-slate-950 border-amber-200 shadow-md'
+                  : 'bg-white/5 text-slate-300 border-white/10 hover:bg-white/10'
+              }`}
+            >
+              <span className="whitespace-nowrap">Baseline</span>
+              <span className={`text-[9px] font-mono tabular-nums mt-0.5 ${selectedMonth === 'ALL' ? 'text-slate-900' : 'text-amber-300'}`}>
+                Global
+              </span>
             </button>
           </div>
         </div>
@@ -1250,7 +1395,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
       )}
 
       {/* ========================================================================================= */}
-      {/* SUBTAB 3: TARGET SALES (SELL IN & INSENTIF 4%) */}
+      {/* SUBTAB 3: TARGET SALES (SELL IN & SELL OUT + INSENTIF 4%) */}
       {/* ========================================================================================= */}
       {subTab === 'sales' && (
         <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-6 shadow-xs space-y-4">
@@ -1258,15 +1403,25 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
             <div>
               <h3 className="text-sm sm:text-base font-extrabold text-slate-900 flex items-center gap-2">
                 <Users className="w-4 h-4 text-indigo-600" />
-                Daftar Target Sell In Sales &amp; Skema Insentif 4% (Saat Capai ≥ 100%)
+                Daftar Target Sell In &amp; Sell Out Sales ({activeMonthLabel})
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Target Sell In menentukan pencapaian individu. Sales yang mencapai <strong className="text-emerald-700">≥ 100%</strong> otomatis berhak atas <strong>Insentif 4% × Realisasi Penjualan</strong>!
+                Target Sell In dan Sell Out per bulan otomatis sinkron ke menu <strong>Analisa Sales</strong>, <strong>Cost Area</strong>, <strong>KPI Sales</strong> &amp; <strong>Profit Area</strong>.
               </p>
             </div>
-            <div className="text-xs font-mono text-slate-600">
-              Total Target Sales:{' '}
-              <strong className="text-indigo-700 font-bold">{formatRupiah(matrixData.summary.totalSalesTarget)}</strong>
+            <div className="flex flex-wrap items-center gap-3 text-xs font-mono text-slate-600 tabular-nums">
+              {ketFilter !== 'SELL OUT' && (
+                <span>
+                  Total Target Sell In:{' '}
+                  <strong className="text-indigo-700 font-bold">{formatRupiah(matrixData.summary.totalSalesTarget)}</strong>
+                </span>
+              )}
+              {ketFilter !== 'SELL IN' && (
+                <span>
+                  Total Target Sell Out:{' '}
+                  <strong className="text-teal-700 font-bold">{formatRupiah(matrixData.summary.totalSalesTargetSellOut)}</strong>
+                </span>
+              )}
             </div>
           </div>
 
@@ -1277,12 +1432,22 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                   <th className="py-3 px-3.5">No</th>
                   <th className="py-3 px-3.5">Nama Sales</th>
                   <th className="py-3 px-3.5">Area &amp; SPV</th>
-                  <th className="py-3 px-3.5 text-right font-black text-indigo-950 bg-indigo-50/50">Target Sell In (IDR)</th>
-                  <th className="py-3 px-3.5 text-right">Realisasi Sell In</th>
-                  <th className="py-3 px-3.5 text-center">% Capai</th>
-                  <th className="py-3 px-3.5 text-center">Status</th>
-                  <th className="py-3 px-3.5 text-right text-indigo-900 font-bold">Skema Insentif</th>
-                  <th className="py-3 px-3.5 text-right text-emerald-800 font-black">Estimasi Insentif (IDR)</th>
+                  {ketFilter !== 'SELL OUT' && (
+                    <>
+                      <th className="py-3 px-3.5 text-right font-black text-indigo-950 bg-indigo-50/50">Target Sell In (IDR)</th>
+                      <th className="py-3 px-3.5 text-right">Realisasi Sell In</th>
+                      <th className="py-3 px-3.5 text-center">% Sell In</th>
+                    </>
+                  )}
+                  {ketFilter !== 'SELL IN' && (
+                    <>
+                      <th className="py-3 px-3.5 text-right font-black text-teal-950 bg-teal-50/50">Target Sell Out (IDR)</th>
+                      <th className="py-3 px-3.5 text-right">Realisasi Sell Out</th>
+                      <th className="py-3 px-3.5 text-center">% Sell Out</th>
+                    </>
+                  )}
+                  <th className="py-3 px-3.5 text-center">Status Insentif</th>
+                  <th className="py-3 px-3.5 text-right text-emerald-800 font-black">Estimasi Insentif</th>
                   <th className="py-3 px-3.5 text-center">Toko Ber-BA</th>
                   <th className="py-3 px-3.5 text-center">Aksi</th>
                 </tr>
@@ -1290,7 +1455,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
               <tbody className="divide-y divide-slate-100">
                 {filteredSales.length === 0 ? (
                   <tr>
-                    <td colSpan={11} className="py-8 text-center text-slate-400">
+                    <td colSpan={13} className="py-8 text-center text-slate-400">
                       Tidak ada data sales yang cocok dengan filter.
                     </td>
                   </tr>
@@ -1301,7 +1466,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                       <td className="py-3 px-3.5 font-black text-slate-900">
                         <div className="flex items-center gap-1.5">
                           <span>{item.salesName}</span>
-                          {item.isCustom && (
+                          {(item.isCustom || item.isCustomSellOut) && (
                             <span className="px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 text-[9px] font-bold">
                               Custom
                             </span>
@@ -1311,25 +1476,52 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                       <td className="py-3 px-3.5 text-slate-600">
                         {item.coverArea} ({item.spv})
                       </td>
-                      <td className="py-3 px-3.5 text-right font-mono font-black text-indigo-950 text-sm bg-indigo-50/30">
-                        {formatRupiah(item.targetSellIn)}
-                      </td>
-                      <td className="py-3 px-3.5 text-right font-mono font-bold text-slate-900">
-                        {formatRupiah(item.actualSellIn)}
-                      </td>
-                      <td className="py-3 px-3.5 text-center">
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded font-mono font-bold text-xs ${
-                            item.achievementPct >= 100
-                              ? 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300'
-                              : item.achievementPct >= 80
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-rose-100 text-rose-800'
-                          }`}
-                        >
-                          {item.achievementPct.toFixed(1)}%
-                        </span>
-                      </td>
+                      {ketFilter !== 'SELL OUT' && (
+                        <>
+                          <td className="py-3 px-3.5 text-right font-mono tabular-nums font-black text-indigo-950 text-sm bg-indigo-50/30">
+                            {formatRupiah(item.targetSellIn)}
+                          </td>
+                          <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-slate-900">
+                            {formatRupiah(item.actualSellIn)}
+                          </td>
+                          <td className="py-3 px-3.5 text-center">
+                            <span
+                              className={`inline-block px-2 py-0.5 rounded font-mono tabular-nums font-bold text-xs ${
+                                item.achievementPct >= 100
+                                  ? 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300'
+                                  : item.achievementPct >= 80
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-rose-100 text-rose-800'
+                              }`}
+                            >
+                              {item.achievementPct.toFixed(1)}%
+                            </span>
+                          </td>
+                        </>
+                      )}
+                      {ketFilter !== 'SELL IN' && (
+                        <>
+                          <td className="py-3 px-3.5 text-right font-mono tabular-nums font-black text-teal-950 text-sm bg-teal-50/30">
+                            {formatRupiah(item.targetSellOut ?? DEFAULT_SALES_SELLOUT_TARGET)}
+                          </td>
+                          <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-slate-900">
+                            {formatRupiah(item.actualSellOut ?? 0)}
+                          </td>
+                          <td className="py-3 px-3.5 text-center">
+                            <span
+                              className={`inline-block px-2 py-0.5 rounded font-mono tabular-nums font-bold text-xs ${
+                                (item.achievementSellOutPct ?? 0) >= 100
+                                  ? 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300'
+                                  : (item.achievementSellOutPct ?? 0) >= 80
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-rose-100 text-rose-800'
+                              }`}
+                            >
+                              {(item.achievementSellOutPct ?? 0).toFixed(1)}%
+                            </span>
+                          </td>
+                        </>
+                      )}
                       <td className="py-3 px-3.5 text-center">
                         {item.achievementPct >= 100 ? (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
@@ -1346,17 +1538,14 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                           </span>
                         )}
                       </td>
-                      <td className="py-3 px-3.5 text-right font-mono font-bold text-indigo-700">
-                        {item.incentivePercent}%
-                      </td>
-                      <td className="py-3 px-3.5 text-right font-mono font-black text-emerald-700 text-sm">
+                      <td className="py-3 px-3.5 text-right font-mono tabular-nums font-black text-emerald-700 text-sm">
                         {item.incentiveNominal > 0 ? (
                           <span>+{formatRupiah(item.incentiveNominal)}</span>
                         ) : (
                           <span className="text-slate-400 font-normal">Rp 0</span>
                         )}
                       </td>
-                      <td className="py-3 px-3.5 text-center font-mono text-slate-600">
+                      <td className="py-3 px-3.5 text-center font-mono tabular-nums text-slate-600">
                         {item.coveredBaCount} Gerai
                       </td>
                       <td className="py-3 px-3.5 text-center">
@@ -1364,8 +1553,9 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                           onClick={() => {
                             setEditingSales(item);
                             setSalesTargetInput(item.targetSellIn);
+                            setSalesSellOutInput(item.targetSellOut ?? DEFAULT_SALES_SELLOUT_TARGET);
                           }}
-                          className="px-2.5 py-1 rounded-lg border border-indigo-300 text-indigo-700 hover:bg-indigo-50 transition-colors shadow-2xs cursor-pointer font-bold flex items-center gap-1 mx-auto"
+                          className="px-2.5 py-1 rounded-lg border border-indigo-300 text-indigo-700 hover:bg-indigo-50 transition-colors shadow-2xs cursor-pointer font-bold flex items-center gap-1 mx-auto whitespace-nowrap"
                         >
                           <Edit3 className="w-3 h-3" />
                           <span>Ubah Target</span>
@@ -2183,7 +2373,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
       )}
 
       {/* ========================================================================================= */}
-      {/* MODAL 3: EDIT TARGET SALES */}
+      {/* MODAL 3: EDIT TARGET SALES (SELL IN & SELL OUT PER BULAN) */}
       {/* ========================================================================================= */}
       {editingSales && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-200">
@@ -2192,13 +2382,13 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
               <div>
                 <h3 className="text-base font-extrabold flex items-center gap-2">
                   <Users className="w-4 h-4 text-indigo-300" />
-                  Edit Target Sell In Sales
+                  Edit Target Sales ({activeMonthLabel})
                 </h3>
                 <p className="text-xs text-indigo-200 mt-0.5">{editingSales.salesName} • {editingSales.coverArea}</p>
               </div>
               <button
                 onClick={() => setEditingSales(null)}
-                className="p-1 rounded-lg hover:bg-white/10 text-white/80 hover:text-white"
+                className="p-1 rounded-lg hover:bg-white/10 text-white/80 hover:text-white cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -2220,6 +2410,21 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 </span>
               </div>
 
+              <div>
+                <label className="block text-teal-900 font-bold mb-1">Target Sell Out Sales (Rp)</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={salesSellOutInput}
+                  onChange={(e) => setSalesSellOutInput(Math.max(1, Number(e.target.value)))}
+                  className="w-full px-3 py-2 text-sm font-mono font-bold rounded-xl border border-teal-300 focus:outline-hidden focus:ring-2 focus:ring-teal-500"
+                  required
+                />
+                <span className="text-[11px] text-slate-500 font-mono mt-1 block">
+                  Terbilang: {formatRupiah(salesSellOutInput)} (Sinkron ke Analisa Sales &amp; KPI)
+                </span>
+              </div>
+
               {/* Simulation card of 4% incentive */}
               {(() => {
                 const projPct = (editingSales.actualSellIn / (salesTargetInput || 1)) * 100;
@@ -2229,7 +2434,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 return (
                   <div className="p-3.5 bg-gradient-to-br from-indigo-50 to-white rounded-xl border border-indigo-200 space-y-2 text-slate-700">
                     <div className="flex justify-between items-center">
-                      <span className="font-bold text-indigo-900">Proyeksi Capai:</span>
+                      <span className="font-bold text-indigo-900">Proyeksi Capai Sell In:</span>
                       <span className="font-mono font-black text-sm text-indigo-950">
                         {projPct.toFixed(1)}% ({projPct >= 100 ? 'Memenuhi 4%' : projPct >= 80 ? '0,2%' : '0%'})
                       </span>
@@ -2252,13 +2457,13 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 <button
                   type="button"
                   onClick={() => setEditingSales(null)}
-                  className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 font-bold"
+                  className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 font-bold cursor-pointer"
                 >
                   Batal
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold shadow-md shadow-indigo-600/30 flex items-center gap-1.5"
+                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold shadow-md shadow-indigo-600/30 flex items-center gap-1.5 cursor-pointer"
                 >
                   <Save className="w-4 h-4" />
                   <span>Simpan Target Sales</span>
@@ -2549,13 +2754,13 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
               <div>
                 <h3 className="text-base font-extrabold flex items-center gap-2">
                   <Sliders className="w-4 h-4 text-cyan-400" />
-                  Atur Target Serentak (Batch Update)
+                  Atur Target Serentak ({activeMonthLabel})
                 </h3>
-                <p className="text-xs text-slate-300 mt-0.5">Terapkan nominal target seragam ke seluruh personil/wilayah</p>
+                <p className="text-xs text-slate-300 mt-0.5">Terapkan nominal target seragam ke seluruh personil/wilayah di periode ini</p>
               </div>
               <button
                 onClick={() => setIsBatchOpen(false)}
-                className="p-1 rounded-lg hover:bg-white/10 text-white/80 hover:text-white"
+                className="p-1 rounded-lg hover:bg-white/10 text-white/80 hover:text-white cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -2572,6 +2777,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                     if (val === 'area') setBatchTargetValue(DEFAULT_AREA_TARGET);
                     if (val === 'spv') setBatchTargetValue(DEFAULT_SPV_TARGET);
                     if (val === 'sales') setBatchTargetValue(DEFAULT_SALES_TARGET);
+                    if (val === 'sales_out') setBatchTargetValue(DEFAULT_SALES_SELLOUT_TARGET);
                     if (val === 'ba_non') setBatchTargetValue(DEFAULT_BA_NON_LAVOJOY_TARGET);
                     if (val === 'ba_lav') setBatchTargetValue(DEFAULT_BA_LAVOJOY_TARGET);
                     if (val === 'ba_focus') setBatchTargetValue(DEFAULT_FOCUS_TARGET_PCS);
@@ -2581,6 +2787,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                   className="w-full px-3 py-2 text-xs font-bold rounded-xl border border-slate-300 bg-white"
                 >
                   <option value="sales">Target Sell In Sales (Rp)</option>
+                  <option value="sales_out">Target Sell Out Sales (Rp)</option>
                   <option value="area">Target Omzet Area (Rp)</option>
                   <option value="spv">Target Tim SPV (Rp)</option>
                   <option value="ba_non">Target BA Non-Lavojoy (Rp)</option>
@@ -2611,27 +2818,192 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
               </div>
 
               <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-amber-900 text-[11px] leading-relaxed">
-                <strong>Perhatian:</strong> Target serentak ini akan diterapkan langsung ke seluruh baris terpilih dan
-                otomatis disimpan di LocalStorage serta memengaruhi modul Cost Area, KPI, dan P&amp;L.
+                <strong>Perhatian:</strong> Target serentak ini diterapkan khusus untuk periode{' '}
+                <strong>{activeMonthLabel}</strong> dan otomatis memperbarui modul Analisa Sales, SPV, Cost Area, Profit P&amp;L, Produk Fokus, Kuartal &amp; KPI.
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-2">
                 <button
                   type="button"
                   onClick={() => setIsBatchOpen(false)}
-                  className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 font-bold"
+                  className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 font-bold cursor-pointer"
                 >
                   Batal
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold shadow-md shadow-indigo-600/30 flex items-center gap-1.5"
+                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold shadow-md shadow-indigo-600/30 flex items-center gap-1.5 cursor-pointer"
                 >
                   <Save className="w-4 h-4" />
                   <span>Terapkan ke Semua</span>
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================================= */}
+      {/* MODAL 6: SALIN TARGET ANTAR BULAN */}
+      {/* ========================================================================================= */}
+      {isCopyMonthOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-lg w-full shadow-2xl border border-slate-100 overflow-hidden">
+            <div className="p-5 bg-gradient-to-r from-emerald-800 to-teal-900 text-white flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-extrabold flex items-center gap-2">
+                  <Copy className="w-4 h-4 text-emerald-300" />
+                  Salin Pengaturan Target ke Bulan Lain
+                </h3>
+                <p className="text-xs text-emerald-100 mt-0.5">
+                  Duplikasi seluruh target (Area, SPV, Sales, BA &amp; Trainer) antar periode bulan
+                </p>
+              </div>
+              <button
+                onClick={() => setIsCopyMonthOpen(false)}
+                className="p-1 rounded-lg hover:bg-white/10 text-white/80 hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleApplyCopyMonth} className="p-5 space-y-4 text-xs">
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Salin Dari Bulan Sumber</label>
+                <select
+                  value={copySourceMonth}
+                  onChange={(e) => {
+                    const nextSrc = e.target.value;
+                    setCopySourceMonth(nextSrc);
+                    setCopyDestMonths((prev) => prev.filter((d) => d !== nextSrc));
+                  }}
+                  className="w-full px-3 py-2 text-xs font-bold rounded-xl border border-slate-300 bg-white"
+                >
+                  {MONTH_OPTIONS_2026.map((m) => (
+                    <option key={m.key} value={m.key}>{m.label}</option>
+                  ))}
+                  <option value="ALL">Baseline Global (Semua Bulan)</option>
+                </select>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-slate-700 font-bold">Pilih Bulan Tujuan ({copyDestMonths.length} dipilih)</label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const allOthers = MONTH_OPTIONS_2026.map((m) => m.key).filter((k) => k !== copySourceMonth);
+                      setCopyDestMonths(copyDestMonths.length === allOthers.length ? [] : allOthers);
+                    }}
+                    className="text-[11px] font-bold text-emerald-700 hover:underline cursor-pointer"
+                  >
+                    {copyDestMonths.length === MONTH_OPTIONS_2026.filter((m) => m.key !== copySourceMonth).length
+                      ? 'Batal Pilih Semua'
+                      : 'Pilih Semua Bulan Lain'}
+                  </button>
+                </div>
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                  {MONTH_OPTIONS_2026.map((m) => {
+                    const disabled = m.key === copySourceMonth;
+                    const checked = copyDestMonths.includes(m.key);
+                    return (
+                      <button
+                        key={m.key}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => {
+                          setCopyDestMonths((prev) =>
+                            prev.includes(m.key) ? prev.filter((x) => x !== m.key) : [...prev, m.key]
+                          );
+                        }}
+                        className={`px-2.5 py-2 rounded-xl border text-[11px] font-bold transition-all cursor-pointer ${
+                          disabled
+                            ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                            : checked
+                            ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                            : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-emerald-50'
+                        }`}
+                      >
+                        {m.shortLabel} 2026
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsCopyMonthOpen(false)}
+                  className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 font-bold cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-md shadow-emerald-600/30 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Copy className="w-4 h-4" />
+                  <span>Salin Target Sekarang</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================================= */}
+      {/* MODAL 7: KONFIRMASI RESET TARGET (TANPA window.confirm) */}
+      {/* ========================================================================================= */}
+      {isResetModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-slate-100 overflow-hidden">
+            <div className="p-5 bg-gradient-to-r from-rose-700 to-rose-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-rose-200" />
+                <h3 className="text-base font-extrabold">Reset Pengaturan Target</h3>
+              </div>
+              <button
+                onClick={() => setIsResetModalOpen(false)}
+                className="p-1 rounded-lg hover:bg-white/10 text-white/80 hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4 text-xs text-slate-700">
+              <p className="leading-relaxed">
+                Pilih cakupan reset target ke nilai default bawaan sistem. Semua menu terkait akan otomatis mengikuti hasil reset.
+              </p>
+              <div className="space-y-2">
+                {selectedMonth !== 'ALL' && (
+                  <button
+                    type="button"
+                    onClick={() => executeResetTargets('current')}
+                    className="w-full px-4 py-2.5 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-950 font-bold text-left flex items-center justify-between cursor-pointer"
+                  >
+                    <span>Reset Target Bulan {activeMonthLabel} Saja</span>
+                    <RotateCcw className="w-4 h-4 text-amber-700" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => executeResetTargets('all')}
+                  className="w-full px-4 py-2.5 rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-950 font-bold text-left flex items-center justify-between cursor-pointer"
+                >
+                  <span>Reset Seluruh Target (Semua Bulan &amp; Baseline)</span>
+                  <RotateCcw className="w-4 h-4 text-rose-700" />
+                </button>
+              </div>
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={() => setIsResetModalOpen(false)}
+                  className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 font-bold cursor-pointer"
+                >
+                  Tutup
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

@@ -64,7 +64,86 @@ export type ActiveTab =
   | 'kontribusi_toko_ba'
   | 'pengaturan_master'
   | 'manage_ka_mg'
-  | 'info_keaktifan';
+  | 'info_keaktifan'
+  | 'kunjungan_sales'
+  | 'kunjungan_trainer'
+  | 'promo_toko_online'
+  | 'market_share_mg';
+
+export interface MissGlamMarketShareItem {
+  id: string;
+  storeName: string;
+  monthPeriod: string;         // e.g. "NOVEMBER 2026"
+  actual: number;              // Actual penjualan di toko MG (Rp)
+  storeOmset: number;          // Total Omset toko MG (Rp)
+  marketSharePercent: number;  // (actual / storeOmset) * 100 atau override manual
+  isManualShareOverride?: boolean;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface OnlinePromoReportItem {
+  id: string;
+  storeName: string;
+  monthPeriod: string;         // e.g. "NOVEMBER 2026"
+  date: string;                // YYYY-MM-DD
+  actual: number;              // Actual promo sales in IDR (manual)
+  notes?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface OnlinePromoReportComputedItem extends OnlinePromoReportItem {
+  // Growth Per Hari (dibanding tanggal sebelumnya untuk toko yang sama)
+  dailyPreviousActual: number | null;
+  dailyPreviousDate: string | null;
+  dailyGrowthDelta: number | null;
+  dailyGrowthPercent: number | null;
+  // Growth Bulanan (total actual toko di bulan tersebut dibanding bulan sebelumnya)
+  monthlyStoreTotal: number;
+  monthlyPreviousActual: number | null;
+  monthlyPreviousLabel: string | null;
+  monthlyGrowthDelta: number | null;
+  monthlyGrowthPercent: number | null;
+}
+
+export type SalesVisitSalesName = 'ILHAMSYAH' | 'TIWI' | 'ALBERT';
+
+export type TrainerVisitName = 'ARA' | 'RATIH';
+
+export interface SalesVisitRecord {
+  id: string;
+  storeName: string;
+  salesName: SalesVisitSalesName;
+  selfieDataUrl: string;
+  visitTime: string;          // Formatted timestamp e.g. "16/11/2026, 10:15:30"
+  visitIso: string;           // ISO timestamp for sorting
+  monthPeriod: string;        // e.g. "NOVEMBER 2026"
+  latitude: number;
+  longitude: number;
+  locationLabel: string;      // Human-readable location description / address / landmark
+  gpsAccuracyMeters?: number;
+  notes: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface TrainerVisitRecord {
+  id: string;
+  storeName: string;
+  trainerName: TrainerVisitName;
+  selfieDataUrl: string;
+  visitTime: string;
+  visitIso: string;
+  monthPeriod: string;
+  latitude: number;
+  longitude: number;
+  locationLabel: string;
+  gpsAccuracyMeters?: number;
+  notes: string;
+  createdAt: string;
+  updatedAt?: string;
+}
 
 export interface AreaTargetItem {
   coverArea: string;
@@ -103,6 +182,10 @@ export interface SalesTargetItem {
   targetSellIn: number;
   actualSellIn: number;
   achievementPct: number;
+  targetSellOut?: number;
+  actualSellOut?: number;
+  achievementSellOutPct?: number;
+  isCustomSellOut?: boolean;
   incentivePercent: number;
   incentiveNominal: number;
   status: 'achieved' | 'on_track' | 'lagging';

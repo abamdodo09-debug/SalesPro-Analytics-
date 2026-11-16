@@ -21,6 +21,7 @@ import {
   OFFICIAL_SPV_WIDODO,
 } from '../services/spvSellInSellOutService';
 import { saveKaMgSalesOverride } from '../services/masterStoreService';
+import { TARGETS_UPDATED_EVENT } from '../services/targetManagementService';
 import { formatRupiah, formatPercent } from '../utils/analytics';
 import {
   ArrowLeftRight,
@@ -128,6 +129,16 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
     setRefreshVersion((v) => v + 1);
     setEditingBaItem(null);
   };
+
+  useEffect(() => {
+    const onTargetsUpdated = () => setRefreshVersion((v) => v + 1);
+    window.addEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
+    window.addEventListener('storage', onTargetsUpdated);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
+      window.removeEventListener('storage', onTargetsUpdated);
+    };
+  }, []);
 
   // Sinkronisasi dua arah dengan Global Integrated Filter Bar
   useEffect(() => {

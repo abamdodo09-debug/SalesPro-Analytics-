@@ -11,6 +11,17 @@ import { loadKpiSalesData, loadBaIncidents } from './agingAndKpiService';
 import { loadKpiTrainerData } from './kpiTrainerService';
 import { DEFAULT_TRAINERS_DATA } from '../utils/costCalculations';
 import { isFocusProduct } from '../utils/analytics';
+import {
+  loadSalesTargets,
+  loadSalesSellOutTargets,
+  loadBaNonLavojoyTargets,
+  loadBaLavojoyTargets,
+  loadBaFocusTargets,
+  loadTrainerConfigs,
+  loadTrainerTargets,
+  DEFAULT_BA_NON_LAVOJOY_TARGET,
+  DEFAULT_BA_LAVOJOY_TARGET,
+} from './targetManagementService';
 
 export const QUARTER_MONTHS: Record<
   QuarterPeriodKey,
@@ -174,16 +185,28 @@ export function calculateQuarterlySummary(
 
     const monthlyBreakdown: QuarterlyMonthDetail[] = qMonths.map((mIdx, i) => {
       const mName = qMonthNames[i];
+      const mSalesTargets = loadSalesTargets(mName);
+      const mSalesSellOutTargets = loadSalesSellOutTargets(mName);
+      const upperSales = sName.toUpperCase().trim();
+      const matchedSalesOutKey = Object.keys(mSalesSellOutTargets).find((k) => k.toUpperCase().trim() === upperSales);
+      const matchedSalesInKey = Object.keys(mSalesTargets).find((k) => k.toUpperCase().trim() === upperSales);
+      const resolvedMonthlyTarget =
+        matchedSalesOutKey !== undefined
+          ? mSalesSellOutTargets[matchedSalesOutKey]
+          : matchedSalesInKey !== undefined
+          ? mSalesTargets[matchedSalesInKey]
+          : defaultMonthlyTarget;
+
       let act = sData.monthlyActual[i];
       // If actual is 0 in sample, provide baseline realistic data for Q3
       if (act === 0 && quarter === 'Q3') {
         const weights = [0.92, 1.05, 1.15];
-        act = Math.round(defaultMonthlyTarget * weights[i] * (sName === 'ILHAMSYAH' ? 1.02 : 0.95));
+        act = Math.round(resolvedMonthlyTarget * weights[i] * (sName === 'ILHAMSYAH' ? 1.02 : 0.95));
       } else if (act === 0) {
-        act = Math.round(defaultMonthlyTarget * (0.85 + (i * 0.08)));
+        act = Math.round(resolvedMonthlyTarget * (0.85 + (i * 0.08)));
       }
 
-      const tgt = defaultMonthlyTarget;
+      const tgt = resolvedMonthlyTarget;
       const pct = tgt > 0 ? (act / tgt) * 100 : 0;
 
       // Match KPI score from kpiSalesAll if available
@@ -342,27 +365,42 @@ export function calculateQuarterlySummary(
 
     const monthlyBreakdown: QuarterlyMonthDetail[] = qMonths.map((mIdx, i) => {
       const mName = qMonthNames[i];
+      const baNonMap = loadBaNonLavojoyTargets(mName);
+      const baLavMap = loadBaLavojoyTargets(mName);
+      const baFocusMap = loadBaFocusTargets(mName);
+      const upperStore = bData.storeName.toUpperCase().trim();
+      const nonKey = Object.keys(baNonMap).find((k) => k.toUpperCase().trim() === upperStore);
+      const lavKey = Object.keys(baLavMap).find((k) => k.toUpperCase().trim() === upperStore);
+      const focusKey = Object.keys(baFocusMap).find((k) => k.toUpperCase().trim() === upperStore || k.toUpperCase().trim() === bName.toUpperCase().trim());
+
+      const monthBaTarget =
+        nonKey !== undefined || lavKey !== undefined
+          ? (nonKey !== undefined ? baNonMap[nonKey] : DEFAULT_BA_NON_LAVOJOY_TARGET) +
+            (lavKey !== undefined ? baLavMap[lavKey] : DEFAULT_BA_LAVOJOY_TARGET)
+          : monthlyTargetNominal;
+      const monthFocusTarget = focusKey !== undefined ? baFocusMap[focusKey] : monthlyFocusTargetPcs;
+
       let act = bData.monthlyActual[i];
       let focusAct = bData.monthlyFocusActual[i];
 
       // Provide realistic baseline for sample simulation
       if (act === 0) {
         const factor = 0.85 + ((i + (bName.length % 3)) * 0.08);
-        act = Math.round(monthlyTargetNominal * factor);
+        act = Math.round(monthBaTarget * factor);
       }
       if (focusAct === 0) {
-        focusAct = Math.round(monthlyFocusTargetPcs * (0.8 + (bName.length % 4) * 0.08));
+        focusAct = Math.round(monthFocusTarget * (0.8 + (bName.length % 4) * 0.08));
       }
 
-      const pct = monthlyTargetNominal > 0 ? (act / monthlyTargetNominal) * 100 : 0;
+      const pct = monthBaTarget > 0 ? (act / monthBaTarget) * 100 : 0;
 
       return {
         monthName: mName,
         monthIndex: mIdx,
-        targetSellOut: monthlyTargetNominal,
+        targetSellOut: monthBaTarget,
         actualSellOut: act,
         achievementPercent: pct,
-        focusTargetPcs: monthlyFocusTargetPcs,
+        focusTargetPcs: monthFocusTarget,
         focusActualPcs: focusAct,
       };
     });
@@ -440,12 +478,25 @@ export function calculateQuarterlySummary(
   // -------------------------------------------------------------
   const trainerList: TrainerQuarterlySummaryItem[] = [];
 
-  DEFAULT_TRAINERS_DATA.forEach((trn) => {
-    const monthlyTargetSellOut = trn.targetSellOut || 300000000;
-    const monthlyFocusTargetPcs = trn.targetProdukFokusPcs || 500;
+  const dynamicTrainerList = loadTrainerConfigs();
+  const activeTrainers = dynamicTrainerList.length > 0 ? dynamicTrainerList : DEFAULT_TRAINERS_DATA;
+
+  activeTrainers.forEach((trn) => {
+    const baseTargetSellOut = trn.targetSellOut || 300000000;
+    const baseFocusTargetPcs = trn.targetProdukFokusPcs || 500;
 
     const monthlyBreakdown: QuarterlyMonthDetail[] = qMonths.map((mIdx, i) => {
       const mName = qMonthNames[i];
+      const trMonthTargets = loadTrainerTargets(mName);
+      const tOv = trMonthTargets[trn.id] || trMonthTargets[trn.trainerName] || {};
+      const monthlyTargetSellOut =
+        tOv.targetSellOut !== undefined && tOv.targetSellOut > 0
+          ? tOv.targetSellOut
+          : baseTargetSellOut;
+      const monthlyFocusTargetPcs =
+        tOv.targetProdukFokusPcs !== undefined && tOv.targetProdukFokusPcs > 0
+          ? tOv.targetProdukFokusPcs
+          : baseFocusTargetPcs;
 
       // Match actual KPI trainer item if present
       const matchedTrainerKpi = kpiTrainerAll.find(

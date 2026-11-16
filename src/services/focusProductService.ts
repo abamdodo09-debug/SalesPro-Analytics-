@@ -90,6 +90,9 @@ export function loadFocusOverrides(): Record<string, BaFocusProductOverride> {
 export function saveFocusOverrides(overrides: Record<string, BaFocusProductOverride>): void {
   try {
     localStorage.setItem(FOCUS_PRODUCT_STORAGE_KEY, JSON.stringify(overrides));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('salespro-targets-updated', { detail: { category: 'ba_focus' } }));
+    }
   } catch (e) {
     console.warn('Failed to save focus product overrides', e);
   }

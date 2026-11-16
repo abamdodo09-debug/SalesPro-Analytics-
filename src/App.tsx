@@ -58,8 +58,13 @@ import { StoreBaContributionView } from './components/StoreBaContributionView';
 import { MasterStoreBaSettings } from './components/MasterStoreBaSettings';
 import { CentralKaMgManager } from './components/CentralKaMgManager';
 import { ActivePersonnelStoreInfo } from './components/ActivePersonnelStoreInfo';
+import { SalesVisitView } from './components/SalesVisitView';
+import { TrainerVisitView } from './components/TrainerVisitView';
+import { OnlinePromoReportView } from './components/OnlinePromoReportView';
+import { MissGlamMarketShareView } from './components/MissGlamMarketShareView';
 import { exportToExcel, exportToPdf } from './utils/exportUtils';
 import { loadSpvConsolidatedConfig } from './services/spvSellInSellOutService';
+import { aggregateTargetMatrix, TARGETS_UPDATED_EVENT } from './services/targetManagementService';
 import {
   TrendingUp,
   FileSpreadsheet,
@@ -110,6 +115,21 @@ export default function App() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+  const [targetSyncVersion, setTargetSyncVersion] = useState<number>(0);
+  const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState<boolean>(false);
+
+  useEffect(() => {
+    const onTargetsUpdated = () => setTargetSyncVersion((v) => v + 1);
+    const onMapsQuotaExceeded = () => setMapsQuotaExceeded(true);
+    window.addEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
+    window.addEventListener('storage', onTargetsUpdated);
+    window.addEventListener('gmp-quota-exceeded', onMapsQuotaExceeded);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
+      window.removeEventListener('storage', onTargetsUpdated);
+      window.removeEventListener('gmp-quota-exceeded', onMapsQuotaExceeded);
+    };
+  }, []);
 
   // Load dataset from IndexedDB on initial mount (bypasses localStorage 5MB quota)
   useEffect(() => {
@@ -171,7 +191,30 @@ export default function App() {
   // SPV Month Config for current selected filter month (incorporates Sell In KA & DAZZLE ME MG)
   const currentSpvMonthData = useMemo(() => {
     return loadSpvConsolidatedConfig(records, filters.BULAN || 'OKTOBER', activeYear);
-  }, [records, filters.BULAN, activeYear]);
+  }, [records, filters.BULAN, activeYear, targetSyncVersion]);
+
+  // Dynamic Target & Achievement calculation for executive KpiCards
+  const kpiTargetMetrics = useMemo(() => {
+    const matrix = aggregateTargetMatrix(filteredRecords, filters.BULAN);
+    let targetTotal = 0;
+    if (filters.KET === 'SELL OUT') {
+      if (filters.NAMA_STORE !== 'ALL') {
+        targetTotal = matrix.summary.totalBaTarget || matrix.summary.totalSalesTargetSellOut;
+      } else {
+        targetTotal = matrix.summary.totalSalesTargetSellOut || matrix.summary.totalBaTarget;
+      }
+    } else if (filters.SALES !== 'ALL') {
+      targetTotal = matrix.summary.totalSalesTarget;
+    } else if (filters.REGION !== 'ALL') {
+      targetTotal = matrix.summary.totalAreaTarget;
+    } else if (filters.SPV !== 'ALL') {
+      targetTotal = matrix.summary.totalSpvTarget;
+    } else {
+      targetTotal = matrix.summary.totalSalesTarget > 0 ? matrix.summary.totalSalesTarget : matrix.summary.totalSpvTarget;
+    }
+    const achievementPercent = targetTotal > 0 ? (summary.totalRevenue / targetTotal) * 100 : 0;
+    return { targetTotal, achievementPercent };
+  }, [filteredRecords, filters.BULAN, filters.KET, filters.SALES, filters.REGION, filters.SPV, filters.NAMA_STORE, summary.totalRevenue, targetSyncVersion]);
 
   // Timeframe trend data
   const trendData = useMemo(() => {
@@ -192,7 +235,7 @@ export default function App() {
       });
     }
     return aggregateTimeframe(filteredRecords, timeframeMode);
-  }, [filteredRecords, records, filters, timeframeMode, activeYear]);
+  }, [filteredRecords, records, filters, timeframeMode, activeYear, targetSyncVersion]);
 
   // Overall growth comparison (uses full records so previous period data like September can be retrieved)
   const growthComparison = useMemo(() => {
@@ -289,6 +332,34 @@ export default function App() {
     <div className="min-h-screen bg-gradient-to-br from-slate-100/90 via-sky-50/40 via-indigo-50/25 to-pink-50/20 text-slate-900 flex flex-col relative selection:bg-teal-500 selection:text-white">
       {/* Top Colorful Accent Ribbon */}
       <div className="h-1.5 w-full bg-gradient-to-r from-emerald-500 via-teal-400 via-blue-500 via-indigo-500 via-purple-500 via-pink-500 to-amber-500 shrink-0 shadow-xs" />
+
+      {/* Google Maps Platform Quota / Auth Banner */}
+      {mapsQuotaExceeded && (
+        <div className="sticky top-0 z-50 bg-amber-50 border-b border-amber-300 px-4 py-2.5 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2 shadow-sm">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              Batas kuota atau otorisasi Google Maps API tercapai. Fitur peta mungkin terbatas sementara.{' '}
+              <a
+                href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-bold underline text-amber-900 hover:text-amber-700"
+              >
+                Pelajari selengkapnya &amp; info upgrade kuota
+              </a>
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setMapsQuotaExceeded(false)}
+            className="px-2 py-1 rounded bg-amber-100 hover:bg-amber-200 font-bold text-amber-900 cursor-pointer"
+          >
+            Tutup
+          </button>
+        </div>
+      )}
+
       {/* Toast Notification */}
       {toastMessage && (
         <div className="fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom duration-200">
@@ -341,6 +412,10 @@ export default function App() {
           summary={summary}
           growth={growthComparison.overall}
           comparisonLabel={growthComparison.previousPeriodLabel}
+          targetTotal={kpiTargetMetrics.targetTotal}
+          achievementPercent={kpiTargetMetrics.achievementPercent}
+          scopeKey={`${filters.BULAN}|${filters.TAHUN}|${filters.KET}|${filters.REGION}|${filters.SPV}|${filters.SALES}`}
+          scopeLabel={`${filters.BULAN === 'ALL' ? 'Semua Bulan' : filters.BULAN}${filters.KET !== 'ALL' ? ` • ${filters.KET}` : ''}${filters.REGION !== 'ALL' ? ` • ${filters.REGION}` : ''}${filters.SALES !== 'ALL' ? ` • ${filters.SALES}` : ''}`}
         />
 
         {/* View Routing */}
@@ -770,25 +845,61 @@ export default function App() {
           <FocusProductBaManagement records={filteredRecords} filters={filters} />
         )}
 
+        {/* Tab: Form Kunjungan Sales (Check-In, Selfie, Maps & Rekap) */}
+        {activeTab === 'kunjungan_sales' && (
+          <SalesVisitView
+            records={records}
+            filters={filters}
+            onNotify={showToast}
+          />
+        )}
+
+        {/* Tab: Form Kunjungan Trainer (ARA & RATIH, Selfie, Maps & Rekap) */}
+        {activeTab === 'kunjungan_trainer' && (
+          <TrainerVisitView
+            records={records}
+            filters={filters}
+            onNotify={showToast}
+          />
+        )}
+
+        {/* Tab: Report Promo Toko Online */}
+        {activeTab === 'promo_toko_online' && (
+          <OnlinePromoReportView
+            records={records}
+            filters={filters}
+            onNotify={showToast}
+          />
+        )}
+
+        {/* Tab: Market Share MissGlam */}
+        {activeTab === 'market_share_mg' && (
+          <MissGlamMarketShareView
+            filters={filters}
+            onNotify={showToast}
+          />
+        )}
+
         {/* Tab: Kelola Target Terpadu (Area, SPV, Sales & BA) */}
         {activeTab === 'target_mgmt' && (
           <TargetManagementView
             records={filteredRecords}
+            allRecords={records}
             filters={filters}
             onTargetUpdated={() => {
-              showToast('Perubahan target berhasil disimpan dan disinkronkan!');
+              showToast('Perubahan target berhasil disimpan dan disinkronkan ke seluruh menu!');
             }}
           />
         )}
 
         {/* Tab: Sales */}
         {activeTab === 'sales' && (
-          <SalesAnalysis records={filteredRecords} />
+          <SalesAnalysis records={filteredRecords} filters={filters} />
         )}
 
         {/* Tab: SPV */}
         {activeTab === 'spv' && (
-          <SpvAnalysis records={filteredRecords} />
+          <SpvAnalysis records={filteredRecords} filters={filters} />
         )}
 
         {/* Tab: Kategori */}

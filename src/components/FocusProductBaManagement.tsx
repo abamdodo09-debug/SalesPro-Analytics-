@@ -31,6 +31,12 @@ import {
   calculateFocusProductIncentivePenalty,
   DEFAULT_FOCUS_TARGET_PCS,
 } from '../services/focusProductService';
+import {
+  loadBaFocusTargets,
+  saveBaFocusTargets,
+  setSingleTargetOverride,
+  TARGETS_UPDATED_EVENT,
+} from '../services/targetManagementService';
 import * as XLSX from 'xlsx';
 
 interface FocusProductBaManagementProps {
@@ -47,6 +53,20 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
   // State for overrides
   const [overrides, setOverrides] = useState<Record<string, BaFocusProductOverride>>(() => loadFocusOverrides());
   const [defaultTargetPcs, setDefaultTargetPcs] = useState<number>(DEFAULT_FOCUS_TARGET_PCS);
+  const [targetSyncVersion, setTargetSyncVersion] = useState<number>(0);
+
+  React.useEffect(() => {
+    const onTargetsUpdated = () => {
+      setOverrides(loadFocusOverrides());
+      setTargetSyncVersion((v) => v + 1);
+    };
+    window.addEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
+    window.addEventListener('storage', onTargetsUpdated);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
+      window.removeEventListener('storage', onTargetsUpdated);
+    };
+  }, []);
 
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState('');
@@ -77,10 +97,23 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
     setTimeout(() => setToast(null), 3000);
   };
 
+  // Merge monthly target overrides for the active month filter
+  const mergedOverrides = useMemo(() => {
+    const monthFocus = loadBaFocusTargets(filters.BULAN);
+    const merged: Record<string, BaFocusProductOverride> = { ...overrides };
+    Object.entries(monthFocus).forEach(([storeKey, pcs]) => {
+      merged[storeKey] = {
+        ...(merged[storeKey] || { storeName: storeKey }),
+        targetPcs: pcs,
+      };
+    });
+    return merged;
+  }, [overrides, filters.BULAN, targetSyncVersion]);
+
   // Aggregated BA Focus Product List
   const baFocusList = useMemo(() => {
-    return aggregateBaFocusProductData(records, overrides, defaultTargetPcs);
-  }, [records, overrides, defaultTargetPcs]);
+    return aggregateBaFocusProductData(records, mergedOverrides, defaultTargetPcs);
+  }, [records, mergedOverrides, defaultTargetPcs]);
 
   // Unique Areas for filter
   const uniqueAreas = useMemo(() => {
@@ -210,6 +243,7 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
 
     setOverrides(newOverrides);
     saveFocusOverrides(newOverrides);
+    setSingleTargetOverride('baFocus', editingItem.storeName, editTargetPcs, filters.BULAN);
     setEditingItem(null);
     showNotification(`Target & capaian produk fokus untuk "${editingItem.baName}" berhasil diperbarui!`);
 
@@ -222,6 +256,7 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
     delete newOverrides[storeName];
     setOverrides(newOverrides);
     saveFocusOverrides(newOverrides);
+    setSingleTargetOverride('baFocus', storeName, DEFAULT_FOCUS_TARGET_PCS, filters.BULAN);
     setEditingItem(null);
     showNotification('Data dikembalikan ke hitungan kalkulasi otomatis.');
     if (onRefreshCost) onRefreshCost();
@@ -233,16 +268,18 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
     if (batchTargetInput <= 0) return;
 
     setDefaultTargetPcs(batchTargetInput);
-    // Also update all existing overrides targetPcs if desired, or let default take effect
     const newOverrides = { ...overrides };
+    const monthlyFocusMap = loadBaFocusTargets(filters.BULAN);
     baFocusList.forEach((b) => {
       if (newOverrides[b.storeName]) {
         newOverrides[b.storeName].targetPcs = batchTargetInput;
       }
+      monthlyFocusMap[b.storeName] = batchTargetInput;
     });
 
     setOverrides(newOverrides);
     saveFocusOverrides(newOverrides);
+    saveBaFocusTargets(monthlyFocusMap, filters.BULAN);
     setIsBatchModalOpen(false);
     showNotification(`Target default ${batchTargetInput} pcs berhasil diterapkan ke seluruh BA!`);
     if (onRefreshCost) onRefreshCost();

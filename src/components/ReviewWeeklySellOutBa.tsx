@@ -24,6 +24,13 @@ import {
 import html2canvas from 'html2canvas';
 import * as XLSX from 'xlsx';
 import { TransactionRecord, DashboardFilters } from '../types/dashboard';
+import {
+  TARGETS_UPDATED_EVENT,
+  getExplicitBaTotalTargetOverride,
+  loadBaLavojoyTargets,
+  setSingleTargetOverride,
+  DEFAULT_BA_LAVOJOY_TARGET,
+} from '../services/targetManagementService';
 
 export interface WeeklyStoreConfig {
   id: string;
@@ -989,6 +996,18 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
     }
   }, [filters.SALES]);
 
+  // Sinkronisasi real-time jika target diubah di Pusat Kelola Target atau menu lain
+  const [targetSyncVersion, setTargetSyncVersion] = useState(0);
+  useEffect(() => {
+    const handleSync = () => setTargetSyncVersion((v) => v + 1);
+    window.addEventListener(TARGETS_UPDATED_EVENT, handleSync);
+    window.addEventListener('storage', handleSync);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, handleSync);
+      window.removeEventListener('storage', handleSync);
+    };
+  }, []);
+
   // Extract distinct sales reps from configured stores and connected Google Sheets records
   const availableSales = useMemo(() => {
     const set = new Set<string>();
@@ -1091,6 +1110,15 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       list = [...list, ...extraStores];
     }
 
+    // Apply per-month BA target overrides from Pusat Kelola Target
+    list = list.map((s) => {
+      const syncedTarget = getExplicitBaTotalTargetOverride(s.storeName, selectedMonth);
+      if (syncedTarget !== undefined && syncedTarget > 0) {
+        return { ...s, targetMonthly: syncedTarget };
+      }
+      return s;
+    });
+
     // Filter by Trainer if selected
     if (selectedTrainer !== 'ALL') {
       list = list.filter(
@@ -1134,7 +1162,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
     }
 
     return list;
-  }, [storesList, deletedStoreNames, records, selectedSales, selectedTrainer, filters.REGION, filters.NAMA_STORE, filters.searchQuery]);
+  }, [storesList, deletedStoreNames, records, selectedSales, selectedTrainer, filters.REGION, filters.NAMA_STORE, filters.searchQuery, selectedMonth, targetSyncVersion]);
 
   // Custom Daily Sell Out Overrides (Key: `${storeName}_${dateKey}`)
   const [customDailyActuals, setCustomDailyActuals] = useState<Record<string, number>>(() => {
@@ -1738,6 +1766,17 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       } catch (e) {
         console.warn(e);
       }
+    }
+
+    const targetStoreName = editStoreName.trim().toUpperCase() || editingStore.storeName;
+    if (editTargetMonthly > 0 && editTargetMonthly !== editingStore.targetMonthly) {
+      const lavTargets = loadBaLavojoyTargets(selectedMonth);
+      const lavMatchKey = Object.keys(lavTargets).find(
+        (k) => k.toUpperCase().trim() === targetStoreName
+      );
+      const currentLav = lavMatchKey ? lavTargets[lavMatchKey] : DEFAULT_BA_LAVOJOY_TARGET;
+      const newNonLavojoyTarget = Math.max(0, editTargetMonthly - currentLav);
+      setSingleTargetOverride('baNonLavojoy', targetStoreName, newNonLavojoyTarget, selectedMonth);
     }
 
     setEditingStore(null);

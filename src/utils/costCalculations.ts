@@ -14,7 +14,17 @@ import { getTrainerForRecord, isFocusProduct } from './analytics';
 export const DEFAULT_TRAINER_BASE_SALARY = 3900000;
 export const DEFAULT_TRAINER_TRANSPORT_ALLOWANCE = 500000;
 
-export const DEFAULT_TRAINERS_DATA = [
+export interface TrainerCostConfigInput {
+  id: string;
+  trainerName: string;
+  areaCovered: string;
+  region: string;
+  targetSellOut: number;
+  targetProdukFokusPcs: number;
+  notes?: string;
+}
+
+export const DEFAULT_TRAINERS_DATA: TrainerCostConfigInput[] = [
   {
     id: 'trn-1',
     trainerName: 'ARA',
@@ -476,8 +486,16 @@ export function aggregateAreaCost(
   customTrainerKpiScores: Record<string, number> = {},
   customTrainerKpiIncentives: Record<string, number> = {},
   customTrainerKpiPenalties: Record<string, number> = {},
-  trainerMonthPeriod: string = 'OKTOBER 2026'
+  trainerMonthPeriod: string = 'OKTOBER 2026',
+  trainerConfigsOverride?: TrainerCostConfigInput[],
+  trainerMonthlyTargetsOverride?: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; notes?: string }>,
+  baFocusTargetsOverride?: Record<string, number>
 ): AreaCostSummary {
+  const activeTrainerDefs =
+    trainerConfigsOverride && trainerConfigsOverride.length > 0
+      ? trainerConfigsOverride
+      : DEFAULT_TRAINERS_DATA;
+
   // 1. Group by Sales Representative (SELL IN)
   const salesMap: Record<
     string,
@@ -509,7 +527,7 @@ export function aggregateAreaCost(
 
   // 3. Group by Trainer (Produk Fokus & Sell Out)
   const trainerMap: Record<string, { focusQty: number; sellOut: number }> = {};
-  for (const t of DEFAULT_TRAINERS_DATA) {
+  for (const t of activeTrainerDefs) {
     trainerMap[t.trainerName] = { focusQty: 0, sellOut: 0 };
   }
 
@@ -650,7 +668,13 @@ export function aggregateAreaCost(
       const targetLavojoy = customBaLavojoyTargets[ba.storeName] || defaultBaLavojoyTarget;
 
       const ov = focusOverrides[ba.storeName] || focusOverrides[ba.baName] || {};
-      const fTarget = ov.targetPcs !== undefined && ov.targetPcs > 0 ? ov.targetPcs : defaultBaFocusTarget;
+      const monthFocusTarget = baFocusTargetsOverride?.[ba.storeName] ?? baFocusTargetsOverride?.[ba.baName];
+      const fTarget =
+        monthFocusTarget !== undefined && monthFocusTarget > 0
+          ? monthFocusTarget
+          : ov.targetPcs !== undefined && ov.targetPcs > 0
+          ? ov.targetPcs
+          : defaultBaFocusTarget;
       const fActual = ov.customActualPcs !== undefined && ov.customActualPcs >= 0 ? ov.customActualPcs : ba.focusActualPcs;
 
       return calculateBaSalary(
@@ -724,14 +748,23 @@ export function aggregateAreaCost(
   }
 
   // Calculate Trainer Salaries (Gaji Pokok Rp 3.9M, Transport Rp 500k, Insentif/Denda Produk Fokus, Insentif/Denda KPI Trainer)
-  const trainerList: TrainerSalaryItem[] = DEFAULT_TRAINERS_DATA.map((t) => {
+  const trainerList: TrainerSalaryItem[] = activeTrainerDefs.map((t) => {
+    const monthlyTr = trainerMonthlyTargetsOverride?.[t.id] || trainerMonthlyTargetsOverride?.[t.trainerName] || {};
+    const resolvedFocusDefault =
+      monthlyTr.targetProdukFokusPcs !== undefined && monthlyTr.targetProdukFokusPcs > 0
+        ? monthlyTr.targetProdukFokusPcs
+        : t.targetProdukFokusPcs;
     const targetFocus = customTrainerFocusTargets[t.trainerName] !== undefined
       ? customTrainerFocusTargets[t.trainerName]
-      : t.targetProdukFokusPcs;
+      : resolvedFocusDefault;
+    const resolvedSellOutTarget =
+      monthlyTr.targetSellOut !== undefined && monthlyTr.targetSellOut > 0
+        ? monthlyTr.targetSellOut
+        : t.targetSellOut;
 
     const actualData = trainerMap[t.trainerName] || { focusQty: 0, sellOut: 0 };
-    const actualFocus = actualData.focusQty > 0 ? actualData.focusQty : Math.round(t.targetProdukFokusPcs * 0.92);
-    const actualSellOut = actualData.sellOut > 0 ? actualData.sellOut : Math.round(t.targetSellOut * 0.95);
+    const actualFocus = actualData.focusQty > 0 ? actualData.focusQty : Math.round(targetFocus * 0.92);
+    const actualSellOut = actualData.sellOut > 0 ? actualData.sellOut : Math.round(resolvedSellOutTarget * 0.95);
 
     // KPI Score lookup: from custom override, or from month's KPI dataset, or fallback
     const kpiScore = customTrainerKpiScores[t.trainerName] !== undefined
@@ -745,10 +778,10 @@ export function aggregateAreaCost(
       t.areaCovered,
       t.region,
       actualSellOut,
-      t.targetSellOut,
+      resolvedSellOutTarget,
       customTrainerIncentives[t.trainerName],
       customTrainerPenalties[t.trainerName],
-      t.notes,
+      monthlyTr.notes || t.notes,
       kpiScore,
       customTrainerKpiIncentives[t.trainerName],
       customTrainerKpiPenalties[t.trainerName],

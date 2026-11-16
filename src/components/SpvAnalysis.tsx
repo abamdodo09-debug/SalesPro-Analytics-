@@ -1,14 +1,63 @@
-import React from 'react';
-import { Building2, Users2, MapPin, Award, CheckCircle } from 'lucide-react';
-import { TransactionRecord } from '../types/dashboard';
+import React, { useState, useMemo, useEffect } from 'react';
+import { Building2, Users2, MapPin, Edit3, X, Save } from 'lucide-react';
+import { TransactionRecord, DashboardFilters } from '../types/dashboard';
 import { aggregateByDimension, formatRupiah, formatNumber, formatPercent } from '../utils/analytics';
+import {
+  loadSpvTargets,
+  setSingleTargetOverride,
+  DEFAULT_SPV_TARGET,
+  TARGETS_UPDATED_EVENT,
+  getMonthDisplayLabel,
+} from '../services/targetManagementService';
+import { loadSpvConsolidatedConfig } from '../services/spvSellInSellOutService';
 
 interface SpvAnalysisProps {
   records: TransactionRecord[];
+  filters?: DashboardFilters;
 }
 
-export const SpvAnalysis: React.FC<SpvAnalysisProps> = ({ records }) => {
-  const spvData = aggregateByDimension(records, 'SPV');
+export const SpvAnalysis: React.FC<SpvAnalysisProps> = ({ records, filters }) => {
+  const activeMonth = filters?.BULAN;
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [editingSpv, setEditingSpv] = useState<{ name: string; target: number } | null>(null);
+  const [editTargetInput, setEditTargetInput] = useState<number>(DEFAULT_SPV_TARGET);
+
+  useEffect(() => {
+    const onUpdate = () => setRefreshKey((k) => k + 1);
+    window.addEventListener(TARGETS_UPDATED_EVENT, onUpdate);
+    window.addEventListener('storage', onUpdate);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, onUpdate);
+      window.removeEventListener('storage', onUpdate);
+    };
+  }, []);
+
+  const spvTargetsMap = useMemo(() => loadSpvTargets(activeMonth), [activeMonth, refreshKey]);
+  const spvConsolidated = useMemo(
+    () => loadSpvConsolidatedConfig(records, activeMonth || 'OKTOBER', Number(filters?.TAHUN) || 2026),
+    [records, activeMonth, filters?.TAHUN, refreshKey]
+  );
+
+  const spvData = useMemo(() => {
+    const raw = aggregateByDimension(records, 'SPV');
+    return raw.map((spv) => {
+      const upperName = spv.name.toUpperCase().trim();
+      const matchedKey = Object.keys(spvTargetsMap).find((k) => k.toUpperCase().trim() === upperName);
+      const customTarget = matchedKey !== undefined ? spvTargetsMap[matchedKey] : undefined;
+      const targetVal =
+        customTarget !== undefined
+          ? customTarget
+          : upperName === 'WIDODO'
+          ? spvConsolidated.target
+          : DEFAULT_SPV_TARGET;
+      const achievementPct = targetVal > 0 ? (spv.totalValue / targetVal) * 100 : 0;
+      return {
+        ...spv,
+        target: targetVal,
+        achievementPercent: achievementPct,
+      };
+    });
+  }, [records, spvTargetsMap, spvConsolidated]);
 
   // Compute team members & regions per SPV
   const spvTeamMap: Record<string, { sales: Set<string>; regions: Set<string>; stores: Set<string> }> = {};
@@ -20,6 +69,14 @@ export const SpvAnalysis: React.FC<SpvAnalysisProps> = ({ records }) => {
     if (r.REGION) spvTeamMap[r.SPV].regions.add(r.REGION);
     if (r.NAMA_STORE) spvTeamMap[r.SPV].stores.add(r.NAMA_STORE);
   });
+
+  const handleSaveEditSpv = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingSpv) return;
+    setSingleTargetOverride('spv', editingSpv.name, editTargetInput, activeMonth);
+    setEditingSpv(null);
+    setRefreshKey((k) => k + 1);
+  };
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-4 sm:p-6 mb-8">
@@ -35,7 +92,7 @@ export const SpvAnalysis: React.FC<SpvAnalysisProps> = ({ records }) => {
             </h2>
           </div>
           <p className="text-xs text-slate-500 mt-0.5 font-medium">
-            Konsolidasi performa tim penjualan, cakupan wilayah, dan kontribusi per Supervisor
+            Konsolidasi performa tim penjualan &amp; target ({getMonthDisplayLabel(activeMonth)}) per Supervisor
           </p>
         </div>
         <div className="text-xs font-mono font-bold text-purple-900 bg-purple-50 px-3 py-1.5 rounded-lg border border-purple-200 shadow-2xs">
@@ -122,7 +179,7 @@ export const SpvAnalysis: React.FC<SpvAnalysisProps> = ({ records }) => {
 
                   <div className="flex items-center justify-between text-slate-600 pt-1.5 border-t border-purple-100">
                     <span className="text-slate-500 font-medium">Produktivitas / Sales:</span>
-                    <span className="font-mono font-extrabold text-indigo-950">
+                    <span className="font-mono font-extrabold text-indigo-950 tabular-nums">
                       {formatRupiah(avgPerSales, true)}
                     </span>
                   </div>
@@ -130,16 +187,30 @@ export const SpvAnalysis: React.FC<SpvAnalysisProps> = ({ records }) => {
               </div>
 
               <div className="mt-4 pt-3 border-t border-purple-100">
-                <div className="flex justify-between text-xs mb-1.5">
-                  <span className="text-slate-500 font-medium">Pencapaian Kuota Tim</span>
-                  <span className="font-mono font-extrabold text-purple-900">
-                    {formatPercent(spv.achievementPercent || 90, false)}
+                <div className="flex justify-between items-center text-xs mb-1.5">
+                  <span className="text-slate-500 font-medium">
+                    Target: <strong className="text-slate-800 font-mono tabular-nums">{formatRupiah(spv.target || 0, true)}</strong>
                   </span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-extrabold text-purple-900 tabular-nums">
+                      {formatPercent(spv.achievementPercent || 0, false)}
+                    </span>
+                    <button
+                      onClick={() => {
+                        setEditingSpv({ name: spv.name, target: spv.target || DEFAULT_SPV_TARGET });
+                        setEditTargetInput(spv.target || DEFAULT_SPV_TARGET);
+                      }}
+                      className="p-1 rounded-md text-purple-700 hover:bg-purple-100 border border-purple-200 cursor-pointer"
+                      title="Ubah Target SPV"
+                    >
+                      <Edit3 className="w-3 h-3" />
+                    </button>
+                  </div>
                 </div>
                 <div className="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden p-0.5 border border-slate-200/60 shadow-inner">
                   <div
                     className="bg-gradient-to-r from-purple-600 via-indigo-600 to-teal-500 h-full rounded-full transition-all duration-500 shadow-2xs"
-                    style={{ width: `${Math.min(100, spv.achievementPercent || 90)}%` }}
+                    style={{ width: `${Math.min(100, spv.achievementPercent || 0)}%` }}
                   />
                 </div>
               </div>
@@ -147,6 +218,58 @@ export const SpvAnalysis: React.FC<SpvAnalysisProps> = ({ records }) => {
           );
         })}
       </div>
+
+      {/* Modal Edit Target SPV */}
+      {editingSpv && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="p-4 bg-gradient-to-r from-purple-900 to-indigo-900 text-white flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-extrabold">Ubah Target SPV: {editingSpv.name}</h3>
+                <p className="text-[11px] text-purple-200 mt-0.5">Periode: {getMonthDisplayLabel(activeMonth)}</p>
+              </div>
+              <button
+                onClick={() => setEditingSpv(null)}
+                className="p-1 rounded-lg hover:bg-white/10 text-white/80 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveEditSpv} className="p-5 space-y-4 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Target Omzet SPV (Rp)</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={editTargetInput}
+                  onChange={(e) => setEditTargetInput(Math.max(0, Number(e.target.value)))}
+                  className="w-full px-3 py-2 text-sm font-mono font-bold rounded-xl border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-purple-500"
+                  required
+                />
+                <span className="text-[11px] text-slate-500 font-mono mt-1 block">
+                  Terbilang: {formatRupiah(editTargetInput)}
+                </span>
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingSpv(null)}
+                  className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 font-bold cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>Simpan &amp; Sinkronkan</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

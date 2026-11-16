@@ -36,13 +36,69 @@ import {
 } from '../services/kpiTrainerService';
 import { formatRupiah, formatPercent } from '../utils/analytics';
 import * as XLSX from 'xlsx';
+import {
+  TARGETS_UPDATED_EVENT,
+  loadTrainerConfigs,
+  loadTrainerTargets,
+  setSingleTrainerTargetOverride,
+} from '../services/targetManagementService';
+
+const syncKpiTrainerWithTargetOverrides = (
+  items: KpiTrainerScorecardItem[]
+): { items: KpiTrainerScorecardItem[]; changed: boolean } => {
+  const trainerConfigs = loadTrainerConfigs();
+  let changed = false;
+  const next = items.map((item) => {
+    const monthTargets = loadTrainerTargets(item.monthPeriod || 'ALL');
+    const cfg = trainerConfigs.find(
+      (t) => t.trainerName.toUpperCase().trim() === item.trainerName.toUpperCase().trim()
+    );
+    const mOv =
+      (cfg ? monthTargets[cfg.id] : undefined) ||
+      monthTargets[item.trainerName] ||
+      monthTargets[item.trainerName.toUpperCase()];
+
+    if (mOv?.targetSellOut && mOv.targetSellOut > 0 && mOv.targetSellOut !== item.sellOutTarget) {
+      changed = true;
+      const calc = calculateTrainerKpiPoints({
+        sellOutTarget: mOv.targetSellOut,
+        sellOutActual: item.sellOutActual,
+        eventOmsetTarget: item.eventOmsetTarget,
+        eventOmsetActual: item.eventOmsetActual,
+        visitTarget: item.visitTarget,
+        visitActual: item.visitActual,
+        trainingTarget: item.trainingTarget,
+        trainingActual: item.trainingActual,
+        baProductivityTarget: item.baProductivityTarget,
+        baProductivityActual: item.baProductivityActual,
+      });
+      return {
+        ...item,
+        sellOutTarget: mOv.targetSellOut,
+        sellOutAchievementPct: calc.sellOutAchievementPct,
+        pointSellOut: calc.pointSellOut,
+        totalScore: calc.totalScore,
+        grade: calc.grade,
+        scoreCategory: calc.scoreCategory,
+        hasSp1: calc.hasSp1,
+      };
+    }
+    return item;
+  });
+  return { items: next, changed };
+};
 
 interface KpiTrainerScorecardProps {
   filters: DashboardFilters;
 }
 
 export const KpiTrainerScorecard: React.FC<KpiTrainerScorecardProps> = ({ filters }) => {
-  const [kpiList, setKpiList] = useState<KpiTrainerScorecardItem[]>(() => loadKpiTrainerData());
+  const [kpiList, setKpiList] = useState<KpiTrainerScorecardItem[]>(() => {
+    const initial = loadKpiTrainerData();
+    const { items: synced, changed } = syncKpiTrainerWithTargetOverrides(initial);
+    if (changed) saveKpiTrainerData(synced);
+    return synced;
+  });
   const [searchQuery, setSearchQuery] = useState('');
   const [showPillarGuide, setShowPillarGuide] = useState(true);
 
@@ -73,6 +129,26 @@ export const KpiTrainerScorecard: React.FC<KpiTrainerScorecardProps> = ({ filter
       setSelectedMonthPeriod(formatted);
     }
   }, [filters.BULAN]);
+
+  // Listen to Pusat Kelola Target changes and auto-sync Trainer Sell Out targets per month
+  useEffect(() => {
+    const handleTargetsUpdated = () => {
+      setKpiList((prev) => {
+        const { items: synced, changed } = syncKpiTrainerWithTargetOverrides(prev);
+        if (changed) {
+          saveKpiTrainerData(synced);
+          return synced;
+        }
+        return prev;
+      });
+    };
+    window.addEventListener(TARGETS_UPDATED_EVENT, handleTargetsUpdated);
+    window.addEventListener('storage', handleTargetsUpdated);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, handleTargetsUpdated);
+      window.removeEventListener('storage', handleTargetsUpdated);
+    };
+  }, []);
 
   // Dynamic list of available month periods
   const availableMonthPeriods = useMemo(() => {
@@ -230,6 +306,17 @@ export const KpiTrainerScorecard: React.FC<KpiTrainerScorecardProps> = ({ filter
 
     setKpiList(updatedList);
     saveKpiTrainerData(updatedList);
+    if (editSellOutTarget > 0) {
+      const trainerConfigs = loadTrainerConfigs();
+      const cfg = trainerConfigs.find(
+        (t) => t.trainerName.toUpperCase().trim() === editingItem.trainerName.toUpperCase().trim()
+      );
+      setSingleTrainerTargetOverride(
+        cfg?.id || editingItem.trainerName,
+        { targetSellOut: editSellOutTarget },
+        editMonthPeriod.trim().toUpperCase() || editingItem.monthPeriod
+      );
+    }
     setEditingItem(null);
   };
 

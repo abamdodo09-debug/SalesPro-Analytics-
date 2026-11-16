@@ -27,6 +27,9 @@ import {
   ArrowLeftRight,
   Check,
   CheckCircle2,
+  MapPin,
+  Tag,
+  PieChart,
 } from 'lucide-react';
 import { ActiveTab, GasConfig, DashboardFilters } from '../types/dashboard';
 
@@ -138,6 +141,22 @@ export const Header: React.FC<HeaderProps> = ({
           icon: <Sliders className="w-4 h-4 text-emerald-600" />,
           badge: 'Central Edit',
         },
+        {
+          id: 'promo_toko_online',
+          label: 'Report Promo Toko Online',
+          shortLabel: 'Promo Toko Online',
+          description: 'Nama Toko, Bulan, Tanggal, Actual & Growth Otomatis (bisa edit manual)',
+          icon: <Tag className="w-4 h-4 text-blue-600" />,
+          badge: 'Edit Manual',
+        },
+        {
+          id: 'market_share_mg',
+          label: 'Market Share MissGlam',
+          shortLabel: 'Market Share MG',
+          description: 'Actual, Omset Toko, Market Share (%) MG Panam–Bagan Batu & rekap bulanan',
+          icon: <PieChart className="w-4 h-4 text-pink-600" />,
+          badge: 'MissGlam',
+        },
       ],
     },
     {
@@ -176,6 +195,22 @@ export const Header: React.FC<HeaderProps> = ({
           shortLabel: 'Denda Nihil BA',
           description: 'Rekap denda harian Rp 25.000 nihil & pembebasan izin off',
           icon: <AlertCircle className="w-4 h-4 text-rose-600" />,
+        },
+        {
+          id: 'kunjungan_sales',
+          label: 'Form Kunjungan Sales (Check-In)',
+          shortLabel: 'Kunjungan Sales',
+          description: 'Check-in toko, foto selfie, map GPS & rekap kunjungan per bulan/sales',
+          icon: <MapPin className="w-4 h-4 text-teal-600" />,
+          badge: 'Maps & Rekap',
+        },
+        {
+          id: 'kunjungan_trainer',
+          label: 'Form Kunjungan Trainer (Check-In)',
+          shortLabel: 'Kunjungan Trainer',
+          description: 'Check-in toko trainer ARA & RATIH, selfie, map GPS & rekap bulanan',
+          icon: <GraduationCap className="w-4 h-4 text-purple-600" />,
+          badge: 'ARA & RATIH',
         },
       ],
     },
@@ -391,6 +426,34 @@ export const Header: React.FC<HeaderProps> = ({
                 <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin text-emerald-600' : ''}`} />
               </button>
             )}
+
+            {/* Quick Access to Form Kunjungan Sales */}
+            <button
+              onClick={() => onTabChange('kunjungan_sales')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border transition-all shadow-2xs cursor-pointer ${
+                activeTab === 'kunjungan_sales'
+                  ? 'bg-teal-600 text-white border-teal-700 shadow-md'
+                  : 'bg-teal-50 text-teal-800 border-teal-200 hover:bg-teal-100'
+              }`}
+              title="Buka Form Kunjungan Sales, Selfie, Lokasi Map & Rekapan"
+            >
+              <MapPin className={`w-3.5 h-3.5 ${activeTab === 'kunjungan_sales' ? 'text-white' : 'text-teal-600'}`} />
+              <span className="hidden lg:inline">Kunjungan Sales</span>
+            </button>
+
+            {/* Quick Access to Form Kunjungan Trainer */}
+            <button
+              onClick={() => onTabChange('kunjungan_trainer')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border transition-all shadow-2xs cursor-pointer ${
+                activeTab === 'kunjungan_trainer'
+                  ? 'bg-purple-600 text-white border-purple-700 shadow-md'
+                  : 'bg-purple-50 text-purple-800 border-purple-200 hover:bg-purple-100'
+              }`}
+              title="Buka Form Kunjungan Trainer (ARA & RATIH), Selfie, Map & Rekapan"
+            >
+              <GraduationCap className={`w-3.5 h-3.5 ${activeTab === 'kunjungan_trainer' ? 'text-white' : 'text-purple-600'}`} />
+              <span className="hidden lg:inline">Kunjungan Trainer</span>
+            </button>
 
             {/* Quick Access to Master Toko, Sales, BA, SPV & Trainer */}
             <button

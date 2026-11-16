@@ -10,6 +10,18 @@ import { DEFAULT_TRAINERS_DATA } from '../utils/costCalculations';
 import { parseRecordMonthYear } from './quarterlySummaryService';
 import { loadSpvConsolidatedConfig } from './spvSellInSellOutService';
 import { loadMasterStoreList } from './masterStoreService';
+import {
+  loadSalesTargets,
+  loadSalesSellOutTargets,
+  loadBaNonLavojoyTargets,
+  loadBaLavojoyTargets,
+  loadTrainerConfigs,
+  loadTrainerTargets,
+  DEFAULT_SALES_SELLOUT_TARGET,
+  DEFAULT_BA_NON_LAVOJOY_TARGET,
+  DEFAULT_BA_LAVOJOY_TARGET,
+  notifyTargetsUpdated,
+} from './targetManagementService';
 
 export const BA_EVALUATION_STORAGE_KEY = 'salespro_ba_evaluation_overrides_v2';
 
@@ -38,6 +50,7 @@ export function saveBaEvaluationOverride(override: BaEvaluationOverride): void {
     const all = loadBaEvaluationOverrides();
     all[override.baName.toUpperCase().trim()] = override;
     localStorage.setItem(BA_EVALUATION_STORAGE_KEY, JSON.stringify(all));
+    notifyTargetsUpdated({ category: 'ba_eval' });
   } catch {
     // ignore
   }
@@ -284,7 +297,9 @@ export function calculateSellInVsSellOut(
       }
     });
   } else if (dimension === 'trainer') {
-    DEFAULT_TRAINERS_DATA.forEach((tr) => {
+    const dynamicTrainers = loadTrainerConfigs();
+    const trainerSource = dynamicTrainers.length > 0 ? dynamicTrainers : DEFAULT_TRAINERS_DATA;
+    trainerSource.forEach((tr) => {
       if (!aggMap.has(tr.trainerName)) {
         aggMap.set(tr.trainerName, {
           id: `tr-${tr.id}`,
@@ -295,6 +310,7 @@ export function calculateSellInVsSellOut(
           trainerName: tr.trainerName,
           sellIn: 0,
           sellOut: 0,
+          target: tr.targetSellOut,
         });
       }
     });
@@ -347,8 +363,14 @@ export function calculateSellInVsSellOut(
     });
   }
 
-  // Muat override manual BA (jika diedit user di modal)
+  // Muat override manual BA & target terpadu per bulan dari Pusat Kelola Target
   const baOverrides = dimension === 'ba' ? loadBaEvaluationOverrides() : {};
+  const salesSellOutTargets = dimension === 'sales' ? loadSalesSellOutTargets(selectedMonth) : {};
+  const salesSellInTargets = dimension === 'sales' ? loadSalesTargets(selectedMonth) : {};
+  const baNonTargets = dimension === 'ba' ? loadBaNonLavojoyTargets(selectedMonth) : {};
+  const baLavTargets = dimension === 'ba' ? loadBaLavojoyTargets(selectedMonth) : {};
+  const trainerConfigs = dimension === 'trainer' ? loadTrainerConfigs() : [];
+  const trainerMonthlyTargets = dimension === 'trainer' ? loadTrainerTargets(selectedMonth) : {};
 
   // Realistic replenishment adjustment jika data Sell In atau Sell Out tunggal
   const items: SellInSellOutItem[] = [];
@@ -356,6 +378,37 @@ export function calculateSellInVsSellOut(
   aggMap.forEach((entry, key) => {
     let sIn = entry.sellIn;
     let sOut = entry.sellOut;
+
+    if (dimension === 'sales') {
+      const mKey =
+        Object.keys(salesSellOutTargets).find((k) => k.toUpperCase().trim() === key.toUpperCase().trim()) ||
+        Object.keys(salesSellInTargets).find((k) => k.toUpperCase().trim() === key.toUpperCase().trim());
+      if (mKey) {
+        entry.target = salesSellOutTargets[mKey] ?? salesSellInTargets[mKey] ?? DEFAULT_SALES_SELLOUT_TARGET;
+      } else {
+        entry.target = DEFAULT_SALES_SELLOUT_TARGET;
+      }
+    } else if (dimension === 'trainer') {
+      const matchedCfg = trainerConfigs.find((t) => t.trainerName.toUpperCase().trim() === key.toUpperCase().trim());
+      const mTr =
+        (matchedCfg ? trainerMonthlyTargets[matchedCfg.id] : undefined) ||
+        trainerMonthlyTargets[key] ||
+        trainerMonthlyTargets[key.toUpperCase().trim()];
+      if (mTr?.targetSellOut && mTr.targetSellOut > 0) {
+        entry.target = mTr.targetSellOut;
+      } else if (matchedCfg?.targetSellOut) {
+        entry.target = matchedCfg.targetSellOut;
+      }
+    } else if (dimension === 'ba') {
+      const stName = (entry.storeName || '').trim();
+      const nonKey = Object.keys(baNonTargets).find((k) => k.toUpperCase().trim() === stName.toUpperCase());
+      const lavKey = Object.keys(baLavTargets).find((k) => k.toUpperCase().trim() === stName.toUpperCase());
+      if (nonKey !== undefined || lavKey !== undefined) {
+        entry.target =
+          (nonKey !== undefined ? baNonTargets[nonKey] : DEFAULT_BA_NON_LAVOJOY_TARGET) +
+          (lavKey !== undefined ? baLavTargets[lavKey] : DEFAULT_BA_LAVOJOY_TARGET);
+      }
+    }
 
     // Terapkan override manual jika ada
     if (dimension === 'ba' && baOverrides[key.toUpperCase().trim()]) {

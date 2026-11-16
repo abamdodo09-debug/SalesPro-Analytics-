@@ -1,5 +1,10 @@
 import { TransactionRecord } from '../types/dashboard';
 import { parseRecordMonthYear } from './quarterlySummaryService';
+import {
+  getExplicitSpvTargetOverride,
+  setSingleTargetOverride,
+  notifyTargetsUpdated,
+} from './targetManagementService';
 
 export const SPV_CONSOLIDATED_STORAGE_KEY = 'salespro_spv_consolidated_monthly_v5';
 
@@ -353,7 +358,11 @@ export function loadSpvConsolidatedConfig(
   const totalSellIn = regularSellIn + kaSellIn + mgSellIn;
   const totalSellOut = Number(activeData.totalSellOut || 0);
 
-  const target = Number(activeData.target) || OFFICIAL_SPV_WIDODO.defaultTarget;
+  const explicitSpvTarget = getExplicitSpvTargetOverride(OFFICIAL_SPV_WIDODO.spvName, normMonth);
+  const target =
+    explicitSpvTarget !== undefined && explicitSpvTarget > 0
+      ? explicitSpvTarget
+      : Number(activeData.target) || OFFICIAL_SPV_WIDODO.defaultTarget;
   const achievementPercent = target > 0 ? Math.round((totalSellIn / target) * 1000) / 10 : 0;
 
   return {
@@ -413,6 +422,11 @@ export function saveSpvMonthConfig(data: SpvMonthData): void {
   };
 
   saveAllMonthlyConfigs(allConfigs);
+  if (data.target !== undefined && data.target > 0) {
+    setSingleTargetOverride('spv', OFFICIAL_SPV_WIDODO.spvName, Number(data.target), normMonth);
+  } else {
+    notifyTargetsUpdated({ monthKey: normMonth, category: 'spv' });
+  }
 }
 
 /**

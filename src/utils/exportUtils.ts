@@ -11,8 +11,19 @@ import {
   loadBaIncidents,
   calculateBaPunishmentSummary,
 } from '../services/agingAndKpiService';
-import { aggregateBaFocusProductData } from '../services/focusProductService';
-import { aggregateTargetMatrix } from '../services/targetManagementService';
+import { aggregateBaFocusProductData, loadFocusOverrides } from '../services/focusProductService';
+import {
+  aggregateTargetMatrix,
+  loadSalesTargets,
+  loadBaNonLavojoyTargets,
+  loadBaLavojoyTargets,
+  loadBaFocusTargets,
+  loadTrainerConfigs,
+  loadTrainerTargets,
+  DEFAULT_SALES_TARGET,
+  DEFAULT_BA_NON_LAVOJOY_TARGET,
+  DEFAULT_BA_LAVOJOY_TARGET,
+} from '../services/targetManagementService';
 
 export function exportToExcel(
   records: TransactionRecord[],
@@ -148,7 +159,38 @@ export function exportToExcel(
   XLSX.utils.book_append_sheet(wb, wsStore, 'Peringkat Toko');
 
   // 6. Sheet: Estimasi Cost Area (Gaji & Insentif Karyawan)
-  const costData = aggregateAreaCost(records);
+  const activeMonth = filters.BULAN;
+  const salesTargets = loadSalesTargets(activeMonth);
+  const baNonTargets = loadBaNonLavojoyTargets(activeMonth);
+  const baLavTargets = loadBaLavojoyTargets(activeMonth);
+  const baFocusTargets = loadBaFocusTargets(activeMonth);
+  const trainerConfigs = loadTrainerConfigs();
+  const trainerMonthlyTargets = loadTrainerTargets(activeMonth);
+  const trainerPeriodLabel = activeMonth && activeMonth !== 'ALL' ? `${activeMonth.toUpperCase()} 2026` : 'OKTOBER 2026';
+
+  const costData = aggregateAreaCost(
+    records,
+    salesTargets,
+    baNonTargets,
+    baLavTargets,
+    {},
+    {},
+    DEFAULT_SALES_TARGET,
+    DEFAULT_BA_NON_LAVOJOY_TARGET,
+    DEFAULT_BA_LAVOJOY_TARGET,
+    undefined,
+    undefined,
+    {},
+    {},
+    {},
+    {},
+    {},
+    {},
+    trainerPeriodLabel,
+    trainerConfigs,
+    trainerMonthlyTargets,
+    baFocusTargets
+  );
   const costSummaryRows: (string | number)[][] = [
     ['ESTIMASI COST AREA (GAJI & INSENTIF KARYAWAN)'],
     ['Total Cost Area (IDR)', costData.totalCost],
@@ -235,7 +277,24 @@ export function exportToExcel(
   XLSX.utils.book_append_sheet(wb, wsCost, 'Cost Area (Gaji)');
 
   // 7. Sheet: Profit Area (P&L, Margin 55%, Biaya 33% & Gaji)
-  const profitData = calculateProfitArea(records);
+  const profitData = calculateProfitArea(
+    records,
+    0.55,
+    0.33,
+    salesTargets,
+    baNonTargets,
+    baLavTargets,
+    undefined,
+    undefined,
+    DEFAULT_SALES_TARGET,
+    DEFAULT_BA_NON_LAVOJOY_TARGET,
+    DEFAULT_BA_LAVOJOY_TARGET,
+    undefined,
+    trainerConfigs,
+    trainerMonthlyTargets,
+    trainerPeriodLabel,
+    baFocusTargets
+  );
   const profitSummaryRows: (string | number)[][] = [
     ['ANALISA PROFIT AREA (P&L PORTFOLIO)'],
     ['Realisasi Sell In (IDR)', profitData.sellInActual],
@@ -447,7 +506,12 @@ export function exportToExcel(
   XLSX.utils.book_append_sheet(wb, wsBa, 'Punishment Denda BA');
 
   // 11. Sheet: Target & Pencapaian Produk Fokus BA (Insentif Rp 2.000 / Denda Rp 1.000)
-  const focusData = aggregateBaFocusProductData(records);
+  const baseFocusOverrides = loadFocusOverrides();
+  const mergedFocusOverrides = { ...baseFocusOverrides };
+  Object.entries(baFocusTargets).forEach(([k, pcs]) => {
+    mergedFocusOverrides[k] = { ...(mergedFocusOverrides[k] || { storeName: k }), targetPcs: pcs };
+  });
+  const focusData = aggregateBaFocusProductData(records, mergedFocusOverrides);
   const focusHeaders = [
     'No',
     'Nama BA',
@@ -488,7 +552,7 @@ export function exportToExcel(
   XLSX.utils.book_append_sheet(wb, wsFocus, 'Produk Fokus BA');
 
   // 12. Sheet: Matrix Target Terpadu (Area, SPV, Sales & BA)
-  const targetMatrix = aggregateTargetMatrix(records);
+  const targetMatrix = aggregateTargetMatrix(records, activeMonth);
   const targetRows: (string | number)[][] = [
     ['REKAPITULASI TARGET & REALISASI MULTI-TIER (AREA, SPV, SALES, BA)'],
     ['--- 1. TARGET PER COVER AREA ---'],

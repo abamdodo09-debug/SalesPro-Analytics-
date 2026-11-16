@@ -1,5 +1,6 @@
-import { TransactionRecord, ProfitAreaSummary, ProfitItemBreakdown, ProfitStoreItem } from '../types/dashboard';
-import { aggregateAreaCost } from './costCalculations';
+import { TransactionRecord, ProfitAreaSummary, ProfitItemBreakdown, ProfitStoreItem, BaFocusProductOverride } from '../types/dashboard';
+import { aggregateAreaCost, TrainerCostConfigInput } from './costCalculations';
+import { DEFAULT_FOCUS_TARGET_PCS } from '../services/focusProductService';
 
 /**
  * KALKULASI PROFIT AREA (P&L PORTFOLIO):
@@ -29,7 +30,12 @@ export function calculateProfitArea(
   customSalesPenalties: Record<string, number> = {},
   defaultSalesTarget: number = 150000000,
   defaultBaNonLavojoyTarget: number = 30000000,
-  defaultBaLavojoyTarget: number = 5000000
+  defaultBaLavojoyTarget: number = 5000000,
+  customBaFocusOverrides?: Record<string, BaFocusProductOverride>,
+  trainerConfigsOverride?: TrainerCostConfigInput[],
+  trainerMonthlyTargetsOverride?: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; notes?: string }>,
+  trainerMonthPeriod: string = 'OKTOBER 2026',
+  baFocusTargetsOverride?: Record<string, number>
 ): ProfitAreaSummary {
   // 1. Dapatkan agregasi beban gaji dari modul Cost Area
   const costData = aggregateAreaCost(
@@ -41,7 +47,19 @@ export function calculateProfitArea(
     customSalesPenalties,
     defaultSalesTarget,
     defaultBaNonLavojoyTarget,
-    defaultBaLavojoyTarget
+    defaultBaLavojoyTarget,
+    customBaFocusOverrides,
+    DEFAULT_FOCUS_TARGET_PCS,
+    {},
+    {},
+    {},
+    {},
+    {},
+    {},
+    trainerMonthPeriod,
+    trainerConfigsOverride,
+    trainerMonthlyTargetsOverride,
+    baFocusTargetsOverride
   );
 
   // 2. Hitung Realisasi Sell In

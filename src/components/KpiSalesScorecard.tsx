@@ -40,13 +40,76 @@ import {
 } from '../services/agingAndKpiService';
 import { formatRupiah, formatPercent } from '../utils/analytics';
 import * as XLSX from 'xlsx';
+import {
+  TARGETS_UPDATED_EVENT,
+  loadSalesSellOutTargets,
+  setSingleTargetOverride,
+} from '../services/targetManagementService';
+
+const syncKpiSalesWithTargetOverrides = (
+  items: KpiSalesScorecardItem[]
+): { items: KpiSalesScorecardItem[]; changed: boolean } => {
+  let changed = false;
+  const next = items.map((item) => {
+    const monthTargets = loadSalesSellOutTargets(item.monthPeriod || 'ALL');
+    const matchKey = Object.keys(monthTargets).find(
+      (k) => k.toUpperCase().trim() === item.salesName.toUpperCase().trim()
+    );
+    const overrideTarget = matchKey ? monthTargets[matchKey] : undefined;
+    if (overrideTarget && overrideTarget > 0 && overrideTarget !== item.sellOutTarget) {
+      changed = true;
+      const newPct = (item.sellOutActual / overrideTarget) * 100;
+      const calc = calculateKpiPoints({
+        sellOutAchievementPct: newPct,
+        overdueStoresUp45Count: item.overdueStoresUp45Count,
+        visitLogsCount: item.visitLogsCount,
+        baReportWeeklyPct: item.baReportWeeklyPct,
+        baStockOpnameAppPct: item.baStockOpnameAppPct,
+        storesUsingBufferAppPct: item.storesUsingBufferAppPct,
+      });
+      const finalTHP =
+        item.baseSalary +
+        item.sellInIncentive +
+        item.baBonus -
+        item.baPenalty +
+        calc.kpiIncentive -
+        calc.kpiPenalty -
+        item.tagihanPenalty;
+      return {
+        ...item,
+        sellOutTarget: overrideTarget,
+        sellOutAchievementPct: newPct,
+        pointSellOut: calc.pointSellOut,
+        pointTagihan45H: calc.pointTagihan45H,
+        pointKunjungan: calc.pointKunjungan,
+        pointBaReportWeekly: calc.pointBaReportWeekly,
+        pointBaStockOpname: calc.pointBaStockOpname,
+        pointMonitoringBa: calc.pointMonitoringBa,
+        pointBufferStock: calc.pointBufferStock,
+        totalScore: calc.totalScore,
+        grade: calc.grade,
+        kpiIncentive: calc.kpiIncentive,
+        kpiPenalty: calc.kpiPenalty,
+        hasSp1: calc.hasSp1,
+        finalTakeHomePay: finalTHP,
+      };
+    }
+    return item;
+  });
+  return { items: next, changed };
+};
 
 interface KpiSalesScorecardProps {
   filters: DashboardFilters;
 }
 
 export const KpiSalesScorecard: React.FC<KpiSalesScorecardProps> = ({ filters }) => {
-  const [kpiList, setKpiList] = useState<KpiSalesScorecardItem[]>(() => loadKpiSalesData());
+  const [kpiList, setKpiList] = useState<KpiSalesScorecardItem[]>(() => {
+    const initial = loadKpiSalesData();
+    const { items: synced, changed } = syncKpiSalesWithTargetOverrides(initial);
+    if (changed) saveKpiSalesData(synced);
+    return synced;
+  });
   const [searchQuery, setSearchQuery] = useState('');
   const [showPillarGuide, setShowPillarGuide] = useState(true);
 
@@ -79,6 +142,26 @@ export const KpiSalesScorecard: React.FC<KpiSalesScorecardProps> = ({ filters })
       setSelectedMonthPeriod(formatted);
     }
   }, [filters.BULAN]);
+
+  // Listen to Pusat Kelola Target changes and auto-sync Sell Out targets per month
+  useEffect(() => {
+    const handleTargetsUpdated = () => {
+      setKpiList((prev) => {
+        const { items: synced, changed } = syncKpiSalesWithTargetOverrides(prev);
+        if (changed) {
+          saveKpiSalesData(synced);
+          return synced;
+        }
+        return prev;
+      });
+    };
+    window.addEventListener(TARGETS_UPDATED_EVENT, handleTargetsUpdated);
+    window.addEventListener('storage', handleTargetsUpdated);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, handleTargetsUpdated);
+      window.removeEventListener('storage', handleTargetsUpdated);
+    };
+  }, []);
 
   // Dynamic list of available month periods
   const availableMonthPeriods = useMemo(() => {
@@ -295,6 +378,14 @@ export const KpiSalesScorecard: React.FC<KpiSalesScorecardProps> = ({ filters })
 
     setKpiList(updated);
     saveKpiSalesData(updated);
+    if (editSellOutTarget > 0) {
+      setSingleTargetOverride(
+        'salesSellOut',
+        editingItem.salesName,
+        editSellOutTarget,
+        editMonthPeriod.trim().toUpperCase() || editingItem.monthPeriod
+      );
+    }
     setEditingItem(null);
   };
 
