@@ -8,6 +8,8 @@ import {
   SalesGapDiagnosis,
   DropEntityItem,
   GapDriverFactor,
+  FactorStoreContribution,
+  StoreGapDetailItem,
   EntityProductAnalysisItem,
   FocusNewOverallSummary,
   ComparisonGrowthResult,
@@ -15,6 +17,11 @@ import {
   ProductStatusMetricItem,
   ProductLifecycleStatus,
 } from '../types/dashboard';
+import {
+  resolveActiveGapQuotaDetail,
+  GAP_TRAINER_LIST,
+  GapMonthlyQuotaConfig,
+} from '../services/gapTargetService';
 
 // Product Lifecycle Statuses (Bilingual Chinese - English)
 export const ALL_PRODUCT_STATUSES: ProductLifecycleStatus[] = [
@@ -464,6 +471,11 @@ export function filterRecords(
     // Sales
     if (filters.SALES !== 'ALL' && (r.SALES || '').trim().toUpperCase() !== filters.SALES.trim().toUpperCase()) return false;
 
+    // Trainer (ARA / RATIH)
+    if (filters.TRAINER && filters.TRAINER !== 'ALL') {
+      if (getTrainerForRecord(r).trim().toUpperCase() !== filters.TRAINER.trim().toUpperCase()) return false;
+    }
+
     // SPV
     if (filters.SPV !== 'ALL' && (r.SPV || '').trim().toUpperCase() !== filters.SPV.trim().toUpperCase()) return false;
 
@@ -500,12 +512,14 @@ export function filterRecords(
     // Free text search
     if (filters.searchQuery && filters.searchQuery.trim()) {
       const q = filters.searchQuery.trim().toLowerCase();
+      const trainerName = getTrainerForRecord(r).toLowerCase();
       const match =
         (r.SKU && r.SKU.toLowerCase().includes(q)) ||
         (r.KATEGORI && r.KATEGORI.toLowerCase().includes(q)) ||
         (r.STATUS_PRODUK && r.STATUS_PRODUK.toLowerCase().includes(q)) ||
         (r.NAMA_STORE && r.NAMA_STORE.toLowerCase().includes(q)) ||
         (r.SALES && r.SALES.toLowerCase().includes(q)) ||
+        trainerName.includes(q) ||
         (r.SPV && r.SPV.toLowerCase().includes(q)) ||
         (r.BRAND && r.BRAND.toLowerCase().includes(q)) ||
         (r.REGION && r.REGION.toLowerCase().includes(q)) ||
@@ -532,6 +546,9 @@ export function getCascadingOptions(
       if (ignoreKey !== 'BULAN' && currentFilters.BULAN !== 'ALL' && (r.BULAN || '').trim().toUpperCase() !== currentFilters.BULAN.trim().toUpperCase()) return false;
       if (ignoreKey !== 'TAHUN' && currentFilters.TAHUN !== 'ALL' && String(r.TAHUN || '').trim() !== String(currentFilters.TAHUN).trim()) return false;
       if (ignoreKey !== 'SALES' && currentFilters.SALES !== 'ALL' && (r.SALES || '').trim().toUpperCase() !== currentFilters.SALES.trim().toUpperCase()) return false;
+      if (ignoreKey !== 'TRAINER' && currentFilters.TRAINER && currentFilters.TRAINER !== 'ALL') {
+        if (getTrainerForRecord(r).trim().toUpperCase() !== currentFilters.TRAINER.trim().toUpperCase()) return false;
+      }
       if (ignoreKey !== 'SPV' && currentFilters.SPV !== 'ALL' && (r.SPV || '').trim().toUpperCase() !== currentFilters.SPV.trim().toUpperCase()) return false;
       if (ignoreKey !== 'BRAND' && currentFilters.BRAND !== 'ALL' && (r.BRAND || '').trim().toUpperCase() !== currentFilters.BRAND.trim().toUpperCase()) return false;
       if (ignoreKey !== 'KATEGORI' && currentFilters.KATEGORI && currentFilters.KATEGORI !== 'ALL' && (r.KATEGORI || '').trim().toUpperCase() !== currentFilters.KATEGORI.trim().toUpperCase()) return false;
@@ -557,6 +574,12 @@ export function getCascadingOptions(
 
   const availableYears = getUnique(filterIgnoring('TAHUN'), 'TAHUN').sort((a, b) => Number(b) - Number(a));
   const availableSales = getUnique(filterIgnoring('SALES'), 'SALES');
+  const availableTrainers = Array.from(
+    new Set([
+      ...GAP_TRAINER_LIST,
+      ...filterIgnoring('TRAINER').map((r) => getTrainerForRecord(r)).filter(Boolean),
+    ])
+  ).sort();
   const availableSpv = getUnique(filterIgnoring('SPV'), 'SPV');
   const availableBrands = getUnique(filterIgnoring('BRAND'), 'BRAND');
   const availableCategories = getUnique(filterIgnoring('KATEGORI'), 'KATEGORI');
@@ -577,6 +600,7 @@ export function getCascadingOptions(
     months: availableMonths,
     years: availableYears,
     sales: availableSales,
+    trainers: availableTrainers,
     spv: availableSpv,
     brands: availableBrands,
     categories: availableCategories,
@@ -1684,13 +1708,67 @@ export function getTrainerForRecord(r: TransactionRecord): string {
   return 'ARA';
 }
 
+export function extractDayOfMonth(record: TransactionRecord): number | null {
+  const raw = (record.TANGGAL || '').trim();
+  if (!raw) return null;
+
+  // ISO format: YYYY-MM-DD or YYYY/MM/DD
+  const isoMatch = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (isoMatch) {
+    const day = parseInt(isoMatch[3], 10);
+    return day >= 1 && day <= 31 ? day : null;
+  }
+
+  // Slash or dash format: A/B/C or A-B-C
+  const slashMatch = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})/);
+  if (slashMatch) {
+    const a = parseInt(slashMatch[1], 10);
+    const b = parseInt(slashMatch[2], 10);
+    const expectedMonth = MONTH_ORDER[(record.BULAN || '').trim().toUpperCase()];
+
+    if (expectedMonth) {
+      if (a === expectedMonth && b >= 1 && b <= 31) return b;
+      if (b === expectedMonth && a >= 1 && a <= 31) return a;
+    }
+
+    if (b > 12 && b <= 31) return b;
+    if (a > 12 && a <= 31) return a;
+    if (b >= 1 && b <= 31) return b;
+  }
+
+  const parsed = new Date(raw);
+  if (!isNaN(parsed.getTime())) {
+    const day = parsed.getDate();
+    return day >= 1 && day <= 31 ? day : null;
+  }
+  return null;
+}
+
 // Gap & Root Cause Diagnosis: Why did sales drop?
 export function diagnoseSalesGap(
   allRecords: TransactionRecord[],
   filteredRecords: TransactionRecord[],
-  filters: DashboardFilters
+  filters: DashboardFilters,
+  customTargetQuotaOverride?: number | GapMonthlyQuotaConfig,
+  dateRange?: { startDay?: number; endDay?: number }
 ): SalesGapDiagnosis {
-  const dataset = filteredRecords.length > 0 ? filteredRecords : allRecords;
+  const isSellInRecord = (r: TransactionRecord) => {
+    const k = (r.KET || '').trim().toUpperCase();
+    return k === 'SELL IN' || k.includes('SELL IN');
+  };
+  const isSellOutRecord = (r: TransactionRecord) => {
+    const k = (r.KET || '').trim().toUpperCase();
+    return k === 'SELL OUT' || k.includes('SELL OUT');
+  };
+
+  // Apply all non-period filters (including KET, SALES, SPV, BRAND, REGION, etc.) to allRecords
+  const scopedRecords = filterRecords(allRecords, {
+    ...filters,
+    BULAN: 'ALL',
+    TAHUN: 'ALL',
+  });
+  const basePool = scopedRecords;
+  const dataset = filteredRecords.length > 0 ? filteredRecords : scopedRecords;
   const activeYear = filters.TAHUN !== 'ALL' ? Number(filters.TAHUN) : 2026;
 
   // Determine current period vs comparison period
@@ -1703,75 +1781,209 @@ export function diagnoseSalesGap(
     currentPeriodName = filters.BULAN.toUpperCase().trim();
     const currentIdx = MONTH_ORDER[currentPeriodName] || 10;
     const prevIdx = currentIdx > 1 ? currentIdx - 1 : 12;
+    const prevYear = currentIdx === 1 ? activeYear - 1 : activeYear;
     previousPeriodName = MONTH_NAMES_ID[prevIdx - 1];
 
-    currentSubset = allRecords.filter((r) => r.TAHUN === activeYear && (r.BULAN || '').toUpperCase().trim() === currentPeriodName);
-    previousSubset = allRecords.filter((r) => r.TAHUN === activeYear && (r.BULAN || '').toUpperCase().trim() === previousPeriodName);
+    currentSubset = basePool.filter(
+      (r) => r.TAHUN === activeYear && (r.BULAN || '').toUpperCase().trim() === currentPeriodName
+    );
+    previousSubset = basePool.filter(
+      (r) => r.TAHUN === prevYear && (r.BULAN || '').toUpperCase().trim() === previousPeriodName
+    );
   } else {
     // Dynamic resolution: pick the latest month in dataset (e.g. OKTOBER) and its predecessor (SEPTEMBER)
-    const availableMonths = Array.from(new Set(
-      allRecords
-        .filter((r) => r.TAHUN === activeYear && r.BULAN && r.BULAN !== 'ALL')
-        .map((r) => r.BULAN.toUpperCase().trim())
-    )).sort((a, b) => (MONTH_ORDER[b] || 0) - (MONTH_ORDER[a] || 0));
+    const availableMonths = Array.from(
+      new Set(
+        (basePool.length > 0 ? basePool : allRecords)
+          .filter((r) => r.TAHUN === activeYear && r.BULAN && r.BULAN !== 'ALL')
+          .map((r) => r.BULAN.toUpperCase().trim())
+      )
+    ).sort((a, b) => (MONTH_ORDER[b] || 0) - (MONTH_ORDER[a] || 0));
 
     const latestMonth = availableMonths[0] || 'OKTOBER';
     const latestMonthIdx = MONTH_ORDER[latestMonth] || 10;
     const prevIdx = latestMonthIdx > 1 ? latestMonthIdx - 1 : 12;
+    const prevYear = latestMonthIdx === 1 ? activeYear - 1 : activeYear;
     const prevMonth = MONTH_NAMES_ID[prevIdx - 1];
 
     currentPeriodName = `${latestMonth} ${activeYear}`;
-    previousPeriodName = `${prevMonth} ${activeYear}`;
-    currentSubset = allRecords.filter((r) => r.TAHUN === activeYear && (r.BULAN || '').toUpperCase().trim() === latestMonth);
-    previousSubset = allRecords.filter((r) => r.TAHUN === activeYear && (r.BULAN || '').toUpperCase().trim() === prevMonth);
+    previousPeriodName = `${prevMonth} ${prevYear}`;
+    currentSubset = basePool.filter(
+      (r) => r.TAHUN === activeYear && (r.BULAN || '').toUpperCase().trim() === latestMonth
+    );
+    previousSubset = basePool.filter(
+      (r) => r.TAHUN === prevYear && (r.BULAN || '').toUpperCase().trim() === prevMonth
+    );
 
-    if (currentSubset.length === 0) {
+    if (currentSubset.length === 0 && basePool.length > 0) {
       currentSubset = dataset;
-      previousSubset = allRecords.filter((r) => r.TAHUN === (activeYear - 1));
+      previousSubset = basePool.filter((r) => r.TAHUN === activeYear - 1);
       currentPeriodName = 'Periode Aktif';
       previousPeriodName = 'Baseline Tahun Lalu';
     }
   }
 
-  // Calculate Actuals
+  // Apply optional Date-of-Month Range filter (e.g., Tgl 1-15 or Tgl 1-30 across both compared months)
+  const rawStart = dateRange?.startDay ?? 1;
+  const rawEnd = dateRange?.endDay ?? 31;
+  const startDay = Math.max(1, Math.min(31, Math.min(rawStart, rawEnd)));
+  const endDay = Math.max(1, Math.min(31, Math.max(rawStart, rawEnd)));
+  const hasDateDayFilter = startDay > 1 || endDay < 31;
+
+  if (hasDateDayFilter) {
+    const matchesDayRange = (r: TransactionRecord) => {
+      const day = extractDayOfMonth(r);
+      return day !== null && day >= startDay && day <= endDay;
+    };
+    currentSubset = currentSubset.filter(matchesDayRange);
+    previousSubset = previousSubset.filter(matchesDayRange);
+
+    const dateTag = startDay === endDay ? `Tgl ${startDay}` : `Tgl ${startDay}–${endDay}`;
+    currentPeriodName = `${currentPeriodName} (${dateTag})`;
+    previousPeriodName = `${previousPeriodName} (${dateTag})`;
+  }
+
+  // Calculate Actuals (Total, Sell In, Sell Out)
   const actualRevenue = currentSubset.reduce((acc, r) => acc + (r.VALUE || 0), 0);
   const previousRevenue = previousSubset.reduce((acc, r) => acc + (r.VALUE || 0), 0);
   const deltaVsPrevious = actualRevenue - previousRevenue;
 
-  // Estimated Target: 1.12x of previous or actual + margin
-  const totalTarget = Math.round(Math.max(previousRevenue * 1.10, actualRevenue * 1.15, 130_000_000));
-  const gapDeficit = Math.max(0, totalTarget - actualRevenue);
+  const sellInActual = currentSubset
+    .filter(isSellInRecord)
+    .reduce((acc, r) => acc + (r.VALUE || 0), 0);
+  const sellInPrevious = previousSubset
+    .filter(isSellInRecord)
+    .reduce((acc, r) => acc + (r.VALUE || 0), 0);
+  const sellOutActual = currentSubset
+    .filter(isSellOutRecord)
+    .reduce((acc, r) => acc + (r.VALUE || 0), 0);
+  const sellOutPrevious = previousSubset
+    .filter(isSellOutRecord)
+    .reduce((acc, r) => acc + (r.VALUE || 0), 0);
+
+  const resolvedScope = resolveActiveGapQuotaDetail(filters);
+  const autoDefaultTarget = 0;
+  const autoSellInTarget = 0;
+  const autoSellOutTarget = 0;
+
+  const quotaDetail: GapMonthlyQuotaConfig =
+    typeof customTargetQuotaOverride === 'number'
+      ? {
+          ...resolvedScope.config,
+          total: customTargetQuotaOverride > 0 ? customTargetQuotaOverride : undefined,
+        }
+      : customTargetQuotaOverride && typeof customTargetQuotaOverride === 'object'
+      ? customTargetQuotaOverride
+      : resolvedScope.config;
+
+  const isCustomSellInTarget =
+    typeof quotaDetail.sellIn === 'number' && quotaDetail.sellIn > 0;
+  const sellInTarget = isCustomSellInTarget ? quotaDetail.sellIn! : 0;
+
+  const isCustomSellOutTarget =
+    typeof quotaDetail.sellOut === 'number' && quotaDetail.sellOut > 0;
+  const sellOutTarget = isCustomSellOutTarget ? quotaDetail.sellOut! : 0;
+
+  const ketMode = (filters.KET || 'ALL').trim().toUpperCase();
+  let totalTarget = 0;
+  let isCustomTarget = false;
+
+  if (ketMode === 'SELL IN') {
+    isCustomTarget = isCustomSellInTarget;
+    totalTarget = sellInTarget;
+  } else if (ketMode === 'SELL OUT') {
+    isCustomTarget = isCustomSellOutTarget;
+    totalTarget = sellOutTarget;
+  } else if (typeof quotaDetail.total === 'number' && quotaDetail.total > 0) {
+    isCustomTarget = true;
+    totalTarget = quotaDetail.total;
+  } else if (isCustomSellInTarget || isCustomSellOutTarget) {
+    isCustomTarget = true;
+    totalTarget = sellInTarget + sellOutTarget;
+  }
+
+  const sellInGapDeficit = sellInTarget > 0 ? Math.max(0, sellInTarget - sellInActual) : 0;
+  const sellOutGapDeficit = sellOutTarget > 0 ? Math.max(0, sellOutTarget - sellOutActual) : 0;
+
+  const gapDeficit = totalTarget > 0 ? Math.max(0, totalTarget - actualRevenue) : 0;
   const gapPercentage = totalTarget > 0 ? (gapDeficit / totalTarget) * 100 : 0;
 
-  // 1. Group by Store: Identify Stores with drop or zero order
-  const storePrevMap: Record<string, { val: number; region: string; sales: string }> = {};
-  const storeCurMap: Record<string, { val: number; region: string; sales: string }> = {};
+  // 1. Group by Store: Identify Stores with drop, zero order, focus drop, or returns
+  interface StoreAgg {
+    val: number;
+    sellIn: number;
+    sellOut: number;
+    focusVal: number;
+    returnVal: number;
+    region: string;
+    sales: string;
+    spv: string;
+  }
+  const storePrevMap: Record<string, StoreAgg> = {};
+  const storeCurMap: Record<string, StoreAgg> = {};
 
   previousSubset.forEach((r) => {
+    const prevEntry = storePrevMap[r.NAMA_STORE];
+    const v = r.VALUE || 0;
+    const isFocus = isFocusProduct(r);
+    const isRet = v < 0 || (r.KET || '').toUpperCase() === 'RETURN';
     storePrevMap[r.NAMA_STORE] = {
-      val: (storePrevMap[r.NAMA_STORE]?.val || 0) + (r.VALUE || 0),
-      region: r.REGION,
-      sales: r.SALES,
+      val: (prevEntry?.val || 0) + v,
+      sellIn: (prevEntry?.sellIn || 0) + (isSellInRecord(r) ? v : 0),
+      sellOut: (prevEntry?.sellOut || 0) + (isSellOutRecord(r) ? v : 0),
+      focusVal: (prevEntry?.focusVal || 0) + (isFocus ? v : 0),
+      returnVal: (prevEntry?.returnVal || 0) + (isRet ? Math.abs(v) : 0),
+      region: r.REGION || prevEntry?.region || 'PEKAN BARU',
+      sales: r.SALES || prevEntry?.sales || '-',
+      spv: r.SPV || prevEntry?.spv || '-',
     };
   });
 
   currentSubset.forEach((r) => {
+    const curEntry = storeCurMap[r.NAMA_STORE];
+    const v = r.VALUE || 0;
+    const isFocus = isFocusProduct(r);
+    const isRet = v < 0 || (r.KET || '').toUpperCase() === 'RETURN';
     storeCurMap[r.NAMA_STORE] = {
-      val: (storeCurMap[r.NAMA_STORE]?.val || 0) + (r.VALUE || 0),
-      region: r.REGION,
-      sales: r.SALES,
+      val: (curEntry?.val || 0) + v,
+      sellIn: (curEntry?.sellIn || 0) + (isSellInRecord(r) ? v : 0),
+      sellOut: (curEntry?.sellOut || 0) + (isSellOutRecord(r) ? v : 0),
+      focusVal: (curEntry?.focusVal || 0) + (isFocus ? v : 0),
+      returnVal: (curEntry?.returnVal || 0) + (isRet ? Math.abs(v) : 0),
+      region: r.REGION || curEntry?.region || 'PEKAN BARU',
+      sales: r.SALES || curEntry?.sales || '-',
+      spv: r.SPV || curEntry?.spv || '-',
     };
   });
 
   const allStores = Array.from(new Set([...Object.keys(storePrevMap), ...Object.keys(storeCurMap)]));
   const droppingStores: DropEntityItem[] = [];
+  const rawStoreGapItems: Omit<StoreGapDetailItem, 'contributionPercent'>[] = [];
+  const lostStoreContribs: Omit<FactorStoreContribution, 'sharePercent'>[] = [];
+  const volumeDropStoreContribs: Omit<FactorStoreContribution, 'sharePercent'>[] = [];
+  const focusDropStoreContribs: Omit<FactorStoreContribution, 'sharePercent'>[] = [];
+  const returnStoreContribs: Omit<FactorStoreContribution, 'sharePercent'>[] = [];
+  const routeWeakStoreContribs: Omit<FactorStoreContribution, 'sharePercent'>[] = [];
+
   let lostStoresCount = 0;
   let lowOrderStoresCount = 0;
   let totalStoreDeficit = 0;
 
   allStores.forEach((st) => {
-    const prev = storePrevMap[st]?.val || 0;
-    const cur = storeCurMap[st]?.val || 0;
+    const prevObj = storePrevMap[st];
+    const curObj = storeCurMap[st];
+    const prev = prevObj?.val || 0;
+    const cur = curObj?.val || 0;
+    const sellInPrev = prevObj?.sellIn || 0;
+    const sellInCur = curObj?.sellIn || 0;
+    const sellOutPrev = prevObj?.sellOut || 0;
+    const sellOutCur = curObj?.sellOut || 0;
+    const returnVal = curObj?.returnVal || 0;
+    const focusDropVal = Math.max(0, (prevObj?.focusVal || 0) - (curObj?.focusVal || 0));
+    const region = curObj?.region || prevObj?.region || 'PEKAN BARU';
+    const salesName = curObj?.sales || prevObj?.sales || '-';
+    const spvName = curObj?.spv || prevObj?.spv || '-';
+
     const delta = cur - prev;
     if (delta < 0) {
       const deficit = Math.abs(delta);
@@ -1779,45 +1991,174 @@ export function diagnoseSalesGap(
       const pct = prev > 0 ? (delta / prev) * 100 : -100;
 
       let reason = 'Volume Pembelian Berkurang';
-      if (cur === 0 && prev > 0) {
+      let gapCategory: 'lost_outlet' | 'volume_drop' | 'return_impact' = 'volume_drop';
+
+      if (cur <= 0 && prev > 0) {
         lostStoresCount++;
+        gapCategory = 'lost_outlet';
         reason = 'Toko Pasif / Tidak Ada Repeat Order di Periode Ini';
-      } else if (pct < -45) {
-        lowOrderStoresCount++;
-        reason = 'Penurunan Signifikan (>45%) / Overstock dari Order Sebelumnya';
-      } else if (prev > 5_000_000) {
-        reason = 'Penyusutan Order Akun Besar (Key Account De-stocking)';
+        lostStoreContribs.push({
+          storeName: st,
+          salesName,
+          region,
+          spv: spvName,
+          previousValue: prev,
+          currentValue: cur,
+          impactValue: deficit,
+          note: '0 order di periode berjalan',
+        });
+      } else {
+        if (pct < -45) {
+          lowOrderStoresCount++;
+          reason = 'Penurunan Signifikan (>45%) / Overstock dari Order Sebelumnya';
+        } else if (prev > 5_000_000) {
+          reason = 'Penyusutan Order Akun Besar (Key Account De-stocking)';
+        }
+        volumeDropStoreContribs.push({
+          storeName: st,
+          salesName,
+          region,
+          spv: spvName,
+          previousValue: prev,
+          currentValue: cur,
+          impactValue: deficit,
+          note: `Turun ${Math.abs(pct).toFixed(1)}% vs periode lalu`,
+        });
+      }
+
+      if (pct <= -25) {
+        routeWeakStoreContribs.push({
+          storeName: st,
+          salesName,
+          region,
+          spv: spvName,
+          previousValue: prev,
+          currentValue: cur,
+          impactValue: deficit,
+          note: `Area ${region} · Growth ${pct.toFixed(1)}%`,
+        });
       }
 
       droppingStores.push({
         name: st,
         previousValue: prev,
         currentValue: cur,
+        sellInPrevious: sellInPrev,
+        sellInCurrent: sellInCur,
+        sellOutPrevious: sellOutPrev,
+        sellOutCurrent: sellOutCur,
         deficitValue: deficit,
         growthPercent: pct,
         primaryReason: reason,
-        regionOrSales: `${storeCurMap[st]?.region || storePrevMap[st]?.region || 'PEKAN BARU'} · ${storeCurMap[st]?.sales || storePrevMap[st]?.sales || 'Sales Team'}`,
+        regionOrSales: `${region} · ${salesName}`,
+      });
+
+      rawStoreGapItems.push({
+        storeName: st,
+        region,
+        salesName,
+        spvName,
+        previousValue: prev,
+        currentValue: cur,
+        sellInPrevious: sellInPrev,
+        sellInCurrent: sellInCur,
+        sellOutPrevious: sellOutPrev,
+        sellOutCurrent: sellOutCur,
+        deficitValue: deficit,
+        returnValue: returnVal,
+        focusDropValue: focusDropVal,
+        growthPercent: pct,
+        gapCategory,
+        primaryReason: reason,
+      });
+    } else if (returnVal > 0) {
+      rawStoreGapItems.push({
+        storeName: st,
+        region,
+        salesName,
+        spvName,
+        previousValue: prev,
+        currentValue: cur,
+        sellInPrevious: sellInPrev,
+        sellInCurrent: sellInCur,
+        sellOutPrevious: sellOutPrev,
+        sellOutCurrent: sellOutCur,
+        deficitValue: returnVal,
+        returnValue: returnVal,
+        focusDropValue: focusDropVal,
+        growthPercent: prev > 0 ? (delta / prev) * 100 : 0,
+        gapCategory: 'return_impact',
+        primaryReason: 'Pemotongan Omset karena Retur / Klaim Produk',
+      });
+    }
+
+    if (focusDropVal > 0) {
+      focusDropStoreContribs.push({
+        storeName: st,
+        salesName,
+        region,
+        spv: spvName,
+        previousValue: prevObj?.focusVal || 0,
+        currentValue: curObj?.focusVal || 0,
+        impactValue: focusDropVal,
+        note: 'Penurunan Produk Fokus',
+      });
+    }
+
+    if (returnVal > 0) {
+      returnStoreContribs.push({
+        storeName: st,
+        salesName,
+        region,
+        spv: spvName,
+        previousValue: prevObj?.returnVal || 0,
+        currentValue: returnVal,
+        impactValue: returnVal,
+        note: 'Nilai retur tercatat',
       });
     }
   });
 
   droppingStores.sort((a, b) => b.deficitValue - a.deficitValue);
 
+  const totalGapForShare = rawStoreGapItems.reduce((s, item) => s + item.deficitValue, 0);
+  const storeGapDetails: StoreGapDetailItem[] = rawStoreGapItems
+    .map((item) => ({
+      ...item,
+      contributionPercent:
+        totalGapForShare > 0 ? (item.deficitValue / totalGapForShare) * 100 : 0,
+    }))
+    .sort((a, b) => b.deficitValue - a.deficitValue);
+
   // 2. Group by SKU: Identify SKUs with drop
-  const skuPrevMap: Record<string, { val: number; brand: string; focus: string }> = {};
-  const skuCurMap: Record<string, { val: number; brand: string; focus: string }> = {};
+  const skuPrevMap: Record<
+    string,
+    { val: number; sellIn: number; sellOut: number; brand: string; focus: string }
+  > = {};
+  const skuCurMap: Record<
+    string,
+    { val: number; sellIn: number; sellOut: number; brand: string; focus: string }
+  > = {};
 
   previousSubset.forEach((r) => {
+    const prevEntry = skuPrevMap[r.SKU];
+    const v = r.VALUE || 0;
     skuPrevMap[r.SKU] = {
-      val: (skuPrevMap[r.SKU]?.val || 0) + (r.VALUE || 0),
+      val: (prevEntry?.val || 0) + v,
+      sellIn: (prevEntry?.sellIn || 0) + (isSellInRecord(r) ? v : 0),
+      sellOut: (prevEntry?.sellOut || 0) + (isSellOutRecord(r) ? v : 0),
       brand: r.BRAND,
       focus: r.PRODUK_FOCUS,
     };
   });
 
   currentSubset.forEach((r) => {
+    const curEntry = skuCurMap[r.SKU];
+    const v = r.VALUE || 0;
     skuCurMap[r.SKU] = {
-      val: (skuCurMap[r.SKU]?.val || 0) + (r.VALUE || 0),
+      val: (curEntry?.val || 0) + v,
+      sellIn: (curEntry?.sellIn || 0) + (isSellInRecord(r) ? v : 0),
+      sellOut: (curEntry?.sellOut || 0) + (isSellOutRecord(r) ? v : 0),
       brand: r.BRAND,
       focus: r.PRODUK_FOCUS,
     };
@@ -1849,6 +2190,10 @@ export function diagnoseSalesGap(
         name: skuName,
         previousValue: prev,
         currentValue: cur,
+        sellInPrevious: skuPrevMap[skuName]?.sellIn || 0,
+        sellInCurrent: skuCurMap[skuName]?.sellIn || 0,
+        sellOutPrevious: skuPrevMap[skuName]?.sellOut || 0,
+        sellOutCurrent: skuCurMap[skuName]?.sellOut || 0,
         deficitValue: deficit,
         growthPercent: pct,
         primaryReason: reason,
@@ -1860,15 +2205,31 @@ export function diagnoseSalesGap(
   droppingSkus.sort((a, b) => b.deficitValue - a.deficitValue);
 
   // 3. Group by Brand
-  const brandPrevMap: Record<string, number> = {};
-  const brandCurMap: Record<string, number> = {};
-  previousSubset.forEach((r) => { brandPrevMap[r.BRAND] = (brandPrevMap[r.BRAND] || 0) + (r.VALUE || 0); });
-  currentSubset.forEach((r) => { brandCurMap[r.BRAND] = (brandCurMap[r.BRAND] || 0) + (r.VALUE || 0); });
+  const brandPrevMap: Record<string, { val: number; sellIn: number; sellOut: number }> = {};
+  const brandCurMap: Record<string, { val: number; sellIn: number; sellOut: number }> = {};
+  previousSubset.forEach((r) => {
+    const prevEntry = brandPrevMap[r.BRAND];
+    const v = r.VALUE || 0;
+    brandPrevMap[r.BRAND] = {
+      val: (prevEntry?.val || 0) + v,
+      sellIn: (prevEntry?.sellIn || 0) + (isSellInRecord(r) ? v : 0),
+      sellOut: (prevEntry?.sellOut || 0) + (isSellOutRecord(r) ? v : 0),
+    };
+  });
+  currentSubset.forEach((r) => {
+    const curEntry = brandCurMap[r.BRAND];
+    const v = r.VALUE || 0;
+    brandCurMap[r.BRAND] = {
+      val: (curEntry?.val || 0) + v,
+      sellIn: (curEntry?.sellIn || 0) + (isSellInRecord(r) ? v : 0),
+      sellOut: (curEntry?.sellOut || 0) + (isSellOutRecord(r) ? v : 0),
+    };
+  });
 
   const droppingBrands: DropEntityItem[] = [];
   Array.from(new Set([...Object.keys(brandPrevMap), ...Object.keys(brandCurMap)])).forEach((b) => {
-    const prev = brandPrevMap[b] || 0;
-    const cur = brandCurMap[b] || 0;
+    const prev = brandPrevMap[b]?.val || 0;
+    const cur = brandCurMap[b]?.val || 0;
     const delta = cur - prev;
     if (delta < 0) {
       const deficit = Math.abs(delta);
@@ -1876,6 +2237,10 @@ export function diagnoseSalesGap(
         name: b,
         previousValue: prev,
         currentValue: cur,
+        sellInPrevious: brandPrevMap[b]?.sellIn || 0,
+        sellInCurrent: brandCurMap[b]?.sellIn || 0,
+        sellOutPrevious: brandPrevMap[b]?.sellOut || 0,
+        sellOutCurrent: brandCurMap[b]?.sellOut || 0,
         deficitValue: deficit,
         growthPercent: prev > 0 ? (delta / prev) * 100 : -100,
         primaryReason: 'Penurunan Pesanan Toko untuk Portofolio Brand',
@@ -1885,15 +2250,31 @@ export function diagnoseSalesGap(
   droppingBrands.sort((a, b) => b.deficitValue - a.deficitValue);
 
   // 4. Group by Sales
-  const salesPrevMap: Record<string, number> = {};
-  const salesCurMap: Record<string, number> = {};
-  previousSubset.forEach((r) => { salesPrevMap[r.SALES] = (salesPrevMap[r.SALES] || 0) + (r.VALUE || 0); });
-  currentSubset.forEach((r) => { salesCurMap[r.SALES] = (salesCurMap[r.SALES] || 0) + (r.VALUE || 0); });
+  const salesPrevMap: Record<string, { val: number; sellIn: number; sellOut: number }> = {};
+  const salesCurMap: Record<string, { val: number; sellIn: number; sellOut: number }> = {};
+  previousSubset.forEach((r) => {
+    const prevEntry = salesPrevMap[r.SALES];
+    const v = r.VALUE || 0;
+    salesPrevMap[r.SALES] = {
+      val: (prevEntry?.val || 0) + v,
+      sellIn: (prevEntry?.sellIn || 0) + (isSellInRecord(r) ? v : 0),
+      sellOut: (prevEntry?.sellOut || 0) + (isSellOutRecord(r) ? v : 0),
+    };
+  });
+  currentSubset.forEach((r) => {
+    const curEntry = salesCurMap[r.SALES];
+    const v = r.VALUE || 0;
+    salesCurMap[r.SALES] = {
+      val: (curEntry?.val || 0) + v,
+      sellIn: (curEntry?.sellIn || 0) + (isSellInRecord(r) ? v : 0),
+      sellOut: (curEntry?.sellOut || 0) + (isSellOutRecord(r) ? v : 0),
+    };
+  });
 
   const droppingSales: DropEntityItem[] = [];
   Array.from(new Set([...Object.keys(salesPrevMap), ...Object.keys(salesCurMap)])).forEach((s) => {
-    const prev = salesPrevMap[s] || 0;
-    const cur = salesCurMap[s] || 0;
+    const prev = salesPrevMap[s]?.val || 0;
+    const cur = salesCurMap[s]?.val || 0;
     const delta = cur - prev;
     if (delta < 0) {
       const deficit = Math.abs(delta);
@@ -1901,6 +2282,10 @@ export function diagnoseSalesGap(
         name: s,
         previousValue: prev,
         currentValue: cur,
+        sellInPrevious: salesPrevMap[s]?.sellIn || 0,
+        sellInCurrent: salesCurMap[s]?.sellIn || 0,
+        sellOutPrevious: salesPrevMap[s]?.sellOut || 0,
+        sellOutCurrent: salesCurMap[s]?.sellOut || 0,
         deficitValue: deficit,
         growthPercent: prev > 0 ? (delta / prev) * 100 : -100,
         primaryReason: 'Penurunan Target Realisasi Kunjungan & Repeat Order Toko',
@@ -1910,67 +2295,383 @@ export function diagnoseSalesGap(
   droppingSales.sort((a, b) => b.deficitValue - a.deficitValue);
 
   // 5. Return Spike
-  const prevReturns = previousSubset.filter((r) => r.VALUE < 0 || r.KET === 'RETURN').reduce((acc, r) => acc + Math.abs(r.VALUE), 0);
-  const curReturns = currentSubset.filter((r) => r.VALUE < 0 || r.KET === 'RETURN').reduce((acc, r) => acc + Math.abs(r.VALUE), 0);
+  const prevReturns = previousSubset
+    .filter((r) => r.VALUE < 0 || (r.KET || '').toUpperCase() === 'RETURN')
+    .reduce((acc, r) => acc + Math.abs(r.VALUE), 0);
+  const curReturns = currentSubset
+    .filter((r) => r.VALUE < 0 || (r.KET || '').toUpperCase() === 'RETURN')
+    .reduce((acc, r) => acc + Math.abs(r.VALUE), 0);
   const returnSpikeImpact = Math.max(0, curReturns - prevReturns);
 
-  // 6. Build the 5 Primary Gap Drivers (Root Causes with Action Plans)
-  const lostStoresValue = droppingStores.filter((s) => s.currentValue === 0).reduce((acc, s) => acc + s.deficitValue, 0);
-  const volumeDeclineValue = droppingStores.filter((s) => s.currentValue > 0).reduce((acc, s) => acc + s.deficitValue, 0);
-  const focusSkuDeficit = droppingSkus.filter((s) => s.primaryReason.includes('Hero SKU')).reduce((acc, s) => acc + s.deficitValue, 0);
+  // 6. Build the 5 Primary Gap Drivers (100% synced with active filters + target quota + store details)
+  const attachShareAndSort = (
+    list: Omit<FactorStoreContribution, 'sharePercent'>[]
+  ): FactorStoreContribution[] => {
+    const sorted = [...list].sort((a, b) => b.impactValue - a.impactValue);
+    const total = sorted.reduce((sum, item) => sum + item.impactValue, 0);
+    return sorted.map((item) => ({
+      ...item,
+      sharePercent: total > 0 ? (item.impactValue / total) * 100 : 0,
+    }));
+  };
 
-  const totalEvaluatedDrop = Math.max(gapDeficit, (lostStoresValue + volumeDeclineValue) || 12_000_000);
+  const lostStoresList = attachShareAndSort(lostStoreContribs);
+  const volumeDropList = attachShareAndSort(volumeDropStoreContribs);
+  const focusDropList = attachShareAndSort(focusDropStoreContribs);
+  const returnStoreList = attachShareAndSort(returnStoreContribs);
+  const routeWeakList = attachShareAndSort(
+    routeWeakStoreContribs.length > 0 ? routeWeakStoreContribs : volumeDropStoreContribs
+  );
 
-  const primaryDrivers: GapDriverFactor[] = [
-    {
-      factor: 'Toko Pasif / Kehilangan Repeat Order (Lost Outlets)',
-      impactValue: lostStoresValue || Math.round(totalEvaluatedDrop * 0.38),
-      percentageOfGap: totalEvaluatedDrop > 0 ? Math.round(((lostStoresValue || totalEvaluatedDrop * 0.38) / totalEvaluatedDrop) * 100) : 38,
-      description: `${lostStoresCount > 0 ? lostStoresCount : 'Beberapa'} toko yang aktif di periode lalu tidak melakukan repeat order sama sekali di periode ini. Terjadi penumpukan stok lama atau kelalaian rute follow-up sales.`,
-      actionPlan: 'SPV segera lakukan program re-call & re-visit darurat dalam 3x24 jam. Tawarkan trade-in atau program konsinyasi promosi untuk mengaktifkan kembali akun toko.',
-    },
-    {
-      factor: 'Penurunan Ukuran Keranjang / De-Stocking Gerai Eksisting',
-      impactValue: volumeDeclineValue || Math.round(totalEvaluatedDrop * 0.32),
-      percentageOfGap: totalEvaluatedDrop > 0 ? Math.round(((volumeDeclineValue || totalEvaluatedDrop * 0.32) / totalEvaluatedDrop) * 100) : 32,
-      description: 'Toko memangkas kuantitas order (hanya order SKU fast moving tipis) karena likuiditas kas toko berhati-hati atau stok buffer masih cukup.',
-      actionPlan: 'Berikan skema promo berjenjang (Diskon kuantitas / Bundling Buy 12 Free 1 / Bonus Tester Display) guna mendorong toko menaikkan order minimum.',
-    },
-    {
-      factor: 'Perlambatan Hero SKU / Bauran Produk Margin Tinggi',
-      impactValue: focusSkuDeficit || Math.round(totalEvaluatedDrop * 0.18),
-      percentageOfGap: totalEvaluatedDrop > 0 ? Math.round(((focusSkuDeficit || totalEvaluatedDrop * 0.18) / totalEvaluatedDrop) * 100) : 18,
-      description: 'Penyumbang defisit nominal terbesar ada pada SKU berharga tinggi (Cushion, Serum, Setting Spray). Toko cenderung hanya mengambil sheet mask / lip tint murah.',
-      actionPlan: 'Kerahkan Beauty Advisor (BA) aktif di store utama untuk demo langsung produk cushion/serum ke end-consumer demi mempercepat Sell-Out di rak toko.',
-    },
-    {
-      factor: 'Peningkatan Beban Retur & Klaim Produk Rusak',
-      impactValue: curReturns || Math.round(totalEvaluatedDrop * 0.07),
-      percentageOfGap: totalEvaluatedDrop > 0 ? Math.round(((curReturns || totalEvaluatedDrop * 0.07) / totalEvaluatedDrop) * 100) : 7,
-      description: `Nilai retur tercatat ${formatRupiah(curReturns)}. Klaim barang cacat kemasan, mendekati ED (Expired Date), atau penarikan batch memotong net revenue penjualan.`,
-      actionPlan: 'Audit SOP pengemasan & ekspedisi rute luar kota. Terapkan rotasi FEFO (First Expired First Out) ketat di gudang DC.',
-    },
-    {
-      factor: 'Kesenjangan Produktivitas Rute Sales & Cover Area',
-      impactValue: Math.round(totalEvaluatedDrop * 0.05),
-      percentageOfGap: 5,
-      description: 'Cakupan Area Baru dan Luar Kota memiliki frekuensi kunjungan lebih rendah dibanding Dalam Kota, memicu keterlambatan pengisian stok rak.',
-      actionPlan: 'SPV wajib menyusun ulang jadwal rute PJP (Permanent Journey Plan) sales mingguan dan targetkan minimal 6-8 call toko efektif per hari.',
-    },
+  const lostStoresValue = lostStoresList.reduce((acc, s) => acc + s.impactValue, 0);
+  const volumeDeclineValue = volumeDropList.reduce((acc, s) => acc + s.impactValue, 0);
+  const focusSkuDeficitFromStores = focusDropList.reduce((acc, s) => acc + s.impactValue, 0);
+  const focusSkuDeficit =
+    focusSkuDeficitFromStores > 0
+      ? focusSkuDeficitFromStores
+      : droppingSkus
+          .filter((s) => s.primaryReason.includes('Hero SKU'))
+          .reduce((acc, s) => acc + s.deficitValue, 0);
+
+  const remainingQuotaGap = Math.max(0, gapDeficit - (lostStoresValue + volumeDeclineValue));
+  const routeImpactValue =
+    remainingQuotaGap > 0
+      ? remainingQuotaGap
+      : routeWeakList.reduce((acc, s) => acc + s.impactValue, 0) > 0
+      ? Math.round(totalStoreDeficit * 0.1)
+      : 0;
+
+  const rawImpacts = [
+    lostStoresValue,
+    volumeDeclineValue,
+    focusSkuDeficit,
+    curReturns,
+    routeImpactValue,
   ];
+  const totalFactorImpactSum = rawImpacts.reduce((s, v) => s + v, 0);
+
+  // Compute clean integer weights summing to 100% when impact > 0
+  let factorPercents = [0, 0, 0, 0, 0];
+  if (totalFactorImpactSum > 0) {
+    const exact = rawImpacts.map((v) => (v / totalFactorImpactSum) * 100);
+    const floored = exact.map((v) => Math.floor(v));
+    let remainder = 100 - floored.reduce((s, v) => s + v, 0);
+    const order = exact
+      .map((v, i) => ({ i, frac: v - floored[i] }))
+      .sort((a, b) => b.frac - a.frac);
+    for (let k = 0; k < remainder; k++) {
+      floored[order[k % order.length].i] += 1;
+    }
+    factorPercents = floored;
+  }
+
+  // Active Filter Context Label for Action Plans
+  const activeScopeParts: string[] = [];
+  if (filters.SPV !== 'ALL') activeScopeParts.push(`SPV ${filters.SPV}`);
+  if (filters.SALES !== 'ALL') activeScopeParts.push(`Sales ${filters.SALES}`);
+  if (filters.TRAINER && filters.TRAINER !== 'ALL') activeScopeParts.push(`Trainer ${filters.TRAINER}`);
+  if (filters.REGION !== 'ALL') activeScopeParts.push(`Region ${filters.REGION}`);
+  if (filters.BRAND !== 'ALL') activeScopeParts.push(`Brand ${filters.BRAND}`);
+  if (filters.NAMA_STORE !== 'ALL') activeScopeParts.push(`Toko ${filters.NAMA_STORE}`);
+  if (filters.KET !== 'ALL') activeScopeParts.push(`KET ${filters.KET}`);
+  const scopeLabel =
+    activeScopeParts.length > 0 ? activeScopeParts.join(' · ') : 'Seluruh Area & Tim';
+
+  const topLostStoreNames = lostStoresList
+    .slice(0, 3)
+    .map((s) => s.storeName)
+    .join(', ');
+  const topVolStoreNames = volumeDropList
+    .slice(0, 3)
+    .map((s) => s.storeName)
+    .join(', ');
+  const topFocusStoreNames = focusDropList
+    .slice(0, 3)
+    .map((s) => s.storeName)
+    .join(', ');
+  const topReturnStoreNames = returnStoreList
+    .slice(0, 3)
+    .map((s) => s.storeName)
+    .join(', ');
+  const topRouteSales = Array.from(
+    new Set(routeWeakList.slice(0, 4).map((s) => s.salesName).filter((n) => n && n !== '-'))
+  ).join(', ');
+
+  const totalTargetText =
+    totalTarget > 0 ? formatRupiah(totalTarget) : 'Belum Diatur (Rp 0 Manual)';
+
+  const primaryDrivers: GapDriverFactor[] =
+    ketMode === 'SELL IN'
+      ? [
+          {
+            factor: 'Toko Putus Order / Belum Ada Orderan Masuk (0 PO Sell In)',
+            impactValue: lostStoresValue,
+            percentageOfGap: factorPercents[0],
+            affectedStoreCount: lostStoresList.length,
+            affectedStores: lostStoresList,
+            description:
+              lostStoresList.length > 0
+                ? `[Analisa SELL IN · Barang Masuk | ${scopeLabel}] Sebanyak ${lostStoresList.length} toko yang memasukkan order di ${previousPeriodName} belum melakukan orderan masuk (0 PO Sell In) di ${currentPeriodName}${topLostStoreNames ? ` (antara lain: ${topLostStoreNames})` : ''}.`
+                : `[Analisa SELL IN · Barang Masuk | ${scopeLabel}] Seluruh toko eksisting tetap mencatat orderan barang masuk (PO) pada periode ini.`,
+            actionPlan:
+              lostStoresList.length > 0
+                ? `SPV (${filters.SPV !== 'ALL' ? filters.SPV : 'Area'}) & Sales segera lakukan re-call dan kunjungan jemput PO dalam 3x24 jam ke ${lostStoresList.length} toko tersebut (${topLostStoreNames || 'daftar toko terlampir'}). Cek hambatan tagihan/limit kredit dan tawarkan paket re-aktivasi orderan masuk.`
+                : 'Pertahankan frekuensi kunjungan Sales (PJP) untuk menjaga konsistensi orderan masuk dari seluruh outlet aktif.',
+          },
+          {
+            factor: 'Penyusutan Nilai Orderan Barang Masuk dari Toko Eksisting',
+            impactValue: volumeDeclineValue,
+            percentageOfGap: factorPercents[1],
+            affectedStoreCount: volumeDropList.length,
+            affectedStores: volumeDropList,
+            description:
+              volumeDropList.length > 0
+                ? `[Analisa SELL IN · Barang Masuk | ${scopeLabel}] Sebanyak ${volumeDropList.length} toko tetap order, tetapi memangkas kuantitas/nilai orderan barang masuk dibanding ${previousPeriodName}${topVolStoreNames ? ` (penurunan terbesar: ${topVolStoreNames})` : ''}. Indikasi toko menahan stok masuk atau belanja lebih selektif.`
+                : `[Analisa SELL IN · Barang Masuk | ${scopeLabel}] Tidak ada penyusutan nilai PO barang masuk pada gerai eksisting di filter aktif.`,
+            actionPlan:
+              volumeDropList.length > 0
+                ? `Sales (${filters.SALES !== 'ALL' ? filters.SALES : 'PIC Toko'}) tawarkan program insentif pengambilan stok masuk (tiering diskon kuantitas / Buy 12 Free 1) dan audit sisa stok gudang di ${topVolStoreNames || 'toko terkait'} untuk mendorong penambahan nilai PO.`
+                : 'Maksimalkan upselling SKU baru dan produk reguler saat Sales melakukan pengambilan orderan masuk.',
+          },
+          {
+            factor: 'Penurunan Orderan Masuk Hero SKU / Produk Fokus (FOCUS)',
+            impactValue: focusSkuDeficit,
+            percentageOfGap: factorPercents[2],
+            affectedStoreCount: focusDropList.length,
+            affectedStores: focusDropList,
+            description:
+              focusSkuDeficit > 0
+                ? `[Analisa SELL IN · Barang Masuk | ${scopeLabel}] Nilai barang masuk khusus SKU kategori FOCUS turun ${formatRupiah(focusSkuDeficit)} di ${focusDropList.length} toko${topFocusStoreNames ? ` (terutama ${topFocusStoreNames})` : ''}, berisiko membuat stok produk fokus di etalase toko menipis.`
+                : `[Analisa SELL IN · Barang Masuk | ${scopeLabel}] Orderan barang masuk untuk SKU Produk Fokus terjaga stabil dibanding periode lalu.`,
+            actionPlan:
+              focusDropList.length > 0
+                ? `Sales wajib menyertakan paket SKU FOCUS di setiap PO barang masuk ke ${topFocusStoreNames || 'gerai fokus'} dan pastikan ketersediaan stok distributor 100% aman agar tidak terjadi failed-order.`
+                : 'Pertahankan alokasi kuota stok barang masuk SKU FOCUS pada setiap faktur distribusi.',
+          },
+          {
+            factor: 'Koreksi / Pembatalan Nota & Retur Barang Masuk',
+            impactValue: curReturns,
+            percentageOfGap: factorPercents[3],
+            affectedStoreCount: returnStoreList.length,
+            affectedStores: returnStoreList,
+            description:
+              curReturns > 0
+                ? `[Analisa SELL IN · Barang Masuk | ${scopeLabel}] Tercatat potongan retur/koreksi barang masuk sebesar ${formatRupiah(curReturns)} dari ${returnStoreList.length} toko${topReturnStoreNames ? ` (${topReturnStoreNames})` : ''} yang mengurangi omzet Sell In bersih.`
+                : `[Analisa SELL IN · Barang Masuk | ${scopeLabel}] Tidak terdapat pemotongan retur atau pembatalan nota pada transaksi barang masuk periode ini.`,
+            actionPlan:
+              curReturns > 0
+                ? `SPV & Logistik audit penyebab retur pengiriman di ${topReturnStoreNames || 'toko terkait'}, cek kualitas packing ekspedisi, dan ketatkan kontrol expired date (FEFO) sebelum barang masuk dikirim ke toko.`
+                : 'Pertahankan ketepatan pengiriman, kelengkapan surat jalan, dan kontrol mutu sebelum barang masuk ke gerai.',
+          },
+          {
+            factor: 'Gap Target Kuota Orderan Masuk (Sell In) & Rute Pengambilan PO',
+            impactValue: routeImpactValue,
+            percentageOfGap: factorPercents[4],
+            affectedStoreCount: routeWeakList.length,
+            affectedStores: routeWeakList,
+            description:
+              totalTarget <= 0
+                ? `[Analisa SELL IN · Barang Masuk | ${scopeLabel}] Realisasi barang masuk tercatat ${formatRupiah(actualRevenue)} (target kuota manual Sell In belum diisi). Terdapat ${routeWeakList.length} toko dengan penurunan orderan masuk >25%.`
+                : gapDeficit > 0
+                ? `[Analisa SELL IN · Barang Masuk | ${scopeLabel}] Target kuota barang masuk (${totalTargetText}) vs realisasi (${formatRupiah(actualRevenue)}) menyisakan defisit orderan masuk ${formatRupiah(gapDeficit)} (${gapPercentage.toFixed(1)}%). ${routeWeakList.length} toko turun >25%.`
+                : `[Analisa SELL IN · Barang Masuk | ${scopeLabel}] Realisasi orderan barang masuk (${formatRupiah(actualRevenue)}) telah melampaui target kuota Sell In (${totalTargetText}).`,
+            actionPlan:
+              gapDeficit > 0
+                ? `SPV jadwalkan joint-visit rute PJP bersama ${topRouteSales || 'tim Sales area'} untuk mengejar kekurangan orderan masuk ${formatRupiah(gapDeficit)} lewat penetrasi New Open Outlet (NOO) dan dorong repeat PO akhir bulan.`
+                : 'Pertahankan ritme pengambilan PO rutin dan fokuskan pembukaan outlet baru (NOO) untuk memperbesar basis barang masuk bulan depan.',
+          },
+        ]
+      : ketMode === 'SELL OUT'
+      ? [
+          {
+            factor: 'Gerai Nihil Penjualan / Barang Keluar Terhenti (0 Sell Out)',
+            impactValue: lostStoresValue,
+            percentageOfGap: factorPercents[0],
+            affectedStoreCount: lostStoresList.length,
+            affectedStores: lostStoresList,
+            description:
+              lostStoresList.length > 0
+                ? `[Analisa SELL OUT · Penjualan / Barang Keluar | ${scopeLabel}] Sebanyak ${lostStoresList.length} toko yang mencatat penjualan di ${previousPeriodName} belum membukukan barang keluar (0 Sell Out) di ${currentPeriodName}${topLostStoreNames ? ` (antara lain: ${topLostStoreNames})` : ''}.`
+                : `[Analisa SELL OUT · Penjualan / Barang Keluar | ${scopeLabel}] Seluruh gerai aktif tetap menghasilkan penjualan barang keluar ke konsumen pada periode ini.`,
+            actionPlan:
+              lostStoresList.length > 0
+                ? `Trainer (${filters.TRAINER && filters.TRAINER !== 'ALL' ? filters.TRAINER : 'ARA/RATIH'}) & SPV segera cek keaktifan BA, kondisi stok pajangan rak, serta kedisiplinan input laporan harian di ${lostStoresList.length} gerai tersebut (${topLostStoreNames || 'daftar toko terlampir'}).`
+                : 'Pertahankan monitoring laporan Sell Out harian BA agar tidak ada gerai yang kosong penjualan.',
+          },
+          {
+            factor: 'Perlambatan Serapan Konsumen / Penurunan Barang Keluar Gerai Eksisting',
+            impactValue: volumeDeclineValue,
+            percentageOfGap: factorPercents[1],
+            affectedStoreCount: volumeDropList.length,
+            affectedStores: volumeDropList,
+            description:
+              volumeDropList.length > 0
+                ? `[Analisa SELL OUT · Penjualan / Barang Keluar | ${scopeLabel}] Sebanyak ${volumeDropList.length} gerai mengalami penurunan omzet penjualan ke konsumen akhir dibanding ${previousPeriodName}${topVolStoreNames ? ` (penurunan terbesar: ${topVolStoreNames})` : ''}, menandakan serapan barang keluar melambat.`
+                : `[Analisa SELL OUT · Penjualan / Barang Keluar | ${scopeLabel}] Kecepatan penjualan barang keluar pada gerai eksisting stabil atau meningkat dibanding periode lalu.`,
+            actionPlan:
+              volumeDropList.length > 0
+                ? `Trainer lakukan coaching teknik selling & product pitching kepada BA di ${topVolStoreNames || 'toko yang melambat'}, optimalkan promo konsumen (tester, bundling kasir, weekend push) untuk mempercepat perputaran barang keluar.`
+                : 'Teruskan program cross-selling BA agar rata-rata nilai belanja (basket size) konsumen meningkat.',
+          },
+          {
+            factor: 'Pelemahan Penjualan Barang Keluar Hero SKU / Produk Fokus (FOCUS)',
+            impactValue: focusSkuDeficit,
+            percentageOfGap: factorPercents[2],
+            affectedStoreCount: focusDropList.length,
+            affectedStores: focusDropList,
+            description:
+              focusSkuDeficit > 0
+                ? `[Analisa SELL OUT · Penjualan / Barang Keluar | ${scopeLabel}] Penjualan barang keluar untuk produk kategori FOCUS turun ${formatRupiah(focusSkuDeficit)} di ${focusDropList.length} gerai${topFocusStoreNames ? ` (terutama ${topFocusStoreNames})` : ''}.`
+                : `[Analisa SELL OUT · Penjualan / Barang Keluar | ${scopeLabel}] Penjualan barang keluar SKU Produk Fokus terjaga positif pada periode dan filter ini.`,
+            actionPlan:
+              focusDropList.length > 0
+                ? `Trainer & BA wajib menjadikan SKU FOCUS sebagai prioritas penawaran utama ke pengunjung di ${topFocusStoreNames || 'gerai fokus'}, pastikan display berada di posisi eye-level dan tester tersedia lengkap.`
+                : 'Pertahankan posisi display utama dan insentif target Pcs Produk Fokus bagi BA di seluruh gerai.',
+          },
+          {
+            factor: 'Retur Konsumen / Koreksi Penjualan Barang Keluar & Kualitas Display',
+            impactValue: curReturns,
+            percentageOfGap: factorPercents[3],
+            affectedStoreCount: returnStoreList.length,
+            affectedStores: returnStoreList,
+            description:
+              curReturns > 0
+                ? `[Analisa SELL OUT · Penjualan / Barang Keluar | ${scopeLabel}] Terdapat pengurang omzet penjualan barang keluar (retur/koreksi) sebesar ${formatRupiah(curReturns)} di ${returnStoreList.length} gerai${topReturnStoreNames ? ` (${topReturnStoreNames})` : ''}.`
+                : `[Analisa SELL OUT · Penjualan / Barang Keluar | ${scopeLabel}] Tidak terdapat beban retur yang memotong penjualan barang keluar pada filter ini.`,
+            actionPlan:
+              curReturns > 0
+                ? `Trainer & BA audit keluhan produk maupun kondisi kemasan di rak ${topReturnStoreNames || 'toko terkait'} serta perketat pengecekan tanggal kedaluwarsa (FEFO) sebelum diserahkan ke konsumen.`
+                : 'Jaga kebersihan etalase, kualitas tester, dan edukasi pemakaian produk oleh BA agar kepuasan konsumen terjaga.',
+          },
+          {
+            factor: 'Gap Target Kuota Penjualan (Sell Out) & Produktivitas BA / Gerai',
+            impactValue: routeImpactValue,
+            percentageOfGap: factorPercents[4],
+            affectedStoreCount: routeWeakList.length,
+            affectedStores: routeWeakList,
+            description:
+              totalTarget <= 0
+                ? `[Analisa SELL OUT · Penjualan / Barang Keluar | ${scopeLabel}] Realisasi barang keluar tercatat ${formatRupiah(actualRevenue)} (target kuota manual Sell Out belum diisi). Terdapat ${routeWeakList.length} gerai mengalami penurunan Sell Out >25%.`
+                : gapDeficit > 0
+                ? `[Analisa SELL OUT · Penjualan / Barang Keluar | ${scopeLabel}] Target penjualan barang keluar (${totalTargetText}) vs realisasi (${formatRupiah(actualRevenue)}) menyisakan defisit Sell Out ${formatRupiah(gapDeficit)} (${gapPercentage.toFixed(1)}%). ${routeWeakList.length} gerai turun >25%.`
+                : `[Analisa SELL OUT · Penjualan / Barang Keluar | ${scopeLabel}] Realisasi penjualan barang keluar (${formatRupiah(actualRevenue)}) telah melampaui target kuota Sell Out (${totalTargetText}).`,
+            actionPlan:
+              gapDeficit > 0
+                ? `Trainer & SPV jadwalkan pendampingan intensif / event store di gerai kontributor drop terbesar (${topVolStoreNames || 'daftar gerai terlampir'}) untuk menutup kekurangan kuota barang keluar ${formatRupiah(gapDeficit)}.`
+                : 'Pertahankan produktivitas BA di gerai utama dan kembangkan aktivasi event di gerai potensial.',
+          },
+        ]
+      : [
+          {
+            factor: 'Toko Pasif / Kehilangan Repeat Order & Penjualan (Lost Outlets)',
+            impactValue: lostStoresValue,
+            percentageOfGap: factorPercents[0],
+            affectedStoreCount: lostStoresList.length,
+            affectedStores: lostStoresList,
+            description:
+              lostStoresList.length > 0
+                ? `[Gabungan Sell In & Sell Out | ${scopeLabel}] Tercatat ${lostStoresList.length} toko yang aktif di ${previousPeriodName} belum mencatat transaksi di ${currentPeriodName}${topLostStoreNames ? ` (antara lain: ${topLostStoreNames})` : ''}.`
+                : `[Gabungan Sell In & Sell Out | ${scopeLabel}] Tidak ada toko yang benar-benar berhenti transaksi (0 aktivitas) pada filter aktif saat ini.`,
+            actionPlan:
+              lostStoresList.length > 0
+                ? `SPV (${filters.SPV !== 'ALL' ? filters.SPV : 'Area'}), Sales & Trainer segera cek dalam 3x24 jam ke ${lostStoresList.length} toko pasif (${topLostStoreNames || 'daftar toko terlampir'}) untuk mengaktifkan kembali orderan masuk (Sell In) dan laporan penjualan (Sell Out).`
+                : 'Pertahankan jadwal kunjungan rutin Sales dan monitoring harian BA agar seluruh outlet tetap aktif.',
+          },
+          {
+            factor: 'Penurunan Ukuran Orderan Masuk & Serapan Gerai Eksisting',
+            impactValue: volumeDeclineValue,
+            percentageOfGap: factorPercents[1],
+            affectedStoreCount: volumeDropList.length,
+            affectedStores: volumeDropList,
+            description:
+              volumeDropList.length > 0
+                ? `[Gabungan Sell In & Sell Out | ${scopeLabel}] Sebanyak ${volumeDropList.length} toko masih aktif tetapi nilai omzet menyusut dibanding ${previousPeriodName}${topVolStoreNames ? ` (terbesar: ${topVolStoreNames})` : ''}.`
+                : `[Gabungan Sell In & Sell Out | ${scopeLabel}] Tidak terdapat penurunan volume transaksi pada gerai eksisting pada filter aktif saat ini.`,
+            actionPlan:
+              volumeDropList.length > 0
+                ? `Sales (${filters.SALES !== 'ALL' ? filters.SALES : 'PIC Toko'}) tawarkan skema bundling diskon kuantitas untuk dongkrak PO masuk (Sell In), sementara Trainer dorong promo konsumen di ${topVolStoreNames || 'toko yang turun'} untuk mempercepat barang keluar (Sell Out).`
+                : 'Lanjutkan upselling SKU margin tinggi di outlet aktif untuk memperbesar nilai nota masuk & keluar.',
+          },
+          {
+            factor: 'Perlambatan Hero SKU / Produk Fokus (FOCUS)',
+            impactValue: focusSkuDeficit,
+            percentageOfGap: factorPercents[2],
+            affectedStoreCount: focusDropList.length,
+            affectedStores: focusDropList,
+            description:
+              focusSkuDeficit > 0
+                ? `[Gabungan Sell In & Sell Out | ${scopeLabel}] Perputaran produk kategori FOCUS turun ${formatRupiah(focusSkuDeficit)} di ${focusDropList.length} toko${topFocusStoreNames ? ` (terutama ${topFocusStoreNames})` : ''}.`
+                : `[Gabungan Sell In & Sell Out | ${scopeLabel}] Performa SKU Produk Fokus terjaga stabil pada periode dan filter ini.`,
+            actionPlan:
+              focusDropList.length > 0
+                ? `SPV, Sales & Trainer pastikan stok SKU FOCUS tersedia 100% di orderan masuk dan kerahkan BA aktif untuk demo produk fokus di etalase utama ${topFocusStoreNames || 'gerai fokus'}.`
+                : 'Pertahankan ketersediaan stok masuk dan visibilitas display Hero SKU FOCUS di seluruh gerai.',
+          },
+          {
+            factor: 'Beban Retur & Klaim Produk Rusak / Tarikan Stok',
+            impactValue: curReturns,
+            percentageOfGap: factorPercents[3],
+            affectedStoreCount: returnStoreList.length,
+            affectedStores: returnStoreList,
+            description:
+              curReturns > 0
+                ? `[Gabungan Sell In & Sell Out | ${scopeLabel}] Tercatat nilai retur sebesar ${formatRupiah(curReturns)} dari ${returnStoreList.length} toko${topReturnStoreNames ? ` (${topReturnStoreNames})` : ''} yang memotong omzet bersih.`
+                : `[Gabungan Sell In & Sell Out | ${scopeLabel}] Tidak ada beban retur produk pada filter dan periode aktif.`,
+            actionPlan:
+              curReturns > 0
+                ? `SPV & Gudang audit penyebab retur di ${topReturnStoreNames || 'toko terkait'}, perketat rotasi FEFO sebelum pengiriman barang masuk, dan cek SOP pengemasan ekspedisi.`
+                : 'Pertahankan standar quality control pengiriman dan kontrol masa kedaluwarsa (FEFO) di toko.',
+          },
+          {
+            factor: 'Kesenjangan Kuota Target & Produktivitas Rute Area / Tim',
+            impactValue: routeImpactValue,
+            percentageOfGap: factorPercents[4],
+            affectedStoreCount: routeWeakList.length,
+            affectedStores: routeWeakList,
+            description:
+              totalTarget <= 0
+                ? `[Gabungan Sell In & Sell Out | ${scopeLabel}] Realisasi tercatat ${formatRupiah(actualRevenue)} (target kuota manual belum diisi). Terdapat ${routeWeakList.length} toko dengan penurunan >25%.`
+                : gapDeficit > 0
+                ? `[Gabungan Sell In & Sell Out | ${scopeLabel}] Selisih target kuota (${totalTargetText}) vs realisasi (${formatRupiah(actualRevenue)}) menyisakan gap ${formatRupiah(gapDeficit)} (${gapPercentage.toFixed(1)}%). ${routeWeakList.length} toko mengalami penurunan >25%.`
+                : `[Gabungan Sell In & Sell Out | ${scopeLabel}] Realisasi saat ini telah melampaui target kuota ${totalTargetText}.`,
+            actionPlan:
+              gapDeficit > 0
+                ? `SPV jadwalkan joint-visit pendampingan rute PJP bersama ${topRouteSales || 'tim sales area'} serta koordinasi Trainer untuk menutup sisa gap kuota ${formatRupiah(gapDeficit)}.`
+                : 'Pertahankan ritme kunjungan PJP dan alokasikan kelebihan kapasitas untuk ekspansi New Open Outlet (NOO).',
+          },
+        ];
 
   return {
     totalTarget,
+    autoDefaultTarget,
+    isCustomTarget,
+    activeQuotaScopeLabel: resolvedScope.scopeLabel,
+    activeQuotaScopeType: resolvedScope.scopeType,
+    activeQuotaEntityName: resolvedScope.entityName,
+    sellInTarget,
+    autoSellInTarget,
+    isCustomSellInTarget,
+    sellInActual,
+    sellInPrevious,
+    sellInGapDeficit,
+    sellOutTarget,
+    autoSellOutTarget,
+    isCustomSellOutTarget,
+    sellOutActual,
+    sellOutPrevious,
+    sellOutGapDeficit,
     actualRevenue,
     gapDeficit,
     gapPercentage,
     previousRevenue,
     deltaVsPrevious,
     primaryDrivers,
-    topDroppingStores: droppingStores.slice(0, 15),
-    topDroppingSkus: droppingSkus.slice(0, 15),
+    topDroppingStores: droppingStores,
+    topDroppingSkus: droppingSkus.slice(0, 30),
     topDroppingBrands: droppingBrands,
     topDroppingSales: droppingSales,
+    storeGapDetails,
+    totalStoreGapDeficit: totalGapForShare,
     returnSpikeImpact,
     lostStoresCount,
     lowOrderStoresCount,

@@ -20,14 +20,21 @@ import {
   Trash2,
   Search,
   Store,
+  Copy,
 } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import * as XLSX from 'xlsx';
 import { TransactionRecord, DashboardFilters } from '../types/dashboard';
 import {
   TARGETS_UPDATED_EVENT,
+  MONTH_OPTIONS_2026,
+  normalizeMonthKey,
+  loadMonthlyTargets,
   getExplicitBaTotalTargetOverride,
+  loadBaNonLavojoyTargets,
   loadBaLavojoyTargets,
+  saveBaNonLavojoyTargets,
+  saveBaLavojoyTargets,
   setSingleTargetOverride,
   DEFAULT_BA_LAVOJOY_TARGET,
 } from '../services/targetManagementService';
@@ -814,78 +821,6 @@ export const DEFAULT_WEEKLY_STORES: WeeklyStoreConfig[] = [
   },
 ];
 
-// Snapshot default transaksi harian untuk Week 1 (01-07)
-// Contoh: BEAUTY STORE (BANGKINANG) total 6.033.400
-const SAMPLE_WEEK1_DAILY_SNAPSHOT: Record<string, number[]> = {
-  'BEAUTY STORE (BANGKINANG)': [850000, 720000, 680000, 950000, 1150000, 980000, 703400], // Total: 6.033.400
-  'CITRA SWALAYAN': [1100000, 920000, 1250000, 1400000, 1850000, 1600000, 780000],
-  'HIDAYAH BELILAS': [850000, 980000, 750000, 1050000, 1300000, 1150000, 690000],
-  'HIDAYAH KOSMETIK PERAWANG': [520000, 950000, 820000, 810000, 1200000, 1150000, 540000],
-  'IDOLA KOSMETIK AIR MOLEK': [1500000, 290000, 810000, 2050000, 1720000, 1680000, 790000],
-  'JINAAN STORE': [980000, 690000, 740000, 135000, 380000, 510000, 560000],
-  'TOKO RIS IDOLA KOSMETIK': [14500000, 750000, 1050000, 1280000, 1850000, 1620000, 810000],
-  'TOKO MY KOSMETIK (PKL KERINCI)': [780000, 1560000, 1070000, 550000, 960000, 1110000, 660000],
-  'TOKO MY KOSMETIK (SOREK)': [710000, 1120000, 805000, 950000, 1060000, 740000, 595000],
-  'MISS GLAM TEMBILAHAN': [1520000, 500000, 420000, 4180000, 3300000, 750000, 1010000],
-  'MISS GLAM SUDIRMAN': [2150000, 1650000, 1840000, 2800000, 3370000, 2980000, 1710000],
-  'MISS GLAM BUKIT BARISAN': [1620000, 1440000, 1240000, 2400000, 2710000, 2580000, 1240000],
-  'TOKO ALANA BEAUTY': [1270000, 1120000, 1010000, 1680000, 2140000, 1840000, 860000],
-  'AL KAUTSAR COSMETIK': [1050000, 860000, 740000, 1270000, 1650000, 1440000, 720000],
-  'ANNISA COSMETIK ARIFIN': [1180000, 980000, 860000, 1470000, 1840000, 1620000, 810000],
-  'ANNISA KOSMETIK (DURI)': [1440000, 1240000, 1090000, 1730000, 2320000, 2010000, 1010000],
-  'GLASTING GLOW': [1650000, 1350000, 1210000, 1930000, 2490000, 2280000, 1180000],
-  'GUARDIAN CIPUTRA BNB LV': [1710000, 1470000, 1330000, 2140000, 2710000, 2490000, 1270000],
-  'WATSON CIPUTRA SERAYA': [1650000, 1420000, 1290000, 2080000, 2610000, 2410000, 1210000],
-};
-
-// Snapshot default transaksi harian untuk Week 2 (08-14)
-// Hari 1: (08) SELASA, Hari 2: (09) RABU, Hari 3: (10) KAMIS, Hari 4: (11) JUMAT,
-// Hari 5: (12) SABTU, Hari 6: (13) MINGGU, Hari 7: (14) SENIN
-// Contoh: BEAUTY STORE (BANGKINANG) total 57.945.840
-const SAMPLE_DAILY_SNAPSHOT: Record<string, number[]> = {
-  'BEAUTY STORE (BANGKINANG)': [8250000, 7890000, 6540000, 9120000, 11450000, 9425840, 5270000], // Total: 57.945.840
-  'CITRA SWALAYAN': [1250000, 980000, 1420000, 1650000, 2100000, 1950000, 850000],
-  'HIDAYAH BELILAS': [950000, 1100000, 890000, 1200000, 1450000, 1300000, 780000],
-  'HIDAYAH KOSMETIK PERAWANG': [582900, 1089500, 949000, 914500, 1365000, 1341900, 620000],
-  'IDOLA KOSMETIK AIR MOLEK': [1801400, 331600, 937900, 2310000, 1935900, 1902900, 890000],
-  'JINAAN STORE': [1123500, 795100, 850000, 151700, 433300, 584300, 640000],
-  'TOKO RIS IDOLA KOSMETIK': [16795300, 850000, 1200000, 1450000, 2100000, 1850000, 920000],
-  'TOKO MY KOSMETIK (PKL KERINCI)': [890000, 1785300, 1225000, 628000, 1093300, 1271100, 750000],
-  'TOKO MY KOSMETIK (SOREK)': [813000, 1276200, 920000, 1087850, 1213700, 850000, 680000],
-  'MISS GLAM TEMBILAHAN': [1730500, 570100, 484200, 4776950, 3771300, 863500, 1150000],
-  'MISS GLAM SUDIRMAN': [2450000, 1890000, 2100000, 3200000, 3850000, 3400000, 1950000],
-  'MISS GLAM BUKIT BARISAN': [1850000, 1650000, 1420000, 2750000, 3100000, 2950000, 1420000],
-  'TOKO ALANA BEAUTY': [1450000, 1280000, 1150000, 1920000, 2450000, 2100000, 980000],
-  'AL KAUTSAR COSMETIK': [1200000, 980000, 850000, 1450000, 1890000, 1650000, 820000],
-  'ANNISA COSMETIK ARIFIN': [1350000, 1120000, 980000, 1680000, 2100000, 1850000, 920000],
-  'ANNISA KOSMETIK (DURI)': [1650000, 1420000, 1250000, 1980000, 2650000, 2300000, 1150000],
-  'GLASTING GLOW': [1890000, 1540000, 1380000, 2200000, 2850000, 2600000, 1350000],
-  'GUARDIAN CIPUTRA BNB LV': [1950000, 1680000, 1520000, 2450000, 3100000, 2850000, 1450000],
-  'WATSON CIPUTRA SERAYA': [1890000, 1620000, 1480000, 2380000, 2980000, 2750000, 1380000],
-};
-
-// Snapshot nilai baris ke-3 (PENCAPAIAN WEEK 2 08-14 kumulatif)
-const SAMPLE_CUMULATIVE_SNAPSHOT: Record<string, number> = {
-  'CITRA SWALAYAN': 18500000,
-  'HIDAYAH BELILAS': 14200000,
-  'HIDAYAH KOSMETIK PERAWANG': 18197500,
-  'IDOLA KOSMETIK AIR MOLEK': 13323600,
-  'JINAAN STORE': 7564700,
-  'TOKO RIS IDOLA KOSMETIK': 22389200,
-  'TOKO MY KOSMETIK (PKL KERINCI)': 14025850,
-  'TOKO MY KOSMETIK (SOREK)': 11074050,
-  'MISS GLAM TEMBILAHAN': 30432750,
-  'MISS GLAM SUDIRMAN': 32450000,
-  'MISS GLAM BUKIT BARISAN': 26850000,
-  'TOKO ALANA BEAUTY': 19500000,
-  'AL KAUTSAR COSMETIK': 16800000,
-  'ANNISA COSMETIK ARIFIN': 17500000,
-  'ANNISA KOSMETIK (DURI)': 21500000,
-  'GLASTING GLOW': 24500000,
-  'GUARDIAN CIPUTRA BNB LV': 28500000,
-  'WATSON CIPUTRA SERAYA': 27800000,
-};
-
 const INDO_DAY_NAMES = ['MINGGU', 'SENIN', 'SELASA', 'RABU', 'KAMIS', 'JUMAT', 'SABTU'];
 const MONTH_NAMES = [
   'JANUARI', 'FEBRUARI', 'MARET', 'APRIL', 'MEI', 'JUNI',
@@ -1008,19 +943,38 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
     };
   }, []);
 
-  // Extract distinct sales reps from configured stores and connected Google Sheets records
+  // Strictly filter Google Sheet records to ONLY SELL OUT transactions (never SELL IN or RETURN)
+  const sellOutSourceRecords = useMemo(() => {
+    return sourceRecords.filter((r) => {
+      const ketUpper = (r.KET || '').trim().toUpperCase();
+      if (ketUpper !== 'SELL OUT' && !ketUpper.includes('SELL OUT')) return false;
+      if (filters.BRAND && filters.BRAND !== 'ALL' && (r.BRAND || '').trim().toUpperCase() !== filters.BRAND.trim().toUpperCase()) return false;
+      if (filters.KATEGORI && filters.KATEGORI !== 'ALL' && (r.KATEGORI || '').trim().toUpperCase() !== filters.KATEGORI.trim().toUpperCase()) return false;
+      if (filters.SPV && filters.SPV !== 'ALL' && (r.SPV || '').trim().toUpperCase() !== filters.SPV.trim().toUpperCase()) return false;
+      if (filters.SKU && filters.SKU !== 'ALL') {
+        const matchSku =
+          (r.SKU || '').toLowerCase().includes(filters.SKU.toLowerCase()) ||
+          (r.NO_SKU || '').includes(filters.SKU) ||
+          (r.SPU || '').toLowerCase().includes(filters.SKU.toLowerCase());
+        if (!matchSku) return false;
+      }
+      return true;
+    });
+  }, [sourceRecords, filters.BRAND, filters.KATEGORI, filters.SPV, filters.SKU]);
+
+  // Extract distinct sales reps from configured stores and connected Google Sheets Sell Out records
   const availableSales = useMemo(() => {
     const set = new Set<string>();
     storesList.forEach((s) => {
       if (s.salesName && s.salesName !== 'OPERASIONAL') set.add(s.salesName.trim());
     });
-    records.forEach((r) => {
+    sellOutSourceRecords.forEach((r) => {
       if (r.SALES && r.SALES !== '-' && r.SALES !== 'ALL') set.add(r.SALES.trim());
     });
     return Array.from(set).sort();
-  }, [storesList, records]);
+  }, [storesList, sellOutSourceRecords]);
 
-  // Master Store List (gabungan default stores, custom added stores, dan stores dari sheets)
+  // Master Store List (gabungan default stores, custom added stores, dan stores dari sheets Sell Out)
   const allMasterStores = useMemo(() => {
     const map = new Map<string, WeeklyStoreConfig>();
     DEFAULT_WEEKLY_STORES.forEach((s) => {
@@ -1033,7 +987,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
         map.set(s.storeName.trim().toLowerCase(), s);
       }
     });
-    records.forEach((r) => {
+    sellOutSourceRecords.forEach((r) => {
       if (!r.NAMA_STORE) return;
       if (isStoreExcludedFromIlhamsyah(r.SALES, r.NAMA_STORE)) return;
       const key = r.NAMA_STORE.trim().toLowerCase();
@@ -1051,9 +1005,9 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       }
     });
     return Array.from(map.values());
-  }, [storesList, records]);
+  }, [storesList, sellOutSourceRecords]);
 
-  // Active stores filtered by Sales Coveran and Trainer, synchronized with Google Sheets data
+  // Active stores filtered by Sales Coveran and Trainer, synchronized with Google Sheets Sell Out data
   const activeStoresList = useMemo(() => {
     const deletedSet = new Set(deletedStoreNames.map((n) => n.trim().toLowerCase()));
 
@@ -1062,9 +1016,9 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       (s) => !deletedSet.has(s.storeName.trim().toLowerCase()) && !isStoreExcludedFromIlhamsyah(s.salesName, s.storeName)
     );
 
-    // Priority sync: if records from Google Sheet have a matching store with a live BA name, apply it!
+    // Priority sync: if Sell Out records from Google Sheet have a matching store with a live BA name, apply it!
     const sheetBaByStore: Record<string, string> = {};
-    records.forEach((r) => {
+    sellOutSourceRecords.forEach((r) => {
       if (r.NAMA_STORE && r.BA && r.BA !== '-' && r.BA.toUpperCase() !== 'NON BA' && r.BA.toUpperCase() !== 'STANDBY') {
         sheetBaByStore[r.NAMA_STORE.trim().toLowerCase()] = r.BA.trim();
       }
@@ -1078,11 +1032,11 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       return s;
     });
 
-    // Auto-sync additional stores from connected Google Sheet (records) if present and NOT deleted
+    // Auto-sync additional stores from connected Google Sheet (Sell Out records only) if present and NOT deleted
     const existingNames = new Set(list.map((s) => s.storeName.trim().toLowerCase()));
     const extraStores: WeeklyStoreConfig[] = [];
 
-    records.forEach((r) => {
+    sellOutSourceRecords.forEach((r) => {
       if (!r.NAMA_STORE) return;
       // Jangan masukkan toko yang dikecualikan dari ILHAMSYAH
       if (isStoreExcludedFromIlhamsyah(r.SALES, r.NAMA_STORE)) return;
@@ -1162,7 +1116,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
     }
 
     return list;
-  }, [storesList, deletedStoreNames, records, selectedSales, selectedTrainer, filters.REGION, filters.NAMA_STORE, filters.searchQuery, selectedMonth, targetSyncVersion]);
+  }, [storesList, deletedStoreNames, sellOutSourceRecords, selectedSales, selectedTrainer, filters.REGION, filters.NAMA_STORE, filters.searchQuery, selectedMonth, targetSyncVersion]);
 
   // Custom Daily Sell Out Overrides (Key: `${storeName}_${dateKey}`)
   const [customDailyActuals, setCustomDailyActuals] = useState<Record<string, number>>(() => {
@@ -1215,6 +1169,9 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
 
   // Modal Editing Store Target / Values
   const [editingStore, setEditingStore] = useState<WeeklyStoreConfig | null>(null);
+  const [editTargetMonth, setEditTargetMonth] = useState<string>('SEPTEMBER 2026');
+  const [editTargetNonLavojoy, setEditTargetNonLavojoy] = useState<number>(40000000);
+  const [editTargetLavojoy, setEditTargetLavojoy] = useState<number>(DEFAULT_BA_LAVOJOY_TARGET);
   const [editTargetMonthly, setEditTargetMonthly] = useState<number>(45000000);
   const [editStoreName, setEditStoreName] = useState<string>('');
   const [editBaName, setEditBaName] = useState<string>('');
@@ -1224,6 +1181,16 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
   const [editRegion, setEditRegion] = useState<string>('');
   const [editPerformaVal, setEditPerformaVal] = useState<number>(0);
   const [editCumulativeVal, setEditCumulativeVal] = useState<number>(0);
+
+  // Modal Pengaturan Target BA + Lavojoy per Bulan
+  const [isMonthlyTargetModalOpen, setIsMonthlyTargetModalOpen] = useState<boolean>(false);
+  const [monthlyTargetEditMonth, setMonthlyTargetEditMonth] = useState<string>('SEPTEMBER 2026');
+  const [monthlyTargetCopyFrom, setMonthlyTargetCopyFrom] = useState<string>('SEPTEMBER 2026');
+  const [monthlyTargetSearch, setMonthlyTargetSearch] = useState<string>('');
+  const [monthlyTargetSalesFilter, setMonthlyTargetSalesFilter] = useState<string>('ALL');
+  const [monthlyTargetDrafts, setMonthlyTargetDrafts] = useState<
+    Record<string, { nonLavojoy: number; lavojoy: number }>
+  >({});
 
   // Modal Tambah Kolom Toko Baru
   const [isAddingStore, setIsAddingStore] = useState<boolean>(false);
@@ -1286,11 +1253,11 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       startDay = 22;
       endDay = totalDaysInMonth;
     } else if (selectedWeek === 'CUSTOM' && dateFrom && dateTo) {
-      const d1 = new Date(dateFrom);
-      const d2 = new Date(dateTo);
-      if (!isNaN(d1.getTime()) && !isNaN(d2.getTime())) {
-        startDay = d1.getDate();
-        endDay = d2.getDate();
+      const fParts = dateFrom.split('-').map((n) => parseInt(n, 10));
+      const tParts = dateTo.split('-').map((n) => parseInt(n, 10));
+      if (fParts.length === 3 && tParts.length === 3 && !isNaN(fParts[2]) && !isNaN(tParts[2])) {
+        startDay = Math.max(1, Math.min(31, fParts[2]));
+        endDay = Math.max(startDay, Math.min(31, tParts[2]));
       }
     }
 
@@ -1322,41 +1289,62 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
     return (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   };
 
-  // Transaction Map for fast lookup by store & date (strictly pulling VALUE from Google Sheet records)
-  const transactionsMap = useMemo(() => {
-    const map: Record<string, number> = {};
-    for (const r of sourceRecords) {
-      if (!r.TANGGAL || !r.NAMA_STORE) continue;
-      // Filter out returns
-      if ((r.KET || '').toUpperCase() === 'RETURN') continue;
+  const parseRecordDateParts = (r: TransactionRecord): { rYear: number; rMonth: number; rDay: number } | null => {
+    if (!r.TANGGAL) return null;
+    let rYear = r.TAHUN || 2026;
+    const expectedMonth = MONTH_NAMES.indexOf((r.BULAN || '').trim().toUpperCase()) + 1;
+    let rMonth = expectedMonth > 0 ? expectedMonth : monthIdx + 1;
+    let rDay = 1;
 
-      let rYear = r.TAHUN || 2026;
-      let rMonth = monthIdx + 1;
-      let rDay = 1;
-
-      const trimmedDate = r.TANGGAL.trim();
-      const parts = trimmedDate.split(/[-/]/);
-      if (parts.length === 3) {
-        if (parts[0].length === 4) {
-          rYear = parseInt(parts[0], 10);
-          rMonth = parseInt(parts[1], 10);
-          rDay = parseInt(parts[2], 10);
-        } else {
-          const p0 = parseInt(parts[0], 10);
-          const p1 = parseInt(parts[1], 10);
-          const p2 = parseInt(parts[2], 10);
-          if (p2 > 1000) {
-            rYear = p2;
-            if (p0 <= 12 && p1 <= 31) {
+    const trimmedDate = r.TANGGAL.trim();
+    const parts = trimmedDate.split(/[-/]/);
+    if (parts.length === 3) {
+      if (parts[0].length === 4) {
+        rYear = parseInt(parts[0], 10);
+        rMonth = parseInt(parts[1], 10);
+        rDay = parseInt(parts[2], 10);
+      } else {
+        const p0 = parseInt(parts[0], 10);
+        const p1 = parseInt(parts[1], 10);
+        const p2 = parseInt(parts[2], 10);
+        if (p2 > 1000) {
+          rYear = p2;
+          if (expectedMonth > 0) {
+            if (p0 === expectedMonth && p1 >= 1 && p1 <= 31) {
+              rMonth = p0;
+              rDay = p1;
+            } else if (p1 === expectedMonth && p0 >= 1 && p0 <= 31) {
+              rDay = p0;
+              rMonth = p1;
+            } else if (p0 <= 12 && p1 <= 31) {
               rMonth = p0;
               rDay = p1;
             } else {
               rDay = p0;
               rMonth = p1;
             }
+          } else if (p0 <= 12 && p1 <= 31) {
+            rMonth = p0;
+            rDay = p1;
+          } else {
+            rDay = p0;
+            rMonth = p1;
           }
         }
       }
+      return { rYear, rMonth, rDay };
+    }
+    return null;
+  };
+
+  // Transaction Map for fast lookup by store & date (STRICTLY SELL OUT ONLY from connected Google Sheet)
+  const transactionsMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const r of sellOutSourceRecords) {
+      if (!r.TANGGAL || !r.NAMA_STORE) continue;
+      const parsed = parseRecordDateParts(r);
+      if (!parsed) continue;
+      const { rYear, rMonth, rDay } = parsed;
 
       if (rYear === year && rMonth === monthIdx + 1) {
         const val = r.VALUE || 0;
@@ -1378,57 +1366,9 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       }
     }
     return map;
-  }, [sourceRecords, year, monthIdx]);
+  }, [sellOutSourceRecords, year, monthIdx]);
 
-  // Real cumulative sell out from Day 1 of the month up to the active week from Google Sheets
-  const realCumulativeFromRecords = useMemo(() => {
-    const map: Record<string, number> = {};
-    const maxDay = activeDaysList.length > 0 ? activeDaysList[activeDaysList.length - 1].dayNum : 7;
-
-    for (const r of sourceRecords) {
-      if (!r.TANGGAL || !r.NAMA_STORE) continue;
-      if ((r.KET || '').toUpperCase() === 'RETURN') continue;
-
-      let rYear = r.TAHUN || 2026;
-      let rMonth = monthIdx + 1;
-      let rDay = 1;
-
-      const trimmedDate = r.TANGGAL.trim();
-      const parts = trimmedDate.split(/[-/]/);
-      if (parts.length === 3) {
-        if (parts[0].length === 4) {
-          rYear = parseInt(parts[0], 10);
-          rMonth = parseInt(parts[1], 10);
-          rDay = parseInt(parts[2], 10);
-        } else {
-          const p0 = parseInt(parts[0], 10);
-          const p1 = parseInt(parts[1], 10);
-          const p2 = parseInt(parts[2], 10);
-          if (p2 > 1000) {
-            rYear = p2;
-            if (p0 <= 12 && p1 <= 31) {
-              rMonth = p0;
-              rDay = p1;
-            } else {
-              rDay = p0;
-              rMonth = p1;
-            }
-          }
-        }
-      }
-
-      if (rYear === year && rMonth === monthIdx + 1 && rDay <= maxDay) {
-        const sKey = r.NAMA_STORE.trim().toLowerCase();
-        const sNorm = normalizeStore(r.NAMA_STORE);
-        const val = r.VALUE || 0;
-        map[sKey] = (map[sKey] || 0) + val;
-        map[sNorm] = (map[sNorm] || 0) + val;
-      }
-    }
-    return map;
-  }, [sourceRecords, year, monthIdx, activeDaysList]);
-
-  // Helper to get Sell Out on a specific day for a store
+  // Helper to get Sell Out on a specific day for a store (ONLY Google Sheet SELL OUT or manual edit; empty/0 if no data)
   const getDailySellOut = (store: WeeklyStoreConfig, dayNum: number, dateKey: string): number => {
     // 1. Check custom user edit override
     const overrideKey = `${store.storeName}_${dateKey}`;
@@ -1436,7 +1376,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       return customDailyActuals[overrideKey];
     }
 
-    // 2. Direct lookup in synced Google Sheet transaction records (by day and by dateKey)
+    // 2. Direct lookup in synced Google Sheet SELL OUT transaction records (by dateKey and by day)
     const txKeyExact = `${store.storeName.trim().toLowerCase()}_${dayNum}`;
     const txKeyNorm = `${normalizeStore(store.storeName)}_${dayNum}`;
     const txDateExact = `date_${store.storeName.trim().toLowerCase()}_${dateKey}`;
@@ -1452,31 +1392,8 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       return sheetVal;
     }
 
-    // 3. Fallback to sample snapshot if Google Sheet doesn't have data for that store/day
-    if (dayNum >= 1 && dayNum <= 7 && SAMPLE_WEEK1_DAILY_SNAPSHOT[store.storeName]) {
-      const idxInWeek = dayNum - 1;
-      if (idxInWeek >= 0 && idxInWeek < SAMPLE_WEEK1_DAILY_SNAPSHOT[store.storeName].length) {
-        const sampleVal = SAMPLE_WEEK1_DAILY_SNAPSHOT[store.storeName][idxInWeek];
-        if (sampleVal !== undefined) return sampleVal;
-      }
-    } else if (dayNum >= 8 && dayNum <= 14 && SAMPLE_DAILY_SNAPSHOT[store.storeName]) {
-      const idxInWeek = dayNum - 8;
-      if (idxInWeek >= 0 && idxInWeek < SAMPLE_DAILY_SNAPSHOT[store.storeName].length) {
-        const sampleVal = SAMPLE_DAILY_SNAPSHOT[store.storeName][idxInWeek];
-        if (sampleVal !== undefined) return sampleVal;
-      }
-    }
-
-    // 4. Deterministic fallback baseline based on daily target
-    if (store.targetMonthly > 0) {
-      const dailyTarget = Math.round(store.targetMonthly / 30);
-      const seed = (store.storeName.length * 13 + dayNum * 17) % 10;
-      if (seed > 1) {
-        return Math.round(dailyTarget * (0.6 + (seed / 10) * 0.65));
-      }
-    }
-
-    return sheetVal || 0;
+    // 3. Jika di tanggal tersebut tidak ada pencapaian Sell Out di Google Sheet, kosongkan (0)
+    return 0;
   };
 
   // Grand totals & matrix calculations (scoped to activeStoresList according to Sales Coveran)
@@ -1666,7 +1583,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
 
     // 9. Persen Target & Persentase Pencapaian
     const persentasePencapaianMingguan =
-      targetPenjualanMingguan > 0 ? Math.round((grandTotalActual / targetPenjualanMingguan) * 100) : 52;
+      targetPenjualanMingguan > 0 ? Math.round((grandTotalActual / targetPenjualanMingguan) * 100) : 0;
     const persenTarget = customPersenTarget !== null ? customPersenTarget : 100;
 
     return {
@@ -1702,10 +1619,111 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
     monthIdx,
   ]);
 
+  // Resolve baseline/monthly Target BA Non-Lavojoy & Lavojoy for a given store and month
+  const getStoreMonthlyTargetBreakdown = (
+    store: WeeklyStoreConfig,
+    monthLabel: string
+  ): { nonLavojoy: number; lavojoy: number; total: number } => {
+    const upperStore = store.storeName.trim().toUpperCase();
+    const defaultStore = DEFAULT_WEEKLY_STORES.find(
+      (d) => d.storeName.trim().toUpperCase() === upperStore
+    );
+    const baseTotal = defaultStore ? defaultStore.targetMonthly : store.targetMonthly;
+
+    const nonTargets = loadBaNonLavojoyTargets(monthLabel);
+    const lavTargets = loadBaLavojoyTargets(monthLabel);
+    const nonKey = Object.keys(nonTargets).find((k) => k.trim().toUpperCase() === upperStore);
+    const lavKey = Object.keys(lavTargets).find((k) => k.trim().toUpperCase() === upperStore);
+
+    if (nonKey !== undefined || lavKey !== undefined) {
+      const lavojoy = lavKey !== undefined ? lavTargets[lavKey] : DEFAULT_BA_LAVOJOY_TARGET;
+      const nonLavojoy =
+        nonKey !== undefined
+          ? nonTargets[nonKey]
+          : Math.max(0, baseTotal - lavojoy);
+      return { nonLavojoy, lavojoy, total: nonLavojoy + lavojoy };
+    }
+
+    const lavojoy = Math.min(DEFAULT_BA_LAVOJOY_TARGET, baseTotal);
+    const nonLavojoy = Math.max(0, baseTotal - lavojoy);
+    return { nonLavojoy, lavojoy, total: baseTotal };
+  };
+
+  // All non-deleted stores for per-month Target BA + Lavojoy configuration
+  const allConfigurableStores = useMemo(() => {
+    const deletedSet = new Set(deletedStoreNames.map((n) => n.trim().toLowerCase()));
+    return allMasterStores.filter(
+      (s) => !deletedSet.has(s.storeName.trim().toLowerCase()) && !isStoreExcludedFromIlhamsyah(s.salesName, s.storeName)
+    );
+  }, [allMasterStores, deletedStoreNames]);
+
+  const buildMonthlyTargetDrafts = (monthLabel: string): Record<string, { nonLavojoy: number; lavojoy: number }> => {
+    const drafts: Record<string, { nonLavojoy: number; lavojoy: number }> = {};
+    allConfigurableStores.forEach((s) => {
+      const bd = getStoreMonthlyTargetBreakdown(s, monthLabel);
+      drafts[s.storeName] = { nonLavojoy: bd.nonLavojoy, lavojoy: bd.lavojoy };
+    });
+    return drafts;
+  };
+
+  const handleOpenMonthlyTargetModal = (targetMonth?: string) => {
+    const m = targetMonth || selectedMonth;
+    setMonthlyTargetEditMonth(m);
+    setMonthlyTargetCopyFrom(m === 'SEPTEMBER 2026' ? 'OKTOBER 2026' : 'SEPTEMBER 2026');
+    setMonthlyTargetSearch('');
+    setMonthlyTargetSalesFilter('ALL');
+    setMonthlyTargetDrafts(buildMonthlyTargetDrafts(m));
+    setIsMonthlyTargetModalOpen(true);
+  };
+
+  const handleSwitchMonthlyTargetModalMonth = (nextMonth: string) => {
+    setMonthlyTargetEditMonth(nextMonth);
+    setMonthlyTargetDrafts(buildMonthlyTargetDrafts(nextMonth));
+  };
+
+  const handleCopyMonthlyTargetsFrom = (sourceMonth: string) => {
+    if (!sourceMonth) return;
+    setMonthlyTargetDrafts(buildMonthlyTargetDrafts(sourceMonth));
+    showToast(`Draft target disalin dari bulan ${sourceMonth}. Klik Simpan untuk menerapkan ke ${monthlyTargetEditMonth}!`);
+  };
+
+  const handleResetMonthlyTargetDrafts = () => {
+    const resetDrafts: Record<string, { nonLavojoy: number; lavojoy: number }> = {};
+    allConfigurableStores.forEach((s) => {
+      const defaultStore = DEFAULT_WEEKLY_STORES.find(
+        (d) => d.storeName.trim().toUpperCase() === s.storeName.trim().toUpperCase()
+      );
+      const baseTotal = defaultStore ? defaultStore.targetMonthly : s.targetMonthly;
+      const lav = Math.min(DEFAULT_BA_LAVOJOY_TARGET, baseTotal);
+      const non = Math.max(0, baseTotal - lav);
+      resetDrafts[s.storeName] = { nonLavojoy: non, lavojoy: lav };
+    });
+    setMonthlyTargetDrafts(resetDrafts);
+    showToast(`Draft bulan ${monthlyTargetEditMonth} dikembalikan ke target baseline default!`);
+  };
+
+  const handleSaveMonthlyTargets = () => {
+    const nonMap: Record<string, number> = {};
+    const lavMap: Record<string, number> = {};
+    Object.entries(monthlyTargetDrafts).forEach(([storeName, vals]) => {
+      nonMap[storeName] = Math.max(0, Number(vals.nonLavojoy) || 0);
+      lavMap[storeName] = Math.max(0, Number(vals.lavojoy) || 0);
+    });
+    saveBaNonLavojoyTargets(nonMap, monthlyTargetEditMonth);
+    saveBaLavojoyTargets(lavMap, monthlyTargetEditMonth);
+    setSelectedMonth(monthlyTargetEditMonth);
+    setIsMonthlyTargetModalOpen(false);
+    showToast(`Target BA + Lavojoy bulan ${monthlyTargetEditMonth} berhasil disimpan (${Object.keys(nonMap).length} toko)!`);
+  };
+
   // Open Edit Store Modal
   const handleOpenEditStore = (store: WeeklyStoreConfig) => {
     setEditingStore(store);
-    setEditTargetMonthly(store.targetMonthly);
+    setEditTargetMonth(selectedMonth);
+    const bd = getStoreMonthlyTargetBreakdown(store, selectedMonth);
+    setEditTargetNonLavojoy(bd.nonLavojoy);
+    setEditTargetLavojoy(bd.lavojoy);
+    setEditTargetMonthly(bd.total);
     setEditStoreName(store.storeName);
     setEditBaName(store.baName);
     setEditSalesName(store.salesName || 'ALBERT FERNANDO');
@@ -1716,20 +1734,20 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
     setEditCumulativeVal(calculationData.storeCumulativeToDate[store.storeName] || 0);
   };
 
-  // Save Store Edit
+  // Save Store Edit (metadata saved to store list; target saved strictly per chosen month!)
   const handleSaveEditStore = () => {
     if (!editingStore) return;
+    const targetStoreName = editStoreName.trim().toUpperCase() || editingStore.storeName;
     const updated = storesList.map((s) => {
       if (s.id === editingStore.id) {
         return {
           ...s,
-          storeName: editStoreName.trim().toUpperCase() || s.storeName,
+          storeName: targetStoreName,
           baName: editBaName.trim().toUpperCase() || s.baName,
           salesName: editSalesName.trim().toUpperCase() || s.salesName,
           trainerName: editTrainerName.trim().toUpperCase() || s.trainerName,
           coverArea: editCoverArea.trim().toUpperCase() || s.coverArea,
           region: editRegion.trim().toUpperCase() || s.region,
-          targetMonthly: editTargetMonthly,
         };
       }
       return s;
@@ -1768,19 +1786,20 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       }
     }
 
-    const targetStoreName = editStoreName.trim().toUpperCase() || editingStore.storeName;
-    if (editTargetMonthly > 0 && editTargetMonthly !== editingStore.targetMonthly) {
-      const lavTargets = loadBaLavojoyTargets(selectedMonth);
-      const lavMatchKey = Object.keys(lavTargets).find(
-        (k) => k.toUpperCase().trim() === targetStoreName
-      );
-      const currentLav = lavMatchKey ? lavTargets[lavMatchKey] : DEFAULT_BA_LAVOJOY_TARGET;
-      const newNonLavojoyTarget = Math.max(0, editTargetMonthly - currentLav);
-      setSingleTargetOverride('baNonLavojoy', targetStoreName, newNonLavojoyTarget, selectedMonth);
+    const initialBd = getStoreMonthlyTargetBreakdown(editingStore, editTargetMonth);
+    const cleanNon = Math.max(0, Number(editTargetNonLavojoy) || 0);
+    const cleanLav = Math.max(0, Number(editTargetLavojoy) || 0);
+    if (
+      cleanNon !== initialBd.nonLavojoy ||
+      cleanLav !== initialBd.lavojoy ||
+      cleanNon + cleanLav !== editingStore.targetMonthly
+    ) {
+      setSingleTargetOverride('baNonLavojoy', targetStoreName, cleanNon, editTargetMonth);
+      setSingleTargetOverride('baLavojoy', targetStoreName, cleanLav, editTargetMonth);
     }
 
     setEditingStore(null);
-    showToast(`Target & informasi ${editStoreName || editingStore.storeName} berhasil diperbarui!`);
+    showToast(`Target bulan ${editTargetMonth} & info ${targetStoreName} berhasil disimpan!`);
   };
 
   // Buka Modal Edit Pencapaian Kumulatif Progresif
@@ -2080,9 +2099,14 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
   // Save Inline Edit Cell
   const handleSaveInlineCell = () => {
     if (!inlineEditCell) return;
-    const num = parseInt(inlineInputVal.replace(/\D/g, ''), 10) || 0;
     const key = `${inlineEditCell.storeName}_${inlineEditCell.dateKey}`;
-    const updated = { ...customDailyActuals, [key]: num };
+    const trimmed = inlineInputVal.trim();
+    const updated = { ...customDailyActuals };
+    if (trimmed === '') {
+      delete updated[key];
+    } else {
+      updated[key] = parseInt(trimmed.replace(/\D/g, ''), 10) || 0;
+    }
     setCustomDailyActuals(updated);
     try {
       localStorage.setItem(STORAGE_KEY_WEEKLY_ACTUALS, JSON.stringify(updated));
@@ -2245,11 +2269,15 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
 
     const dailyRows: any[] = [];
     activeDaysList.forEach((d) => {
+      const daySum = calculationData.dailyTotals[d.dayNum] || 0;
       const row = [
         d.dayLabel,
-        ...activeStoresList.map((s) => calculationData.matrix[s.storeName]?.[d.dayNum] || 0),
+        ...activeStoresList.map((s) => {
+          const val = calculationData.matrix[s.storeName]?.[d.dayNum] || 0;
+          return val;
+        }),
         calculationData.totalTargetHarian,
-        calculationData.dailyTotals[d.dayNum] || 0,
+        daySum,
         calculationData.targetPenjualanMingguan,
       ];
       dailyRows.push(row);
@@ -2333,9 +2361,21 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
               <span className="text-[10px] font-black uppercase text-blue-900 tracking-wider">
                 Filter Terintegrasi:
               </span>
-              <span className="font-extrabold text-blue-950 bg-white/80 px-2 py-0.5 rounded-md border border-blue-200 text-[11px]">
-                {selectedMonth}
-              </span>
+              <select
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(e.target.value)}
+                className="font-extrabold text-blue-950 bg-white/80 px-2 py-0.5 rounded-md border border-blue-200 text-[11px] outline-none cursor-pointer"
+                title="Pilih Bulan Laporan & Target BA + Lavojoy"
+              >
+                {MONTH_OPTIONS_2026.map((m) => {
+                  const val = `${m.bulanName} 2026`;
+                  return (
+                    <option key={m.key} value={val}>
+                      {val}
+                    </option>
+                  );
+                })}
+              </select>
               <span className="text-slate-400">·</span>
               <div className="flex items-center gap-1">
                 <Users className="w-3 h-3 text-blue-700" />
@@ -2431,7 +2471,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
           <div className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-300 px-2.5 py-1.5 rounded-xl text-emerald-800 text-xs">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
             <span className="text-[11px] font-bold">
-              Google Sheet Terhubung ({records.length > 0 ? `${records.length} data` : 'Aktif'})
+              Google Sheet Terhubung ({sellOutSourceRecords.length > 0 ? `${sellOutSourceRecords.length} data Sell Out` : 'Tidak ada data Sell Out'})
             </span>
             <button
               onClick={handleResetToGoogleSheet}
@@ -2473,6 +2513,16 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
               Fit
             </button>
           </div>
+
+          {/* Pengaturan Target BA + Lavojoy per Bulan */}
+          <button
+            onClick={() => handleOpenMonthlyTargetModal(selectedMonth)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded-xl shadow-xs transition-all cursor-pointer"
+            title="Atur Target BA + Lavojoy berbeda untuk setiap bulan"
+          >
+            <Calendar className="w-3.5 h-3.5 text-amber-600" />
+            <span>Target BA+Lavojoy / Bulan</span>
+          </button>
 
           {/* Tambah Kolom Toko Button */}
           <button
@@ -2650,15 +2700,25 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
 
                 {/* 2. ROW: TARGET BA + LAVOJOY */}
                 <tr className="border-b border-slate-400 font-mono text-[9px]">
-                  <td className="bg-white font-black text-slate-900 p-1 border-r border-slate-400 whitespace-nowrap w-28">
-                    TARGET BA + LAVOJOY
+                  <td
+                    onClick={() => handleOpenMonthlyTargetModal(selectedMonth)}
+                    className="bg-white hover:bg-amber-50 font-black text-slate-900 p-1 border-r border-slate-400 whitespace-nowrap w-28 cursor-pointer transition-colors"
+                    title="Klik untuk mengatur Target BA + Lavojoy per bulan"
+                  >
+                    <div className="flex items-center justify-between gap-1.5">
+                      <span>TARGET BA + LAVOJOY</span>
+                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[7.5px] font-bold">
+                        <Calendar className="w-2.5 h-2.5 text-amber-700" />
+                        <span>{selectedMonth.split(' ')[0].slice(0, 3)}</span>
+                      </span>
+                    </div>
                   </td>
                   {activeStoresList.map((s) => (
                     <td
                       key={s.id}
                       onClick={() => handleOpenEditStore(s)}
                       className="text-right p-1 border-r border-slate-300 font-bold hover:bg-yellow-50 cursor-pointer transition-colors"
-                      title="Klik untuk mengedit target toko"
+                      title={`Klik untuk mengedit Target BA + Lavojoy toko ${s.storeName} (${selectedMonth})`}
                     >
                       {formatNumber(s.targetMonthly)}
                     </td>
@@ -2729,7 +2789,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
                       >
                         <div className="flex items-center justify-end gap-0.5">
                           {isCustom && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" title="Manual Edit Override" />}
-                          <span>{formatNumber(val)}</span>
+                          <span>{val > 0 ? formatNumber(val) : '0'}</span>
                         </div>
                       </td>
                     );
@@ -2741,7 +2801,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
                     colSpan={2}
                     className="text-right p-1 font-black text-slate-950 border-slate-700 bg-white font-mono text-[9.5px]"
                   >
-                    {formatNumber(calculationData.totalCumulativeToDate)}
+                    {calculationData.totalCumulativeToDate > 0 ? formatNumber(calculationData.totalCumulativeToDate) : '0'}
                   </td>
                 </tr>
 
@@ -2816,13 +2876,13 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
                               key={s.id}
                               onDoubleClick={() => {
                                 setInlineEditCell({ storeName: s.storeName, dateKey: d.dateKey, currentVal: val });
-                                setInlineInputVal(val.toString());
+                                setInlineInputVal(val > 0 ? val.toString() : '');
                               }}
                               className="p-1 border-r border-slate-300 text-right hover:bg-indigo-50/60 cursor-pointer transition-colors"
-                              title="Klik ganda untuk edit nilai"
+                              title={val > 0 ? 'Klik ganda untuk edit nilai' : 'Belum ada pencapaian Sell Out di Google Sheet (0) • Klik ganda untuk isi manual'}
                             >
-                              <span className={val > 0 ? 'font-bold text-slate-900' : 'text-slate-400'}>
-                                {val > 0 ? formatNumber(val) : '-'}
+                              <span className={val > 0 ? 'font-bold text-slate-900' : 'font-semibold text-slate-400'}>
+                                {val > 0 ? formatNumber(val) : '0'}
                               </span>
                             </td>
                           );
@@ -2861,7 +2921,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
                                   PENCAPAIAN
                                 </div>
                                 <div className="text-[10px] font-black text-slate-950 font-mono mt-0.5">
-                                  {formatNumber(calculationData.grandTotalActual)}
+                                  {calculationData.grandTotalActual > 0 ? formatNumber(calculationData.grandTotalActual) : '0'}
                                 </div>
                               </div>
 
@@ -2883,7 +2943,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
                                 </div>
                               </div>
 
-                              {/* 4. Peach/Orange Box: PERSENTASE PENCAPAIAN (52%) */}
+                              {/* 4. Peach/Orange Box: PERSENTASE PENCAPAIAN */}
                               <div className="bg-[#f8cbad] text-slate-950 rounded p-2 shadow-xs text-center border border-orange-300/60">
                                 <div className="text-[7.5px] font-black tracking-wider text-slate-900 uppercase">
                                   PERSENTASE PENCAPAIAN
@@ -2912,12 +2972,12 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
                             <td key={s.id} className="p-0.5 text-center border-r border-slate-300">
                               <span
                                 className={`inline-block px-1 py-0.2 rounded text-[7.5px] font-bold border ${
-                                  isMet && val > 0
+                                  isMet
                                     ? 'border-emerald-400 bg-emerald-50 text-emerald-700'
                                     : 'border-rose-300 bg-rose-50 text-rose-600'
                                 }`}
                               >
-                                {isMet && val > 0 ? '↑' : '↓'} {pct}%
+                                {isMet ? '↑' : '↓'} {pct}%
                               </span>
                             </td>
                           );
@@ -2948,19 +3008,22 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
                   <td className="p-1 border-r border-slate-700 uppercase text-slate-900 bg-white">
                     TOTAL
                   </td>
-                  {activeStoresList.map((s) => (
-                    <td key={s.id} className="p-1 border-r border-slate-300 text-right text-slate-950 font-black">
-                      {formatNumber(calculationData.storeWeeklyTotals[s.storeName] || 0)}
-                    </td>
-                  ))}
+                  {activeStoresList.map((s) => {
+                    const sTotal = calculationData.storeWeeklyTotals[s.storeName] || 0;
+                    return (
+                      <td key={s.id} className="p-1 border-r border-slate-300 text-right text-slate-950 font-black">
+                        {sTotal > 0 ? formatNumber(sTotal) : '0'}
+                      </td>
+                    );
+                  })}
                   <td className="p-1 border-r border-slate-700 text-right text-slate-900 font-bold bg-white">
                     {formatNumber(calculationData.targetPenjualanMingguan)}
                   </td>
                   <td className="p-1 border-r border-slate-700 text-right text-slate-950 font-black bg-[#f8cbad]">
-                    {formatNumber(calculationData.grandTotalActual)}
+                    {calculationData.grandTotalActual > 0 ? formatNumber(calculationData.grandTotalActual) : '0'}
                   </td>
                   <td className="p-1 border-slate-700 text-center font-black bg-[#f8cbad] text-slate-950">
-                    {formatNumber(calculationData.grandTotalActual)}
+                    {calculationData.grandTotalActual > 0 ? formatNumber(calculationData.grandTotalActual) : '0'}
                   </td>
                 </tr>
 
@@ -3459,18 +3522,95 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="font-bold text-slate-700 block mb-1">Target Bulanan (Rp)</label>
-                <input
-                  type="number"
-                  step="any"
-                  value={editTargetMonthly}
-                  onChange={(e) => setEditTargetMonthly(Number(e.target.value))}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 font-mono font-bold text-blue-900"
-                />
-                <span className="text-[10px] text-slate-500 mt-0.5 block">
-                  Target harian otomatis dihitung = Target Bulanan / 30.
-                </span>
+              <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="font-extrabold text-amber-950">
+                    Setting Target BA + Lavojoy per Bulan
+                  </label>
+                  <select
+                    value={editTargetMonth}
+                    onChange={(e) => {
+                      const nextMonth = e.target.value;
+                      setEditTargetMonth(nextMonth);
+                      if (editingStore) {
+                        const bd = getStoreMonthlyTargetBreakdown(editingStore, nextMonth);
+                        setEditTargetNonLavojoy(bd.nonLavojoy);
+                        setEditTargetLavojoy(bd.lavojoy);
+                        setEditTargetMonthly(bd.total);
+                      }
+                    }}
+                    className="px-2 py-1 rounded-lg border border-amber-300 bg-white font-bold text-amber-950 text-[11px] outline-none cursor-pointer"
+                  >
+                    {MONTH_OPTIONS_2026.map((m) => {
+                      const val = `${m.bulanName} 2026`;
+                      return (
+                        <option key={m.key} value={val}>
+                          {val}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="font-bold text-slate-700 block mb-1 text-[10px]">
+                      Target BA Non-Lavojoy (Rp)
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={editTargetNonLavojoy}
+                      onChange={(e) => {
+                        const val = Math.max(0, Number(e.target.value) || 0);
+                        setEditTargetNonLavojoy(val);
+                        setEditTargetMonthly(val + editTargetLavojoy);
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white font-mono font-bold text-slate-800"
+                    />
+                  </div>
+                  <div>
+                    <label className="font-bold text-slate-700 block mb-1 text-[10px]">
+                      Target Lavojoy (Rp)
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={editTargetLavojoy}
+                      onChange={(e) => {
+                        const val = Math.max(0, Number(e.target.value) || 0);
+                        setEditTargetLavojoy(val);
+                        setEditTargetMonthly(editTargetNonLavojoy + val);
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white font-mono font-bold text-slate-800"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="font-bold text-slate-700 block mb-1">
+                    Total Target BA + Lavojoy — {editTargetMonth} (Rp)
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={editTargetMonthly}
+                    onChange={(e) => {
+                      const total = Math.max(0, Number(e.target.value) || 0);
+                      setEditTargetMonthly(total);
+                      if (total >= editTargetLavojoy) {
+                        setEditTargetNonLavojoy(total - editTargetLavojoy);
+                      } else {
+                        setEditTargetLavojoy(total);
+                        setEditTargetNonLavojoy(0);
+                      }
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border border-amber-300 bg-white font-mono font-black text-blue-900"
+                  />
+                  <span className="text-[10px] text-slate-600 mt-0.5 block">
+                    Target harian otomatis ({editTargetMonth}): Rp {Math.round(editTargetMonthly / 30).toLocaleString('id-ID')} • Disimpan khusus untuk bulan ini.
+                  </span>
+                </div>
               </div>
 
               <div>
@@ -3535,6 +3675,297 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
           </div>
         </div>
       )}
+
+      {/* MODAL: PENGATURAN TARGET BA + LAVOJOY PER BULAN */}
+      {isMonthlyTargetModalOpen && (() => {
+        const monthlyStoreData = loadMonthlyTargets();
+        const filteredConfigStores = allConfigurableStores.filter((s) => {
+          if (
+            monthlyTargetSalesFilter !== 'ALL' &&
+            s.salesName.toUpperCase() !== monthlyTargetSalesFilter.toUpperCase()
+          ) {
+            return false;
+          }
+          if (monthlyTargetSearch.trim()) {
+            const q = monthlyTargetSearch.trim().toLowerCase();
+            return (
+              s.storeName.toLowerCase().includes(q) ||
+              s.baName.toLowerCase().includes(q) ||
+              s.salesName.toLowerCase().includes(q)
+            );
+          }
+          return true;
+        });
+
+        const totalFilteredMonthlyTarget = filteredConfigStores.reduce((sum, s) => {
+          const d = monthlyTargetDrafts[s.storeName];
+          return sum + (d ? d.nonLavojoy + d.lavojoy : s.targetMonthly);
+        }, 0);
+
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-150">
+            <div className="bg-white rounded-2xl max-w-5xl w-full p-4 sm:p-6 shadow-2xl border border-slate-200 text-xs flex flex-col max-h-[90vh]">
+              {/* Header */}
+              <div className="flex items-start justify-between pb-3 border-b border-slate-100 shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 rounded-xl bg-amber-100 text-amber-700">
+                    <Calendar className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-base sm:text-lg font-black text-slate-900">
+                      Setting Target BA + Lavojoy per Bulan
+                    </h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Atur target bulanan yang berbeda untuk setiap bulan (Januari – Desember 2026). Perubahan per bulan tersimpan terpisah dan sinkron dengan Pusat Kelola Target.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsMonthlyTargetModalOpen(false)}
+                  className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100 cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Month Tabs */}
+              <div className="mt-3 shrink-0">
+                <div className="text-[10px] font-black uppercase text-slate-500 mb-1.5">
+                  Pilih Bulan Target:
+                </div>
+                <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-12 gap-1.5">
+                  {MONTH_OPTIONS_2026.map((m) => {
+                    const monthLabel = `${m.bulanName} 2026`;
+                    const isSelected = monthlyTargetEditMonth === monthLabel;
+                    const norm = normalizeMonthKey(monthLabel);
+                    const bucket = monthlyStoreData[norm];
+                    const hasCustom =
+                      (bucket?.baNonLavojoy && Object.keys(bucket.baNonLavojoy).length > 0) ||
+                      (bucket?.baLavojoy && Object.keys(bucket.baLavojoy).length > 0);
+                    return (
+                      <button
+                        key={m.key}
+                        type="button"
+                        onClick={() => handleSwitchMonthlyTargetModalMonth(monthLabel)}
+                        className={`px-2 py-1.5 rounded-xl text-[11px] font-bold transition-all cursor-pointer border flex flex-col items-center justify-center ${
+                          isSelected
+                            ? 'bg-blue-600 text-white border-blue-700 shadow-xs'
+                            : hasCustom
+                            ? 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
+                            : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                        }`}
+                      >
+                        <span>{m.shortLabel}</span>
+                        {hasCustom && (
+                          <span
+                            className={`text-[8px] font-extrabold ${
+                              isSelected ? 'text-amber-200' : 'text-amber-700'
+                            }`}
+                          >
+                            Custom
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Filter & Copy Controls */}
+              <div className="flex flex-wrap items-center justify-between gap-2 mt-3 mb-2.5 bg-slate-50 p-2.5 rounded-xl border border-slate-200 shrink-0">
+                <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[240px]">
+                  <div className="relative flex-1 min-w-[180px]">
+                    <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Cari toko / BA / sales..."
+                      value={monthlyTargetSearch}
+                      onChange={(e) => setMonthlyTargetSearch(e.target.value)}
+                      className="w-full pl-8 pr-3 py-1.5 text-xs rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 text-slate-800"
+                    />
+                  </div>
+                  <select
+                    value={monthlyTargetSalesFilter}
+                    onChange={(e) => setMonthlyTargetSalesFilter(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-xl border border-slate-300 bg-white font-bold text-slate-800 text-xs outline-none cursor-pointer"
+                  >
+                    <option value="ALL">Semua Sales ({allConfigurableStores.length})</option>
+                    {availableSales.map((sales) => (
+                      <option key={sales} value={sales}>
+                        {sales}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Copy from other month & reset */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase">Salin dari:</span>
+                  <select
+                    value={monthlyTargetCopyFrom}
+                    onChange={(e) => setMonthlyTargetCopyFrom(e.target.value)}
+                    className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white font-bold text-slate-800 text-[11px] outline-none cursor-pointer"
+                  >
+                    {MONTH_OPTIONS_2026.map((m) => {
+                      const val = `${m.bulanName} 2026`;
+                      return (
+                        <option key={m.key} value={val}>
+                          {val}
+                        </option>
+                      );
+                    })}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => handleCopyMonthlyTargetsFrom(monthlyTargetCopyFrom)}
+                    className="px-2.5 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 font-bold text-[11px] flex items-center gap-1 cursor-pointer"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>Salin</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResetMonthlyTargetDrafts}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 font-bold text-[11px] flex items-center gap-1 cursor-pointer"
+                    title="Reset draft bulan ini ke nilai default"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Reset Default</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Editable Table */}
+              <div className="overflow-auto flex-1 border border-slate-200 rounded-xl">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead className="bg-slate-100 sticky top-0 z-10 border-b border-slate-200 text-[10px] uppercase text-slate-600 font-black">
+                    <tr>
+                      <th className="p-2.5 w-10 text-center">No</th>
+                      <th className="p-2.5">Toko &amp; BA / Sales</th>
+                      <th className="p-2.5 text-right w-40">Target BA Non-Lavojoy (Rp)</th>
+                      <th className="p-2.5 text-right w-36">Target Lavojoy (Rp)</th>
+                      <th className="p-2.5 text-right w-44 bg-amber-50 text-amber-950">
+                        Total Target BA + Lavojoy (Rp)
+                      </th>
+                      <th className="p-2.5 text-right w-32">Target Harian (/30)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredConfigStores.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="py-10 text-center text-slate-400">
+                          Tidak ada toko yang cocok dengan filter ini.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredConfigStores.map((s, idx) => {
+                        const draft = monthlyTargetDrafts[s.storeName] || {
+                          nonLavojoy: Math.max(0, s.targetMonthly - DEFAULT_BA_LAVOJOY_TARGET),
+                          lavojoy: DEFAULT_BA_LAVOJOY_TARGET,
+                        };
+                        const totalVal = draft.nonLavojoy + draft.lavojoy;
+                        const dailyVal = Math.round(totalVal / 30);
+
+                        return (
+                          <tr key={s.id} className="hover:bg-slate-50/80">
+                            <td className="p-2 text-center font-mono text-slate-500">{idx + 1}</td>
+                            <td className="p-2">
+                              <div className="font-black text-slate-900">{s.storeName}</div>
+                              <div className="text-[10px] text-slate-500">
+                                BA: <span className="font-semibold text-pink-700">{s.baName}</span> • Sales:{' '}
+                                <span className="font-semibold text-blue-700">{s.salesName}</span>
+                              </div>
+                            </td>
+                            <td className="p-2">
+                              <input
+                                type="number"
+                                step="any"
+                                value={draft.nonLavojoy}
+                                onChange={(e) => {
+                                  const nextNon = Math.max(0, Number(e.target.value) || 0);
+                                  setMonthlyTargetDrafts((prev) => ({
+                                    ...prev,
+                                    [s.storeName]: { ...draft, nonLavojoy: nextNon },
+                                  }));
+                                }}
+                                className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-right font-mono font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                              />
+                            </td>
+                            <td className="p-2">
+                              <input
+                                type="number"
+                                step="any"
+                                value={draft.lavojoy}
+                                onChange={(e) => {
+                                  const nextLav = Math.max(0, Number(e.target.value) || 0);
+                                  setMonthlyTargetDrafts((prev) => ({
+                                    ...prev,
+                                    [s.storeName]: { ...draft, lavojoy: nextLav },
+                                  }));
+                                }}
+                                className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-right font-mono font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                              />
+                            </td>
+                            <td className="p-2 bg-amber-50/40">
+                              <input
+                                type="number"
+                                step="any"
+                                value={totalVal}
+                                onChange={(e) => {
+                                  const nextTotal = Math.max(0, Number(e.target.value) || 0);
+                                  const nextLav = nextTotal >= draft.lavojoy ? draft.lavojoy : nextTotal;
+                                  const nextNon = Math.max(0, nextTotal - nextLav);
+                                  setMonthlyTargetDrafts((prev) => ({
+                                    ...prev,
+                                    [s.storeName]: { nonLavojoy: nextNon, lavojoy: nextLav },
+                                  }));
+                                }}
+                                className="w-full px-2.5 py-1.5 rounded-lg border border-amber-300 bg-white text-right font-mono font-black text-blue-950 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                              />
+                            </td>
+                            <td className="p-2 text-right font-mono font-bold text-slate-600">
+                              Rp {dailyVal.toLocaleString('id-ID')}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Footer */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-3.5 border-t border-slate-200 mt-3 shrink-0">
+                <div className="text-xs text-slate-600">
+                  Total Target ({filteredConfigStores.length} toko) di{' '}
+                  <strong className="text-slate-900">{monthlyTargetEditMonth}</strong>:{' '}
+                  <span className="font-mono font-black text-blue-700 text-sm">
+                    Rp {totalFilteredMonthlyTarget.toLocaleString('id-ID')}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsMonthlyTargetModalOpen(false)}
+                    className="px-4 py-2 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveMonthlyTargets}
+                    className="px-5 py-2 text-xs font-black text-white bg-blue-600 hover:bg-blue-500 rounded-xl shadow-md flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>Simpan Target {monthlyTargetEditMonth}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* MODAL: TAMBAH KOLOM TOKO BARU */}
       {isAddingStore && (

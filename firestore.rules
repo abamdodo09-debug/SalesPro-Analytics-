@@ -1,0 +1,280 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default-Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Global Helpers
+    // =========================================================================
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isValidNumber(val) {
+      return val is int || val is float;
+    }
+
+    function parentUserExists(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId));
+    }
+
+    // =========================================================================
+    // Entity Validation Blueprints
+    // =========================================================================
+    function isValidUserAccount(data, userId) {
+      return data.keys().hasAll(['uid', 'accountType', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'accountType', 'createdAt', 'updatedAt'])
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && isValidId(data.uid)
+        && data.accountType == 'standard'
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'ownerId', 'displayName', 'email', 'photoURL', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'ownerId', 'displayName', 'email', 'photoURL', 'createdAt', 'updatedAt'])
+        && data.uid == userId
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.uid)
+        && isValidId(data.ownerId)
+        && isValidString(data.displayName, 0, 120)
+        && isValidString(data.email, 3, 254)
+        && isValidString(data.photoURL, 0, 1000)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAppConfig(data, userId, configId) {
+      return data.keys().hasAll(['ownerId', 'configKey', 'payload', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'configKey', 'payload', 'createdAt', 'updatedAt'])
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && data.configKey == configId
+        && isValidString(data.configKey, 3, 100)
+        && data.configKey.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.payload is map
+        && data.payload.size() >= 1
+        && data.payload.size() <= 500
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTransaction(data, userId, txId) {
+      return data.keys().hasAll([
+          'ownerId', 'id', 'TANGGAL', 'BULAN', 'TAHUN', 'BA', 'BA_Number',
+          'COVER_AREA', 'SALES', 'SPV', 'BRAND', 'NO_SKU', 'SPU', 'SKU',
+          'PRODUK_FOCUS', 'PRODUK_NEW', 'NAMA_STORE', 'REGION', 'KATEGORI',
+          'QTY', 'VALUE', 'KET', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'id', 'TANGGAL', 'BULAN', 'TAHUN', 'BA', 'BA_Number',
+          'COVER_AREA', 'SALES', 'SPV', 'BRAND', 'NO_SKU', 'SPU', 'SKU',
+          'PRODUK_FOCUS', 'PRODUK_NEW', 'NAMA_STORE', 'REGION', 'KATEGORI',
+          'QTY', 'VALUE', 'KET', 'weekNumber', 'STATUS_PRODUK', 'createdAt', 'updatedAt'
+        ])
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && data.id == txId
+        && isValidId(data.id)
+        && isValidString(data.TANGGAL, 1, 32)
+        && isValidString(data.BULAN, 1, 32)
+        && isValidNumber(data.TAHUN) && data.TAHUN >= 2000 && data.TAHUN <= 2100
+        && isValidString(data.BA, 0, 120)
+        && isValidString(data.BA_Number, 0, 64)
+        && isValidString(data.COVER_AREA, 0, 120)
+        && isValidString(data.SALES, 0, 120)
+        && isValidString(data.SPV, 0, 120)
+        && isValidString(data.BRAND, 0, 80)
+        && isValidString(data.NO_SKU, 0, 64)
+        && isValidString(data.SPU, 0, 160)
+        && isValidString(data.SKU, 0, 240)
+        && isValidString(data.PRODUK_FOCUS, 0, 40)
+        && isValidString(data.PRODUK_NEW, 0, 40)
+        && isValidString(data.NAMA_STORE, 1, 180)
+        && isValidString(data.REGION, 0, 120)
+        && isValidString(data.KATEGORI, 0, 120)
+        && isValidNumber(data.QTY)
+        && isValidNumber(data.VALUE)
+        && isValidString(data.KET, 1, 32)
+        && (!data.keys().hasAny(['weekNumber']) || isValidNumber(data.weekNumber))
+        && (!data.keys().hasAny(['STATUS_PRODUK']) || isValidString(data.STATUS_PRODUK, 0, 120))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTransactionBatch(data, userId) {
+      return data.keys().hasAll(['ownerId', 'batchIndex', 'totalBatches', 'datasetVersion', 'records', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'batchIndex', 'totalBatches', 'datasetVersion', 'records', 'createdAt', 'updatedAt'])
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && isValidNumber(data.batchIndex) && data.batchIndex >= 0 && data.batchIndex <= 500
+        && isValidNumber(data.totalBatches) && data.totalBatches >= 1 && data.totalBatches <= 500
+        && isValidString(data.datasetVersion, 1, 64)
+        && data.datasetVersion.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.records is list
+        && data.records.size() >= 1
+        && data.records.size() <= 250
+        && data.records[0] is map
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // Collection Match Rules
+    // =========================================================================
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserAccount(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserAccount(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().accountType == existing().accountType
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt']);
+      allow delete: if false;
+
+      // Isolated Private PII Subcollection
+      match /private/{docId} {
+        allow get: if isValidId(userId) && isValidId(docId) && docId == 'profile' && isOwner(userId);
+        allow list: if false;
+        allow create: if isValidId(userId)
+          && isValidId(docId)
+          && docId == 'profile'
+          && isOwner(userId)
+          && isValidUserProfile(incoming(), userId)
+          && parentUserExists(userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(docId)
+          && docId == 'profile'
+          && isOwner(userId)
+          && isValidUserProfile(incoming(), userId)
+          && parentUserExists(userId)
+          && incoming().uid == existing().uid
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'photoURL', 'updatedAt']);
+        allow delete: if false;
+      }
+
+      // Persisted Dashboard Configurations & Target/Master Slices
+      match /configs/{configId} {
+        allow get: if isValidId(userId) && isValidId(configId) && isOwner(userId);
+        allow list: if isOwner(userId) && existing().ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(configId)
+          && isOwner(userId)
+          && isValidAppConfig(incoming(), userId, configId)
+          && parentUserExists(userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(configId)
+          && isOwner(userId)
+          && isValidAppConfig(incoming(), userId, configId)
+          && parentUserExists(userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().configKey == existing().configKey
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['payload', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(configId) && isOwner(userId);
+      }
+
+      // Individual Transactions
+      match /transactions/{txId} {
+        allow get: if isValidId(userId) && isValidId(txId) && isOwner(userId);
+        allow list: if isOwner(userId) && existing().ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(txId)
+          && isOwner(userId)
+          && isValidTransaction(incoming(), userId, txId)
+          && parentUserExists(userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(txId)
+          && isOwner(userId)
+          && isValidTransaction(incoming(), userId, txId)
+          && parentUserExists(userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().id == existing().id
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'TANGGAL', 'BULAN', 'TAHUN', 'BA', 'BA_Number', 'COVER_AREA',
+            'SALES', 'SPV', 'BRAND', 'NO_SKU', 'SPU', 'SKU', 'PRODUK_FOCUS',
+            'PRODUK_NEW', 'NAMA_STORE', 'REGION', 'KATEGORI', 'QTY', 'VALUE',
+            'KET', 'weekNumber', 'STATUS_PRODUK', 'updatedAt'
+          ]);
+        allow delete: if isValidId(userId) && isValidId(txId) && isOwner(userId);
+      }
+
+      // Chunked Google Sheet / CSV Transaction Dataset Batches
+      match /transactionBatches/{batchId} {
+        allow get: if isValidId(userId) && isValidId(batchId) && isOwner(userId);
+        allow list: if isOwner(userId) && existing().ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(batchId)
+          && isOwner(userId)
+          && isValidTransactionBatch(incoming(), userId)
+          && parentUserExists(userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(batchId)
+          && isOwner(userId)
+          && isValidTransactionBatch(incoming(), userId)
+          && parentUserExists(userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['batchIndex', 'totalBatches', 'datasetVersion', 'records', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(batchId) && isOwner(userId);
+      }
+    }
+  }
+}

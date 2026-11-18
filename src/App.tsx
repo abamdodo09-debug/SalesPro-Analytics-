@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import type { User } from 'firebase/auth';
 import {
   ActiveTab,
   DashboardFilters,
@@ -66,6 +67,19 @@ import { exportToExcel, exportToPdf } from './utils/exportUtils';
 import { loadSpvConsolidatedConfig } from './services/spvSellInSellOutService';
 import { aggregateTargetMatrix, TARGETS_UPDATED_EVENT } from './services/targetManagementService';
 import {
+  subscribeToAuth,
+  signInWithGoogle,
+  signOutFirebase,
+  ensureUserDocuments,
+  subscribeToUserCloudData,
+  syncLocalConfigsToFirestore,
+  saveSingleTransactionToFirestore,
+  syncTransactionDatasetToFirestore,
+  clearCloudTransactions,
+  FIREBASE_CLOUD_HYDRATED_EVENT,
+  getIsApplyingCloudSnapshot,
+} from './services/firebaseSyncService';
+import {
   TrendingUp,
   FileSpreadsheet,
   CheckCircle2,
@@ -83,6 +97,7 @@ const INITIAL_FILTERS: DashboardFilters = {
   BULAN: 'ALL',
   TAHUN: 'ALL',
   SALES: 'ALL',
+  TRAINER: 'ALL',
   SPV: 'ALL',
   BRAND: 'ALL',
   KATEGORI: 'ALL',
@@ -118,16 +133,105 @@ export default function App() {
   const [targetSyncVersion, setTargetSyncVersion] = useState<number>(0);
   const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState<boolean>(false);
 
+  // Firebase Auth & Cloud Firestore Sync state
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState<boolean>(false);
+  const [isCloudSyncing, setIsCloudSyncing] = useState<boolean>(false);
+  const [lastCloudSyncedAt, setLastCloudSyncedAt] = useState<string | null>(null);
+  const [fatalFirestoreError, setFatalFirestoreError] = useState<Error | null>(null);
+  const latestRecordsRef = useRef<TransactionRecord[]>(records);
+  latestRecordsRef.current = records;
+
+  if (fatalFirestoreError) {
+    throw fatalFirestoreError;
+  }
+
   useEffect(() => {
     const onTargetsUpdated = () => setTargetSyncVersion((v) => v + 1);
     const onMapsQuotaExceeded = () => setMapsQuotaExceeded(true);
+    const onCloudHydrated = () => {
+      setGasConfig(loadGasConfig());
+      setTargetSyncVersion((v) => v + 1);
+    };
     window.addEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
     window.addEventListener('storage', onTargetsUpdated);
     window.addEventListener('gmp-quota-exceeded', onMapsQuotaExceeded);
+    window.addEventListener(FIREBASE_CLOUD_HYDRATED_EVENT, onCloudHydrated);
     return () => {
       window.removeEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
       window.removeEventListener('storage', onTargetsUpdated);
       window.removeEventListener('gmp-quota-exceeded', onMapsQuotaExceeded);
+      window.removeEventListener(FIREBASE_CLOUD_HYDRATED_EVENT, onCloudHydrated);
+    };
+  }, []);
+
+  // Auth listener & real-time Firestore subscription (attached only when authenticated)
+  useEffect(() => {
+    let unsubCloud: (() => void) | null = null;
+    let configIntervalId: ReturnType<typeof setInterval> | null = null;
+
+    const unsubAuth = subscribeToAuth(async (user) => {
+      if (unsubCloud) {
+        unsubCloud();
+        unsubCloud = null;
+      }
+      if (configIntervalId) {
+        clearInterval(configIntervalId);
+        configIntervalId = null;
+      }
+
+      setFirebaseUser(user);
+      setIsAuthReady(true);
+
+      if (!user || !user.emailVerified) {
+        return;
+      }
+
+      try {
+        setIsCloudSyncing(true);
+        await ensureUserDocuments(user);
+
+        unsubCloud = subscribeToUserCloudData(user, {
+          onCloudTransactionsLoaded: (cloudRecords) => {
+            if (cloudRecords.length > 0) {
+              setRecords(cloudRecords);
+            }
+          },
+          onCloudConfigsApplied: () => {
+            setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID'));
+          },
+        });
+
+        // Push any local configs not yet stored on cloud
+        const pushed = await syncLocalConfigsToFirestore(user.uid, false);
+        if (pushed > 0) {
+          setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID'));
+        }
+
+        // Background diff check every 4 seconds to persist any manual edits automatically
+        configIntervalId = setInterval(() => {
+          if (getIsApplyingCloudSnapshot()) return;
+          syncLocalConfigsToFirestore(user.uid, false)
+            .then((count) => {
+              if (count > 0) {
+                setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID'));
+              }
+            })
+            .catch((err) => {
+              setFatalFirestoreError(err instanceof Error ? err : new Error(String(err)));
+            });
+        }, 4000);
+      } catch (err) {
+        setFatalFirestoreError(err instanceof Error ? err : new Error(String(err)));
+      } finally {
+        setIsCloudSyncing(false);
+      }
+    });
+
+    return () => {
+      unsubAuth();
+      if (unsubCloud) unsubCloud();
+      if (configIntervalId) clearInterval(configIntervalId);
     };
   }, []);
 
@@ -245,7 +349,7 @@ export default function App() {
   // Gap & Root-Cause Diagnosis: Why did sales drop?
   const gapDiagnosis = useMemo(() => {
     return diagnoseSalesGap(records, filteredRecords, filters);
-  }, [records, filteredRecords, filters]);
+  }, [records, filteredRecords, filters, targetSyncVersion]);
 
   // Top Category details for dynamic category share cards
   const topCategories = useMemo(() => {
@@ -271,6 +375,14 @@ export default function App() {
         dataSourceType: 'google_sheet',
       };
       setGasConfig(updatedConfig);
+      if (firebaseUser?.emailVerified) {
+        setIsCloudSyncing(true);
+        syncTransactionDatasetToFirestore(firebaseUser.uid, result.data, true)
+          .then(() => syncLocalConfigsToFirestore(firebaseUser.uid, false))
+          .then(() => setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID')))
+          .catch((err) => setFatalFirestoreError(err instanceof Error ? err : new Error(String(err))))
+          .finally(() => setIsCloudSyncing(false));
+      }
       showToast(`Berhasil sinkronisasi! Memuat ${result.data.length} baris data dari Google Sheet.`);
     } else {
       showToast(result.message || 'Gagal sinkronisasi dari Google Apps Script', 'error');
@@ -282,6 +394,11 @@ export default function App() {
   // Add new transaction record
   const handleAddRecord = (newRecord: TransactionRecord) => {
     setRecords((prev) => [newRecord, ...prev]);
+    if (firebaseUser?.emailVerified) {
+      saveSingleTransactionToFirestore(firebaseUser.uid, newRecord)
+        .then(() => setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID')))
+        .catch((err) => setFatalFirestoreError(err instanceof Error ? err : new Error(String(err))));
+    }
     showToast(`Transaksi baru untuk "${newRecord.NAMA_STORE}" berhasil ditambahkan!`);
   };
 
@@ -296,7 +413,56 @@ export default function App() {
       lastSyncedAt: null,
     });
     setFilters(INITIAL_FILTERS);
+    if (firebaseUser?.emailVerified) {
+      clearCloudTransactions(firebaseUser.uid).catch((err) =>
+        setFatalFirestoreError(err instanceof Error ? err : new Error(String(err)))
+      );
+    }
     showToast('Dataset telah dikembalikan ke data simulasi bawaan.');
+  };
+
+  // Firebase Auth & Manual Cloud Sync Handlers
+  const handleFirebaseLogin = async () => {
+    try {
+      const user = await signInWithGoogle();
+      if (user) {
+        showToast(`Berhasil terhubung ke Firebase DB sebagai ${user.displayName || user.email}`);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Gagal masuk dengan Google';
+      if (!msg.includes('popup-closed-by-user')) {
+        showToast(msg, 'error');
+      }
+    }
+  };
+
+  const handleFirebaseLogout = async () => {
+    try {
+      await signOutFirebase();
+      setLastCloudSyncedAt(null);
+      showToast('Berhasil keluar dari Firebase Cloud Database.');
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Gagal keluar', 'error');
+    }
+  };
+
+  const handleSyncCloudDb = async () => {
+    if (!firebaseUser?.emailVerified) {
+      await handleFirebaseLogin();
+      return;
+    }
+    try {
+      setIsCloudSyncing(true);
+      await ensureUserDocuments(firebaseUser);
+      await syncLocalConfigsToFirestore(firebaseUser.uid, true);
+      await syncTransactionDatasetToFirestore(firebaseUser.uid, latestRecordsRef.current, true);
+      setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID'));
+      showToast('Seluruh data transaksi & pengaturan berhasil disimpan ke Database Firebase!');
+    } catch (err) {
+      setFatalFirestoreError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setIsCloudSyncing(false);
+    }
   };
 
   // Export handlers for Excel (.xlsx) and PDF (.pdf)
@@ -395,6 +561,13 @@ export default function App() {
         onSyncGas={handleSyncGas}
         isSyncing={isSyncing}
         filters={filters}
+        firebaseUser={firebaseUser}
+        isAuthReady={isAuthReady}
+        isCloudSyncing={isCloudSyncing}
+        lastCloudSyncedAt={lastCloudSyncedAt}
+        onFirebaseLogin={handleFirebaseLogin}
+        onFirebaseLogout={handleFirebaseLogout}
+        onSyncCloudDb={handleSyncCloudDb}
       />
 
       {/* Main Workspace Canvas */}
@@ -414,8 +587,8 @@ export default function App() {
           comparisonLabel={growthComparison.previousPeriodLabel}
           targetTotal={kpiTargetMetrics.targetTotal}
           achievementPercent={kpiTargetMetrics.achievementPercent}
-          scopeKey={`${filters.BULAN}|${filters.TAHUN}|${filters.KET}|${filters.REGION}|${filters.SPV}|${filters.SALES}`}
-          scopeLabel={`${filters.BULAN === 'ALL' ? 'Semua Bulan' : filters.BULAN}${filters.KET !== 'ALL' ? ` • ${filters.KET}` : ''}${filters.REGION !== 'ALL' ? ` • ${filters.REGION}` : ''}${filters.SALES !== 'ALL' ? ` • ${filters.SALES}` : ''}`}
+          scopeKey={`${filters.BULAN}|${filters.TAHUN}|${filters.KET}|${filters.REGION}|${filters.SPV}|${filters.SALES}|${filters.TRAINER || 'ALL'}`}
+          scopeLabel={`${filters.BULAN === 'ALL' ? 'Semua Bulan' : filters.BULAN}${filters.KET !== 'ALL' ? ` • ${filters.KET}` : ''}${filters.REGION !== 'ALL' ? ` • ${filters.REGION}` : ''}${filters.SALES !== 'ALL' ? ` • ${filters.SALES}` : ''}${filters.TRAINER && filters.TRAINER !== 'ALL' ? ` • Trainer ${filters.TRAINER}` : ''}`}
         />
 
         {/* View Routing */}
@@ -751,6 +924,8 @@ export default function App() {
           <GapAnalysisView
             diagnosis={gapDiagnosis}
             filters={filters}
+            records={records}
+            onFilterChange={handleFilterChange}
           />
         )}
 
@@ -976,6 +1151,14 @@ export default function App() {
             status: source === 'google_sheet' ? 'connected' : 'idle',
             lastSyncedAt: new Date().toLocaleTimeString('id-ID'),
           }));
+          if (firebaseUser?.emailVerified) {
+            setIsCloudSyncing(true);
+            syncTransactionDatasetToFirestore(firebaseUser.uid, data, true)
+              .then(() => syncLocalConfigsToFirestore(firebaseUser.uid, false))
+              .then(() => setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID')))
+              .catch((err) => setFatalFirestoreError(err instanceof Error ? err : new Error(String(err))))
+              .finally(() => setIsCloudSyncing(false));
+          }
           showToast(`Berhasil memuat ${data.length} baris data transaksi!`);
         }}
         onResetToSample={handleResetToSample}

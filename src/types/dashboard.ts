@@ -402,11 +402,47 @@ export interface DropEntityItem {
   name: string;
   previousValue: number;
   currentValue: number;
+  sellInPrevious?: number;
+  sellInCurrent?: number;
+  sellOutPrevious?: number;
+  sellOutCurrent?: number;
   deficitValue: number;
   growthPercent: number;
   primaryReason: string;
   categoryOrBrand?: string;
   regionOrSales?: string;
+}
+
+export interface FactorStoreContribution {
+  storeName: string;
+  salesName: string;
+  region: string;
+  spv: string;
+  previousValue: number;
+  currentValue: number;
+  impactValue: number;
+  sharePercent: number;
+  note?: string;
+}
+
+export interface StoreGapDetailItem {
+  storeName: string;
+  region: string;
+  salesName: string;
+  spvName: string;
+  previousValue: number;
+  currentValue: number;
+  sellInPrevious: number;
+  sellInCurrent: number;
+  sellOutPrevious: number;
+  sellOutCurrent: number;
+  deficitValue: number;
+  returnValue: number;
+  focusDropValue: number;
+  growthPercent: number;
+  contributionPercent: number;
+  gapCategory: 'lost_outlet' | 'volume_drop' | 'return_impact';
+  primaryReason: string;
 }
 
 export interface GapDriverFactor {
@@ -415,10 +451,29 @@ export interface GapDriverFactor {
   description: string;
   actionPlan: string;
   percentageOfGap: number;
+  affectedStoreCount?: number;
+  affectedStores?: FactorStoreContribution[];
 }
 
 export interface SalesGapDiagnosis {
   totalTarget: number;
+  autoDefaultTarget?: number;
+  isCustomTarget?: boolean;
+  activeQuotaScopeLabel?: string;
+  activeQuotaScopeType?: 'general' | 'sales' | 'trainer';
+  activeQuotaEntityName?: string;
+  sellInTarget?: number;
+  autoSellInTarget?: number;
+  isCustomSellInTarget?: boolean;
+  sellInActual?: number;
+  sellInPrevious?: number;
+  sellInGapDeficit?: number;
+  sellOutTarget?: number;
+  autoSellOutTarget?: number;
+  isCustomSellOutTarget?: boolean;
+  sellOutActual?: number;
+  sellOutPrevious?: number;
+  sellOutGapDeficit?: number;
   actualRevenue: number;
   gapDeficit: number;
   gapPercentage: number;
@@ -429,6 +484,8 @@ export interface SalesGapDiagnosis {
   topDroppingSkus: DropEntityItem[];
   topDroppingBrands: DropEntityItem[];
   topDroppingSales: DropEntityItem[];
+  storeGapDetails?: StoreGapDetailItem[];
+  totalStoreGapDeficit?: number;
   returnSpikeImpact: number;
   lostStoresCount: number;
   lowOrderStoresCount: number;
@@ -440,6 +497,7 @@ export interface DashboardFilters {
   BULAN: string;        // 'ALL' or month name
   TAHUN: string;        // 'ALL' or year string
   SALES: string;        // 'ALL' or sales name
+  TRAINER?: string;     // 'ALL' or trainer name ('ARA' | 'RATIH')
   SPV: string;          // 'ALL' or SPV name
   BRAND: string;        // 'ALL' or brand name
   KATEGORI: string;     // 'ALL' or category name

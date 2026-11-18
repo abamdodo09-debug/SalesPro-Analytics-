@@ -25,6 +25,7 @@ interface FilterBarProps {
     months: string[];
     years: string[];
     sales: string[];
+    trainers?: string[];
     spv: string[];
     brands: string[];
     categories?: string[];
@@ -42,11 +43,15 @@ export const FilterBar: React.FC<FilterBarProps> = ({
 }) => {
   const [isExpanded, setIsExpanded] = useState(true);
 
+  const trainerOptions =
+    options.trainers && options.trainers.length > 0 ? options.trainers : ['ARA', 'RATIH'];
+
   // Count active non-default filters
   const activeFiltersCount = [
     filters.BULAN !== 'ALL',
     filters.TAHUN !== 'ALL',
     filters.SALES !== 'ALL',
+    Boolean(filters.TRAINER && filters.TRAINER !== 'ALL'),
     filters.SPV !== 'ALL',
     filters.BRAND !== 'ALL',
     Boolean(filters.KATEGORI && filters.KATEGORI !== 'ALL'),
@@ -217,6 +222,30 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                 {options.sales.map((s) => (
                   <option key={s} value={s}>
                     {s}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* 4B. TRAINER (Cyan) */}
+            <div>
+              <label className="text-[11px] font-bold text-cyan-900 mb-1 flex items-center gap-1">
+                <span className="w-2 h-2 rounded-full bg-cyan-500 inline-block" />
+                TRAINER
+              </label>
+              <select
+                value={filters.TRAINER || 'ALL'}
+                onChange={(e) => onChangeFilter('TRAINER', e.target.value)}
+                className={`w-full px-2.5 py-1.5 text-xs rounded-lg border focus:ring-2 focus:ring-cyan-500 focus:outline-none transition-colors shadow-2xs ${
+                  filters.TRAINER && filters.TRAINER !== 'ALL'
+                    ? 'border-cyan-500 bg-cyan-50 font-bold text-cyan-900'
+                    : 'border-slate-200 bg-white text-slate-700'
+                }`}
+              >
+                <option value="ALL">Semua Trainer ({trainerOptions.length})</option>
+                {trainerOptions.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
                   </option>
                 ))}
               </select>
@@ -398,6 +427,12 @@ export const FilterBar: React.FC<FilterBarProps> = ({
                 <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-900 border border-indigo-300 font-semibold shadow-2xs">
                   Sales: {filters.SALES}
                   <button onClick={() => onChangeFilter('SALES', 'ALL')}><X className="w-3 h-3 hover:text-indigo-700" /></button>
+                </span>
+              )}
+              {filters.TRAINER && filters.TRAINER !== 'ALL' && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-cyan-100 text-cyan-900 border border-cyan-300 font-semibold shadow-2xs">
+                  Trainer: {filters.TRAINER}
+                  <button onClick={() => onChangeFilter('TRAINER', 'ALL')}><X className="w-3 h-3 hover:text-cyan-700" /></button>
                 </span>
               )}
               {filters.BRAND !== 'ALL' && (
