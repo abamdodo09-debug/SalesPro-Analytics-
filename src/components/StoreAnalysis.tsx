@@ -139,49 +139,57 @@ export const StoreAnalysis: React.FC<StoreAnalysisProps> = ({ records }) => {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {enrichedStores.map((store, idx) => (
-              <tr key={store.name} className="hover:bg-slate-50/80 transition-colors">
-                <td className="py-3 px-3">
-                  <span className={`w-6 h-6 rounded-lg font-mono text-[11px] font-extrabold flex items-center justify-center shrink-0 ${
-                    idx === 0
-                      ? 'bg-gradient-to-tr from-amber-400 to-yellow-300 text-amber-950 shadow-2xs border border-amber-300'
-                      : idx === 1
-                      ? 'bg-gradient-to-tr from-slate-200 to-slate-300 text-slate-900 shadow-2xs border border-slate-300'
-                      : idx === 2
-                      ? 'bg-gradient-to-tr from-amber-600 to-orange-500 text-white shadow-2xs border border-amber-500'
-                      : 'bg-slate-100 text-slate-600 font-bold'
-                  }`}>
-                    {idx + 1}
-                  </span>
-                </td>
-                <td className="py-3 px-3 font-extrabold text-slate-900">
-                  {store.name}
-                </td>
-                <td className="py-3 px-3 text-slate-600 font-medium">
-                  {store.meta.region}
-                </td>
-                <td className="py-3 px-3">
-                  <span className={`inline-block px-2.5 py-0.5 rounded-full text-[11px] font-bold border shadow-2xs ${store.badgeColor}`}>
-                    {store.paretoClass}
-                  </span>
-                </td>
-                <td className="py-3 px-3 text-right font-mono font-bold text-slate-900 tabular-nums">
-                  {formatRupiah(store.totalValue)}
-                </td>
-                <td className="py-3 px-3 text-right font-mono text-slate-700 tabular-nums">
-                  {formatNumber(store.totalQty)}
-                </td>
-                <td className="py-3 px-3 text-right font-mono text-slate-600 tabular-nums">
-                  {store.transactionCount}
-                </td>
-                <td className="py-3 px-3 text-right font-mono text-slate-700 tabular-nums font-semibold">
-                  {formatPercent(store.contributionPercent, false)}
-                </td>
-                <td className="py-3 px-3 text-slate-600">
-                  {Array.from(store.meta.sales).join(', ') || '-'}
+            {enrichedStores.length === 0 ? (
+              <tr>
+                <td colSpan={9} className="py-10 text-center text-slate-400 font-medium">
+                  Tidak ada data gerai/toko dari Google Sheet untuk kombinasi filter terintegrasi saat ini.
                 </td>
               </tr>
-            ))}
+            ) : (
+              enrichedStores.map((store, idx) => (
+                <tr key={store.name} className="hover:bg-slate-50/80 transition-colors">
+                  <td className="py-3 px-3">
+                    <span className={`w-6 h-6 rounded-lg font-mono text-[11px] font-extrabold flex items-center justify-center shrink-0 ${
+                      idx === 0
+                        ? 'bg-gradient-to-tr from-amber-400 to-yellow-300 text-amber-950 shadow-2xs border border-amber-300'
+                        : idx === 1
+                        ? 'bg-gradient-to-tr from-slate-200 to-slate-300 text-slate-900 shadow-2xs border border-slate-300'
+                        : idx === 2
+                        ? 'bg-gradient-to-tr from-amber-600 to-orange-500 text-white shadow-2xs border border-amber-500'
+                        : 'bg-slate-100 text-slate-600 font-bold'
+                    }`}>
+                      {idx + 1}
+                    </span>
+                  </td>
+                  <td className="py-3 px-3 font-extrabold text-slate-900">
+                    {store.name}
+                  </td>
+                  <td className="py-3 px-3 text-slate-600 font-medium">
+                    {store.meta.region}
+                  </td>
+                  <td className="py-3 px-3">
+                    <span className={`inline-block px-2.5 py-0.5 rounded-full text-[11px] font-bold border shadow-2xs ${store.badgeColor}`}>
+                      {store.paretoClass}
+                    </span>
+                  </td>
+                  <td className="py-3 px-3 text-right font-mono font-bold text-slate-900 tabular-nums">
+                    {formatRupiah(store.totalValue)}
+                  </td>
+                  <td className="py-3 px-3 text-right font-mono text-slate-700 tabular-nums">
+                    {formatNumber(store.totalQty)}
+                  </td>
+                  <td className="py-3 px-3 text-right font-mono text-slate-600 tabular-nums">
+                    {store.transactionCount}
+                  </td>
+                  <td className="py-3 px-3 text-right font-mono text-slate-700 tabular-nums font-semibold">
+                    {formatPercent(store.contributionPercent, false)}
+                  </td>
+                  <td className="py-3 px-3 text-slate-600">
+                    {Array.from(store.meta.sales).join(', ') || '-'}
+                  </td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>

@@ -59,20 +59,25 @@ export function calculateProfitArea(
     trainerMonthPeriod,
     trainerConfigsOverride,
     trainerMonthlyTargetsOverride,
-    baFocusTargetsOverride
+    baFocusTargetsOverride,
+    {
+      strictSellInForSales: true,
+      strictSellOutForBa: true,
+      disableDummyBaFallback: true,
+      disableTrainerDummyActualFallback: true,
+      activeTrainersOnlyFromRecords: true,
+      zeroCostOnEmptyRecords: true,
+    }
   );
 
-  // 2. Hitung Realisasi Sell In
-  const sellInRecords = records.filter((r) => r.KET === 'SELL IN');
-  const sellInFromRecords = sellInRecords.reduce((acc, r) => acc + (r.VALUE || 0), 0);
-  const salesSellInSum = costData.salesList.reduce((acc, s) => acc + s.sellInActual, 0);
+  // 2. Hitung Realisasi Sell In (Hanya transaksi SELL IN yang ada di data terfilter)
+  const isSellInRecord = (r: TransactionRecord) => {
+    const ket = (r.KET || '').trim().toUpperCase();
+    return ket === 'SELL IN' || ket.includes('SELL IN');
+  };
 
-  // Gunakan nilai Sell In riil yang paling akurat
-  const sellInActual = sellInFromRecords > 0
-    ? sellInFromRecords
-    : salesSellInSum > 0
-    ? salesSellInSum
-    : costData.totalAreaRevenue;
+  const sellInRecords = records.filter(isSellInRecord);
+  const sellInActual = sellInRecords.reduce((acc, r) => acc + (r.VALUE || 0), 0);
 
   // 3. Margin 55%
   const marginPercent = marginRate * 100;
@@ -82,10 +87,11 @@ export function calculateProfitArea(
   const operatingCostPercent = operatingCostRate * 100;
   const operatingCostValue = Math.round(sellInActual * operatingCostRate);
 
-  // 5. Beban Gaji Karyawan Area (Sales + BA)
+  // 5. Beban Gaji Karyawan Area (Sales + BA + Trainer)
   const salaryCost = costData.totalCost;
   const totalSalesSalary = costData.totalSalesCost;
   const totalBaSalary = costData.totalBaCost;
+  const totalTrainerSalary = costData.totalTrainerCost;
 
   // 6. Total Beban Pengurang = Biaya 33% + Biaya Gaji
   const totalExpense = operatingCostValue + salaryCost;
@@ -156,7 +162,7 @@ export function calculateProfitArea(
     };
   });
 
-  // 12. Breakdown Profit per Cover Area
+  // 12. Breakdown Profit per Cover Area (Real Sell In per Area + Real Region + Proporsional Gaji Sales & BA)
   const areaMap: Record<
     string,
     {
@@ -167,23 +173,66 @@ export function calculateProfitArea(
     }
   > = {};
 
-  for (const s of costData.salesList) {
-    const area = s.coverArea || 'Area Lain';
+  const salesAreaSellInMap: Record<string, Record<string, number>> = {};
+
+  for (const r of records) {
+    const area = (r.COVER_AREA || '').trim() || 'Area Lain';
+    const reg = (r.REGION || '').trim();
     if (!areaMap[area]) {
-      areaMap[area] = { sellIn: 0, salesSalary: 0, baSalary: 0, region: '-' };
+      areaMap[area] = { sellIn: 0, salesSalary: 0, baSalary: 0, region: reg || '-' };
+    } else if ((areaMap[area].region === '-' || !areaMap[area].region) && reg && reg !== '-') {
+      areaMap[area].region = reg;
     }
-    areaMap[area].sellIn += s.sellInActual;
-    areaMap[area].salesSalary += s.totalSalary;
+
+    if (isSellInRecord(r)) {
+      const val = r.VALUE || 0;
+      areaMap[area].sellIn += val;
+      if (r.SALES && r.SALES !== '-' && r.SALES !== 'ALL') {
+        if (!salesAreaSellInMap[r.SALES]) {
+          salesAreaSellInMap[r.SALES] = {};
+        }
+        salesAreaSellInMap[r.SALES][area] = (salesAreaSellInMap[r.SALES][area] || 0) + val;
+      }
+    }
+  }
+
+  for (const s of costData.salesList) {
+    const areaBreakdown = salesAreaSellInMap[s.salesName];
+    const totalSalesSellInByArea = areaBreakdown
+      ? Object.values(areaBreakdown).reduce((acc, v) => acc + v, 0)
+      : 0;
+
+    if (areaBreakdown && totalSalesSellInByArea > 0) {
+      let allocated = 0;
+      const entries = Object.entries(areaBreakdown);
+      entries.forEach(([area, areaVal], idx) => {
+        if (!areaMap[area]) {
+          areaMap[area] = { sellIn: 0, salesSalary: 0, baSalary: 0, region: '-' };
+        }
+        const portion =
+          idx === entries.length - 1
+            ? s.totalSalary - allocated
+            : Math.round(s.totalSalary * (areaVal / totalSalesSellInByArea));
+        allocated += portion;
+        areaMap[area].salesSalary += portion;
+      });
+    } else {
+      const area = s.coverArea && s.coverArea !== '-' ? s.coverArea : 'Area Lain';
+      if (!areaMap[area]) {
+        areaMap[area] = { sellIn: 0, salesSalary: 0, baSalary: 0, region: '-' };
+      }
+      areaMap[area].salesSalary += s.totalSalary;
+    }
   }
 
   for (const b of costData.baList) {
-    const area = b.coverArea || 'Area Lain';
+    const area = b.coverArea && b.coverArea !== '-' ? b.coverArea : 'Area Lain';
     if (!areaMap[area]) {
       areaMap[area] = { sellIn: 0, salesSalary: 0, baSalary: 0, region: b.region || '-' };
     }
     areaMap[area].baSalary += b.totalSalary;
-    if (areaMap[area].region === '-') {
-      areaMap[area].region = b.region || '-';
+    if ((areaMap[area].region === '-' || !areaMap[area].region) && b.region && b.region !== '-') {
+      areaMap[area].region = b.region;
     }
   }
 
@@ -277,7 +326,7 @@ export function calculateProfitArea(
     })
     .sort((a, b) => b.sellInActual - a.sellInActual);
 
-  // 14. Breakdown Profit per Outlet / Nama Store (Memasukkan Biaya Gaji BA Toko)
+  // 14. Breakdown Profit per Outlet / Nama Store (Hanya SELL IN Toko - [Biaya Ops 33% + Gaji BA Toko])
   const storeMap: Record<
     string,
     {
@@ -305,7 +354,9 @@ export function calculateProfitArea(
         baSalary: 0,
       };
     }
-    storeMap[sName].sellIn += (r.VALUE || 0);
+    if (isSellInRecord(r)) {
+      storeMap[sName].sellIn += (r.VALUE || 0);
+    }
   }
 
   // Masukkan data BA dan gaji BA ke toko
@@ -319,7 +370,7 @@ export function calculateProfitArea(
       if (ba.salesName !== '-') storeMap[ba.storeName].salesName = ba.salesName;
     } else {
       storeMap[ba.storeName] = {
-        sellIn: ba.sellOutActual,
+        sellIn: 0,
         coverArea: ba.coverArea,
         region: ba.region,
         salesName: ba.salesName,
@@ -378,6 +429,8 @@ export function calculateProfitArea(
     salaryCost,
     totalSalesSalary,
     totalBaSalary,
+    totalTrainerSalary,
+    costBreakdown: costData,
     totalExpense,
     remainingProfitValue,
     remainingProfitPercentSellIn,

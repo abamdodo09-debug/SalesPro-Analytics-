@@ -30,12 +30,16 @@ import {
   RotateCcw,
   RefreshCw,
   X,
+  Check,
+  Filter,
+  Eye,
+  Layers,
 } from 'lucide-react';
 import { TransactionRecord, DashboardFilters, ProfitItemBreakdown, ProfitStoreItem } from '../types/dashboard';
-import { formatRupiah, formatPercent } from '../utils/analytics';
+import { formatRupiah, formatPercent, filterRecords } from '../utils/analytics';
 import { calculateProfitArea } from '../utils/profitCalculations';
+import { SalaryBreakdownModal } from './SalaryBreakdownModal';
 import * as XLSX from 'xlsx';
-import { loadSpvConsolidatedConfig } from '../services/spvSellInSellOutService';
 import {
   loadSalesTargets,
   loadBaNonLavojoyTargets,
@@ -65,6 +69,114 @@ export interface MonthlyPnlCustomOverride {
 }
 
 export const STORAGE_KEY_MONTHLY_PNL_OVERRIDES = 'salespro_monthly_pnl_overrides_v2';
+
+const ORDERED_MONTHS_LIST = [
+  'JANUARI',
+  'FEBRUARI',
+  'MARET',
+  'APRIL',
+  'MEI',
+  'JUNI',
+  'JULI',
+  'AGUSTUS',
+  'SEPTEMBER',
+  'OKTOBER',
+  'NOVEMBER',
+  'DESEMBER',
+];
+
+const MONTH_NAME_TO_NUMBER: Record<string, number> = {
+  JANUARI: 1,
+  FEBRUARI: 2,
+  MARET: 3,
+  APRIL: 4,
+  MEI: 5,
+  JUNI: 6,
+  JULI: 7,
+  AGUSTUS: 8,
+  SEPTEMBER: 9,
+  OKTOBER: 10,
+  NOVEMBER: 11,
+  DESEMBER: 12,
+};
+
+function isSellInRecord(r: TransactionRecord): boolean {
+  const ket = (r.KET || '').trim().toUpperCase();
+  return ket === 'SELL IN' || ket.includes('SELL IN');
+}
+
+function parseFullRecordDate(r: TransactionRecord): Date | null {
+  const raw = (r.TANGGAL || '').trim();
+  const bulanNum = MONTH_NAME_TO_NUMBER[(r.BULAN || '').trim().toUpperCase()];
+  const tahunNum = Number(r.TAHUN);
+
+  if (raw) {
+    // Format ISO: YYYY-MM-DD atau YYYY/MM/DD
+    const isoMatch = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+    if (isoMatch) {
+      const y = parseInt(isoMatch[1], 10);
+      const m = parseInt(isoMatch[2], 10);
+      const d = parseInt(isoMatch[3], 10);
+      if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+        return new Date(y, m - 1, d);
+      }
+    }
+
+    // Format M/D/YYYY atau D/M/YYYY
+    const slashMatch = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})/);
+    if (slashMatch) {
+      const a = parseInt(slashMatch[1], 10);
+      const b = parseInt(slashMatch[2], 10);
+      let y = parseInt(slashMatch[3], 10);
+      if (y < 100) y += 2000;
+
+      let month = a;
+      let day = b;
+
+      if (bulanNum) {
+        if (a === bulanNum && b >= 1 && b <= 31) {
+          month = a;
+          day = b;
+        } else if (b === bulanNum && a >= 1 && a <= 31) {
+          month = b;
+          day = a;
+        } else if (a > 12 && b <= 12) {
+          month = b;
+          day = a;
+        }
+      } else if (a > 12 && b <= 12) {
+        month = b;
+        day = a;
+      }
+
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        return new Date(y, month - 1, day);
+      }
+    }
+
+    const parsed = new Date(raw);
+    if (!isNaN(parsed.getTime())) {
+      return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+    }
+  }
+
+  if (bulanNum && tahunNum) {
+    return new Date(tahunNum, bulanNum - 1, 1);
+  }
+  return null;
+}
+
+function formatDateIdShort(isoDate: string): string {
+  if (!isoDate) return '';
+  const [y, m, d] = isoDate.split('-').map(Number);
+  if (!y || !m || !d) return isoDate;
+  const dt = new Date(y, m - 1, d);
+  return dt.toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+}
 
 interface ProfitAreaAnalysisProps {
   records: TransactionRecord[];
@@ -110,16 +222,117 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
     };
   }, []);
 
-  // Calculate Profit Area Summary using synchronized targets for active month
+  // Periode Tanggal Custom (mendukung lintas bulan, contoh: 26 September - 25 Oktober)
+  const [dateRangeStart, setDateRangeStart] = useState<string>('');
+  const [dateRangeEnd, setDateRangeEnd] = useState<string>('');
+
+  // Inline Edit Realisasi Sell In di menu Rincian Kinerja P&L & Tim
+  const [inlineEditMonthKey, setInlineEditMonthKey] = useState<string | null>(null);
+  const [inlineEditSellInVal, setInlineEditSellInVal] = useState<string>('');
+
+  // Drilldown Rincian Asal Nominal Beban Gaji SDM (Modal & Inline Strip)
+  const [salaryDetailTargetKey, setSalaryDetailTargetKey] = useState<string | null>(null);
+  const [showInlineSalaryOrigin, setShowInlineSalaryOrigin] = useState<boolean>(true);
+
+  // Calculate active year & month context from filters + dateRange
+  const resolvedYearForFilter = useMemo(() => {
+    if (dateRangeEnd && dateRangeEnd.length >= 4) {
+      return Number(dateRangeEnd.slice(0, 4)) || 2026;
+    }
+    if (dateRangeStart && dateRangeStart.length >= 4) {
+      return Number(dateRangeStart.slice(0, 4)) || 2026;
+    }
+    if (filters.TAHUN !== 'ALL') {
+      return Number(filters.TAHUN) || 2026;
+    }
+    const sourceRecs = allRecords || records;
+    let maxYear = 0;
+    for (let i = 0; i < sourceRecs.length; i++) {
+      const y = Number(sourceRecs[i].TAHUN);
+      if (Number.isFinite(y) && y > 2000 && y > maxYear) {
+        maxYear = y;
+      }
+    }
+    return maxYear > 0 ? maxYear : 2026;
+  }, [dateRangeStart, dateRangeEnd, filters.TAHUN, allRecords, records]);
+
+  // Scoped records for KPI Cards, Profit per Area, Profit per Outlet, Profit per Sales, Profit per Region, & Total Beban Gaji
+  const isCustomDateRangeActive = Boolean(dateRangeStart || dateRangeEnd);
+
+  const scopedRecords = useMemo(() => {
+    if (!isCustomDateRangeActive) {
+      return records;
+    }
+
+    const baseRecs = allRecords && allRecords.length > 0 ? allRecords : records;
+    // Pertahankan seluruh filter terintegrasi (Sales, Area/Region, Outlet, Brand, Kategori, KET, Trainer, SPV, Search) kecuali BULAN/TAHUN agar periode lintas bulan seperti 26 Sep - 25 Okt bekerja penuh
+    const nonPeriodFiltered = filterRecords(baseRecs, {
+      ...filters,
+      BULAN: 'ALL',
+      TAHUN: 'ALL',
+    });
+
+    const startBound = dateRangeStart
+      ? (() => {
+          const [y, m, d] = dateRangeStart.split('-').map(Number);
+          return new Date(y, m - 1, d, 0, 0, 0, 0);
+        })()
+      : null;
+
+    const endBound = dateRangeEnd
+      ? (() => {
+          const [y, m, d] = dateRangeEnd.split('-').map(Number);
+          return new Date(y, m - 1, d, 23, 59, 59, 999);
+        })()
+      : null;
+
+    return nonPeriodFiltered.filter((r) => {
+      const dt = parseFullRecordDate(r);
+      if (!dt) return false;
+      if (startBound && dt < startBound) return false;
+      if (endBound && dt > endBound) return false;
+      return true;
+    });
+  }, [isCustomDateRangeActive, records, allRecords, filters, dateRangeStart, dateRangeEnd]);
+
+  // Determine target month period for salary/KPI calculation
+  const activeTargetMonth = useMemo(() => {
+    if (dateRangeEnd) {
+      const mIdx = Number(dateRangeEnd.slice(5, 7)) - 1;
+      if (mIdx >= 0 && mIdx < 12) return ORDERED_MONTHS_LIST[mIdx];
+    }
+    if (dateRangeStart) {
+      const mIdx = Number(dateRangeStart.slice(5, 7)) - 1;
+      if (mIdx >= 0 && mIdx < 12) return ORDERED_MONTHS_LIST[mIdx];
+    }
+    return filters.BULAN && filters.BULAN !== 'ALL' ? filters.BULAN.toUpperCase() : 'ALL';
+  }, [dateRangeStart, dateRangeEnd, filters.BULAN]);
+
+  const activeTrainerMonthPeriod = useMemo(() => {
+    const mName = activeTargetMonth !== 'ALL' ? activeTargetMonth : 'OKTOBER';
+    return `${mName} ${resolvedYearForFilter}`;
+  }, [activeTargetMonth, resolvedYearForFilter]);
+
+  const activePeriodDisplayLabel = useMemo(() => {
+    if (isCustomDateRangeActive) {
+      const s = dateRangeStart ? formatDateIdShort(dateRangeStart) : 'Awal Data';
+      const e = dateRangeEnd ? formatDateIdShort(dateRangeEnd) : 'Akhir Data';
+      return `${s} – ${e}`;
+    }
+    const bLabel = filters.BULAN === 'ALL' ? 'Semua Bulan' : filters.BULAN;
+    const tLabel = filters.TAHUN === 'ALL' ? 'Semua Tahun' : filters.TAHUN;
+    return `${bLabel} (${tLabel})`;
+  }, [isCustomDateRangeActive, dateRangeStart, dateRangeEnd, filters.BULAN, filters.TAHUN]);
+
+  // Calculate Profit Area Summary using synchronized targets for active month / custom date range
   const profitSummary = useMemo(() => {
-    const activeM = filters.BULAN;
     return calculateProfitArea(
-      records,
+      scopedRecords,
       marginPercent / 100,
       operatingCostPercent / 100,
-      loadSalesTargets(activeM),
-      loadBaNonLavojoyTargets(activeM),
-      loadBaLavojoyTargets(activeM),
+      loadSalesTargets(activeTargetMonth),
+      loadBaNonLavojoyTargets(activeTargetMonth),
+      loadBaLavojoyTargets(activeTargetMonth),
       undefined,
       undefined,
       DEFAULT_SALES_TARGET,
@@ -127,16 +340,22 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
       DEFAULT_BA_LAVOJOY_TARGET,
       undefined,
       loadTrainerConfigs(),
-      loadTrainerTargets(activeM),
-      activeM && activeM !== 'ALL' ? `${activeM.toUpperCase()} 2026` : 'OKTOBER 2026',
-      loadBaFocusTargets(activeM)
+      loadTrainerTargets(activeTargetMonth),
+      activeTrainerMonthPeriod,
+      loadBaFocusTargets(activeTargetMonth)
     );
-  }, [records, marginPercent, operatingCostPercent, filters.BULAN, targetSyncVersion]);
+  }, [scopedRecords, marginPercent, operatingCostPercent, activeTargetMonth, activeTrainerMonthPeriod, targetSyncVersion]);
 
-  // Selected Month for 12-Month Graphic Inspection
+  // Selected Month for 12-Month Graphic Inspection (synced with integrated Month filter)
   const [selectedPnlMonth, setSelectedPnlMonth] = useState<string>(() => {
     return filters.BULAN && filters.BULAN !== 'ALL' ? filters.BULAN.toUpperCase() : 'OKTOBER';
   });
+
+  useEffect(() => {
+    if (filters.BULAN && filters.BULAN !== 'ALL') {
+      setSelectedPnlMonth(filters.BULAN.toUpperCase());
+    }
+  }, [filters.BULAN]);
 
   // Custom Overrides for Monthly P&L (Bisa diedit untuk semua bulan: Jan - Des)
   const [monthlyPnlOverrides, setMonthlyPnlOverrides] = useState<Record<string, MonthlyPnlCustomOverride>>(() => {
@@ -156,13 +375,13 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
   const [editPnlMargin, setEditPnlMargin] = useState<number>(0);
   const [editPnlOpsCost, setEditPnlOpsCost] = useState<number>(0);
   const [editPnlProfit, setEditPnlProfit] = useState<number>(0);
-  const [editPnlSalesCount, setEditPnlSalesCount] = useState<number>(6);
-  const [editPnlBaCount, setEditPnlBaCount] = useState<number>(17);
-  const [editPnlTrainerCount, setEditPnlTrainerCount] = useState<number>(2);
-  const [editPnlSpvCount, setEditPnlSpvCount] = useState<number>(1);
+  const [editPnlSalesCount, setEditPnlSalesCount] = useState<number>(0);
+  const [editPnlBaCount, setEditPnlBaCount] = useState<number>(0);
+  const [editPnlTrainerCount, setEditPnlTrainerCount] = useState<number>(0);
+  const [editPnlSpvCount, setEditPnlSpvCount] = useState<number>(0);
   const [editPnlNote, setEditPnlNote] = useState<string>('');
 
-  // 12-Month P&L & Headcount Trend (Januari - Desember)
+  // 12-Month P&L & Headcount Trend (Januari - Desember) - Realisasi Sell In HANYA dari data SELL IN Google Sheet terhubung + bisa diedit manual
   const monthlyPnlData = useMemo(() => {
     const months = [
       { key: 'JANUARI', label: 'Jan', fullName: 'Januari' },
@@ -181,14 +400,22 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
 
     const allRecs = allRecords && allRecords.length > 0 ? allRecords : records;
     const trainerConfigs = loadTrainerConfigs();
+    const activeYearStr = filters.TAHUN !== 'ALL' ? String(filters.TAHUN).trim() : 'ALL';
+    const yearNumForPeriod = filters.TAHUN !== 'ALL' ? Number(filters.TAHUN) || resolvedYearForFilter : resolvedYearForFilter;
 
     const data = months.map((m) => {
-      const monthRecs = allRecs.filter(
-        (r) => (r.BULAN || '').toUpperCase() === m.key
-      );
+      // Ambil transaksi bulan m.key sesuai filter terintegrasi non-bulan (Region, Area, Sales, Brand, Store, dll) dan Tahun
+      const monthRecs = filterRecords(allRecs, {
+        ...filters,
+        BULAN: m.key,
+        TAHUN: activeYearStr,
+        KET: 'ALL',
+      });
 
-      // Consolidated Sell In (includes KA & DAZZLE ME MG)
-      const spvConfig = loadSpvConsolidatedConfig(allRecs, m.key, 2026);
+      // Pencapaian SELL IN asli dari Google Sheet yang terhubung (0 jika tidak ada data SELL IN di sheet)
+      const sheetSellIn = monthRecs
+        .filter(isSellInRecord)
+        .reduce((acc, r) => acc + (r.VALUE || 0), 0);
 
       let mSummary;
       if (monthRecs.length > 0) {
@@ -207,7 +434,7 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
           undefined,
           trainerConfigs,
           loadTrainerTargets(m.key),
-          `${m.key} 2026`,
+          `${m.key} ${yearNumForPeriod}`,
           loadBaFocusTargets(m.key)
         );
       }
@@ -215,49 +442,71 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
       // Check User Override for this month
       const ov = monthlyPnlOverrides[m.key] || {};
 
-      // Sell In
-      const baseSellIn =
-        spvConfig.totalSellIn > 0
-          ? spvConfig.totalSellIn
-          : mSummary && mSummary.sellInActual > 0
-          ? mSummary.sellInActual
-          : 750000000;
-      const sellIn = ov.sellIn !== undefined ? ov.sellIn : baseSellIn;
+      // Realisasi Sell In murni dari Google Sheet SELL IN (atau override manual user)
+      const sellIn = ov.sellIn !== undefined ? ov.sellIn : sheetSellIn;
 
-      // Margin 55% & Biaya Operasional 33%
+      // Margin & Biaya Operasional mengikuti Sell In aktif
       const margin = ov.margin !== undefined ? ov.margin : Math.round(sellIn * (marginPercent / 100));
       const opsCost = ov.opsCost !== undefined ? ov.opsCost : Math.round(sellIn * (operatingCostPercent / 100));
 
-      // Salary cost: Sales + BA + Trainer + SPV
-      const baseSalaryCost =
-        mSummary && mSummary.salaryCost > 0
-          ? mSummary.salaryCost
-          : Math.round(92000000 + (sellIn > 800000000 ? 12500000 : 7500000));
+      // Salary cost asli dari transaksi bulan tersebut (0 jika tidak ada data di bulan tersebut)
+      const baseSalaryCost = mSummary ? mSummary.salaryCost : 0;
       const salaryCost = ov.salaryCost !== undefined ? ov.salaryCost : baseSalaryCost;
+      const isSalaryEdited = ov.salaryCost !== undefined;
+      const systemSalesSalary = mSummary?.totalSalesSalary || 0;
+      const systemBaSalary = mSummary?.totalBaSalary || 0;
+      const systemTrainerSalary = mSummary?.totalTrainerSalary || 0;
+      const costBreakdown = mSummary?.costBreakdown;
 
       const totalExpense = opsCost + salaryCost;
       const netProfit = ov.netProfit !== undefined ? ov.netProfit : (margin - totalExpense);
       const profitPct = sellIn > 0 ? (netProfit / sellIn) * 100 : 0;
       const marginPct = margin > 0 ? (netProfit / margin) * 100 : 0;
 
-      // SDM count (Sales + BA + Trainer + SPV)
-      const baseSales = mSummary?.profitBySales?.length || 6;
+      // SDM count riil di bulan tersebut (disinkronkan dengan costBreakdown agar cocok dengan rincian gaji)
+      const baseSales = costBreakdown ? costBreakdown.salesCount : (mSummary?.profitBySales?.length || 0);
+      const baseBa = costBreakdown
+        ? costBreakdown.baCount
+        : monthRecs.length > 0
+        ? new Set(
+            monthRecs
+              .filter((r) => r.BA && r.BA !== '-' && r.NAMA_STORE)
+              .map((r) => r.NAMA_STORE)
+          ).size
+        : 0;
+      const baseTrainer = costBreakdown
+        ? (costBreakdown.trainerCount ?? 0)
+        : mSummary && (mSummary.totalTrainerSalary || 0) > 0
+        ? (trainerConfigs.length > 0 ? Math.min(trainerConfigs.length, 2) : 2)
+        : 0;
+      const baseSpv = monthRecs.length > 0
+        ? new Set(monthRecs.map((r) => r.SPV).filter((s) => s && s !== '-')).size || 1
+        : 0;
+
       const salesCount = ov.salesCount !== undefined ? ov.salesCount : baseSales;
-      const baCount = ov.baCount !== undefined ? ov.baCount : 17; // standard BA tim binaan Widodo
-      const trainerCount = ov.trainerCount !== undefined ? ov.trainerCount : 2; // Ara & Ratih
-      const spvCount = ov.spvCount !== undefined ? ov.spvCount : 1; // Widodo
+      const baCount = ov.baCount !== undefined ? ov.baCount : baseBa;
+      const trainerCount = ov.trainerCount !== undefined ? ov.trainerCount : baseTrainer;
+      const spvCount = ov.spvCount !== undefined ? ov.spvCount : baseSpv;
       const sdmCount = ov.sdmCount !== undefined ? ov.sdmCount : (salesCount + baCount + trainerCount + spvCount);
       const isCustomEdited = Object.keys(ov).length > 0;
+      const isSellInEdited = ov.sellIn !== undefined;
       const note = ov.note || '';
 
       return {
         key: m.key,
         label: m.label,
         fullName: m.fullName,
+        sheetSellIn,
         sellIn,
         margin,
         opsCost,
         salaryCost,
+        systemSalaryCost: baseSalaryCost,
+        systemSalesSalary,
+        systemBaSalary,
+        systemTrainerSalary,
+        isSalaryEdited,
+        costBreakdown,
         totalExpense,
         netProfit,
         profitPct,
@@ -268,18 +517,22 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
         trainerCount,
         spvCount,
         isCustomEdited,
+        isSellInEdited,
         note,
         hasData: monthRecs.length > 0,
       };
     });
 
+    const activeMonths = data.filter((d) => d.sellIn > 0 || d.salaryCost > 0 || d.hasData || d.isCustomEdited);
+    const poolForMax = activeMonths.length > 0 ? activeMonths : data;
+
     let maxProfit = -Infinity;
-    let maxProfitItem = data[0];
+    let maxProfitItem = poolForMax[0];
     let maxSalary = -Infinity;
-    let maxSalaryItem = data[0];
+    let maxSalaryItem = poolForMax[0];
     let maxSellIn = 0;
 
-    data.forEach((d) => {
+    poolForMax.forEach((d) => {
       if (d.netProfit > maxProfit) {
         maxProfit = d.netProfit;
         maxProfitItem = d;
@@ -294,10 +547,13 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
     });
 
     const totalYearlySellIn = data.reduce((acc, d) => acc + d.sellIn, 0);
+    const totalYearlyMargin = data.reduce((acc, d) => acc + d.margin, 0);
+    const totalYearlyOpsCost = data.reduce((acc, d) => acc + d.opsCost, 0);
     const totalYearlySalary = data.reduce((acc, d) => acc + d.salaryCost, 0);
     const totalYearlyProfit = data.reduce((acc, d) => acc + d.netProfit, 0);
-    const avgMonthlyProfit = totalYearlyProfit / 12;
-    const avgMonthlySalary = totalYearlySalary / 12;
+    const dividerMonths = activeMonths.length > 0 ? activeMonths.length : 12;
+    const avgMonthlyProfit = totalYearlyProfit / dividerMonths;
+    const avgMonthlySalary = totalYearlySalary / dividerMonths;
     const avgNetMarginPct = totalYearlySellIn > 0 ? (totalYearlyProfit / totalYearlySellIn) * 100 : 0;
 
     return {
@@ -306,13 +562,77 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
       maxSalaryItem,
       maxSellIn,
       totalYearlySellIn,
+      totalYearlyMargin,
+      totalYearlyOpsCost,
       totalYearlySalary,
       totalYearlyProfit,
       avgMonthlyProfit,
       avgMonthlySalary,
       avgNetMarginPct,
+      activeMonthCount: activeMonths.length,
     };
-  }, [records, allRecords, marginPercent, operatingCostPercent, monthlyPnlOverrides, targetSyncVersion]);
+  }, [records, allRecords, filters, marginPercent, operatingCostPercent, monthlyPnlOverrides, targetSyncVersion, resolvedYearForFilter]);
+
+  // Handlers for Inline Sell In Editing
+  const startInlineEditSellIn = (monthKey: string, currentSellIn: number) => {
+    setInlineEditMonthKey(monthKey);
+    setInlineEditSellInVal(String(Math.round(currentSellIn || 0)));
+  };
+
+  const commitInlineEditSellIn = (monthKey: string) => {
+    const parsed = parseFloat(inlineEditSellInVal);
+    const cleanSellIn = Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : 0;
+    const targetItem = monthlyPnlData.monthlyList.find((m) => m.key === monthKey);
+    const prevOv = monthlyPnlOverrides[monthKey] || {};
+    const newMargin = Math.round(cleanSellIn * (marginPercent / 100));
+    const newOpsCost = Math.round(cleanSellIn * (operatingCostPercent / 100));
+    const effectiveSalary = prevOv.salaryCost !== undefined ? prevOv.salaryCost : (targetItem?.salaryCost || 0);
+    const newNetProfit = newMargin - newOpsCost - effectiveSalary;
+
+    const updated: Record<string, MonthlyPnlCustomOverride> = {
+      ...monthlyPnlOverrides,
+      [monthKey]: {
+        ...prevOv,
+        sellIn: cleanSellIn,
+        margin: newMargin,
+        opsCost: newOpsCost,
+        netProfit: newNetProfit,
+        profitPct: cleanSellIn > 0 ? (newNetProfit / cleanSellIn) * 100 : 0,
+      },
+    };
+    setMonthlyPnlOverrides(updated);
+    try {
+      localStorage.setItem(STORAGE_KEY_MONTHLY_PNL_OVERRIDES, JSON.stringify(updated));
+    } catch (e) {
+      console.warn('Failed to save monthlyPnlOverrides', e);
+    }
+    setInlineEditMonthKey(null);
+  };
+
+  const resetInlineSellInToSheet = (monthKey: string) => {
+    const prevOv = { ...(monthlyPnlOverrides[monthKey] || {}) };
+    delete prevOv.sellIn;
+    delete prevOv.margin;
+    delete prevOv.opsCost;
+    delete prevOv.netProfit;
+    delete prevOv.profitPct;
+
+    const updated = { ...monthlyPnlOverrides };
+    if (Object.keys(prevOv).length === 0) {
+      delete updated[monthKey];
+    } else {
+      updated[monthKey] = prevOv;
+    }
+    setMonthlyPnlOverrides(updated);
+    try {
+      localStorage.setItem(STORAGE_KEY_MONTHLY_PNL_OVERRIDES, JSON.stringify(updated));
+    } catch (e) {
+      console.warn('Failed to reset inline Sell In override', e);
+    }
+    if (inlineEditMonthKey === monthKey) {
+      setInlineEditMonthKey(null);
+    }
+  };
 
   // Handlers for Editing Monthly P&L
   const openEditPnlModal = (monthKey: string) => {
@@ -327,7 +647,7 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
     setEditPnlSalesCount(target.salesCount);
     setEditPnlBaCount(target.baCount);
     setEditPnlTrainerCount(target.trainerCount);
-    setEditPnlSpvCount(target.spvCount || 1);
+    setEditPnlSpvCount(target.spvCount);
     setEditPnlNote(target.note || '');
   };
 
@@ -346,14 +666,14 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
     const finalSales = Number(editPnlSalesCount) || 0;
     const finalBa = Number(editPnlBaCount) || 0;
     const finalTrainer = Number(editPnlTrainerCount) || 0;
-    const finalSpv = Number(editPnlSpvCount) || 1;
+    const finalSpv = Number(editPnlSpvCount) || 0;
     const totalSdm = finalSales + finalBa + finalTrainer + finalSpv;
 
     const sellIn = Number(editPnlSellIn) || 0;
-    const margin = Number(editPnlMargin) || Math.round(sellIn * (marginPercent / 100));
-    const opsCost = Number(editPnlOpsCost) || Math.round(sellIn * (operatingCostPercent / 100));
+    const margin = Number(editPnlMargin) || 0;
+    const opsCost = Number(editPnlOpsCost) || 0;
     const salaryCost = Number(editPnlSalary) || 0;
-    const netProfit = Number(editPnlProfit) !== undefined ? Number(editPnlProfit) : margin - opsCost - salaryCost;
+    const netProfit = Number.isFinite(Number(editPnlProfit)) ? Number(editPnlProfit) : margin - opsCost - salaryCost;
     const profitPct = sellIn > 0 ? (netProfit / sellIn) * 100 : 0;
 
     const updated: Record<string, MonthlyPnlCustomOverride> = {
@@ -513,19 +833,21 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
     const summaryRows: (string | number)[][] = [
       ['LAPORAN ANALISA PROFIT AREA (P&L PORTFOLIO)'],
       ['Waktu Cetak:', new Date().toLocaleString('id-ID')],
-      ['Filter Bulan:', filters.BULAN],
+      ['Periode Aktif:', activePeriodDisplayLabel],
+      ['Filter Bulan:', isCustomDateRangeActive ? `Custom Tanggal (${activeTargetMonth})` : filters.BULAN],
       ['Filter Tahun:', filters.TAHUN],
       ['Filter Region:', filters.REGION],
       ['Filter Sales:', filters.SALES],
       [''],
       ['KOMPONEN P&L', 'NILAI (IDR)', 'RASIO TERHADAP SELL IN', 'KETERANGAN'],
       ['1. Realisasi Sell In', profitSummary.sellInActual, '100.00%', 'Total Omset Penjualan Sell In'],
-      ['2. Margin Kotor', profitSummary.marginValue, `${profitSummary.marginPercent.toFixed(1)}%`, 'Margin Penjualan Produk (55%)'],
-      ['3. Biaya Operasional', profitSummary.operatingCostValue, `${profitSummary.operatingCostPercent.toFixed(1)}%`, 'Beban Operasional Area (33%)'],
-      ['4. Beban Gaji Karyawan', profitSummary.salaryCost, `${((profitSummary.salaryCost / (profitSummary.sellInActual || 1)) * 100).toFixed(2)}%`, 'Total Gaji Pokok & Insentif (Sales + BA)'],
+      ['2. Margin Kotor', profitSummary.marginValue, `${profitSummary.marginPercent.toFixed(1)}%`, 'Margin Penjualan Produk'],
+      ['3. Biaya Operasional', profitSummary.operatingCostValue, `${profitSummary.operatingCostPercent.toFixed(1)}%`, 'Beban Operasional Area'],
+      ['4. Beban Gaji Karyawan', profitSummary.salaryCost, `${((profitSummary.salaryCost / (profitSummary.sellInActual || 1)) * 100).toFixed(2)}%`, 'Total Gaji Pokok & Insentif (Sales + BA + Trainer)'],
       ['   - Gaji & Insentif Sales', profitSummary.totalSalesSalary, '-', 'Beban Tenaga Penjual Sales'],
       ['   - Gaji & Insentif BA', profitSummary.totalBaSalary, '-', 'Beban Beauty Advisor Toko'],
-      ['5. Total Biaya Pengurang', profitSummary.totalExpense, `${((profitSummary.totalExpense / (profitSummary.sellInActual || 1)) * 100).toFixed(2)}%`, 'Biaya 33% + Biaya Gaji'],
+      ['   - Gaji & Insentif Trainer', profitSummary.totalTrainerSalary || 0, '-', 'Beban Trainer Area'],
+      ['5. Total Biaya Pengurang', profitSummary.totalExpense, `${((profitSummary.totalExpense / (profitSummary.sellInActual || 1)) * 100).toFixed(2)}%`, 'Biaya Operasional + Biaya Gaji'],
       ['6. SISA PROFIT TERSEDIA', profitSummary.remainingProfitValue, `${profitSummary.remainingProfitPercentSellIn.toFixed(2)}%`, 'Margin - Total Biaya (Net Profit)'],
       ['   - Rasio Sisa Profit vs Margin', `${profitSummary.remainingProfitPercentMargin.toFixed(2)}%`, '-', 'Persentase terhadap Gross Margin'],
       ['   - Titik Impas (BEP) Sell In', profitSummary.breakEvenPointSellIn, '-', 'Batas Omset Minimal Agar Tidak Defisit'],
@@ -539,9 +861,9 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
       'Area',
       'Region',
       'Realisasi Sell In',
-      'Margin (55%)',
-      'Biaya Ops (33%)',
-      'Beban Gaji Area',
+      `Margin (${marginPercent}%)`,
+      `Biaya Ops (${operatingCostPercent}%)`,
+      'Beban Gaji Area (Sales + BA)',
       'Total Biaya',
       'Sisa Profit (IDR)',
       '% Profit vs Sell In',
@@ -572,8 +894,8 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
       'Area',
       'SPV',
       'Realisasi Sell In',
-      'Margin (55%)',
-      'Biaya Ops (33%)',
+      `Margin (${marginPercent}%)`,
+      `Biaya Ops (${operatingCostPercent}%)`,
       'Gaji & Insentif Sales',
       'Total Beban Sales',
       'Kontribusi Profit (IDR)',
@@ -607,8 +929,8 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
       'Status BA',
       'Nama BA',
       'Realisasi Sell In',
-      'Margin (55%)',
-      'Biaya Ops (33%)',
+      `Margin (${marginPercent}%)`,
+      `Biaya Ops (${operatingCostPercent}%)`,
       'Biaya Gaji BA Toko',
       'Total Beban Toko',
       'Sisa Profit Toko (IDR)',
@@ -635,9 +957,35 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
     const wsStore = XLSX.utils.aoa_to_sheet([storeHeader, ...storeRows]);
     XLSX.utils.book_append_sheet(wb, wsStore, 'Profit per Toko');
 
+    // Sheet 5: Profit per Region
+    const regHeader = [
+      'No',
+      'Region',
+      'Realisasi Sell In',
+      `Margin (${marginPercent}%)`,
+      `Biaya Ops (${operatingCostPercent}%)`,
+      'Total Beban Gaji (Sales + BA)',
+      'Sisa Profit (IDR)',
+      '% Profit vs Sell In',
+      'Status Profit',
+    ];
+    const regRows = profitSummary.profitByRegion.map((item, idx) => [
+      idx + 1,
+      item.name,
+      item.sellInActual,
+      item.marginValue,
+      item.operatingCostValue,
+      item.salaryCost,
+      item.remainingProfitValue,
+      `${item.remainingProfitPercentSellIn.toFixed(2)}%`,
+      item.profitStatus === 'excellent' ? 'Sangat Sehat' : item.profitStatus === 'healthy' ? 'Sehat' : item.profitStatus === 'warning' ? 'Waspada' : 'Defisit',
+    ]);
+    const wsRegion = XLSX.utils.aoa_to_sheet([regHeader, ...regRows]);
+    XLSX.utils.book_append_sheet(wb, wsRegion, 'Profit per Region');
+
     XLSX.writeFile(
       wb,
-      `SalesPro_Laporan_Profit_Area_${filters.BULAN}_${filters.TAHUN}_${new Date().toISOString().slice(0, 10)}.xlsx`
+      `SalesPro_Laporan_Profit_Area_${isCustomDateRangeActive ? `${dateRangeStart || 'start'}_${dateRangeEnd || 'end'}` : `${filters.BULAN}_${filters.TAHUN}`}_${new Date().toISOString().slice(0, 10)}.xlsx`
     );
   };
 
@@ -716,6 +1064,83 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
               <FileSpreadsheet className="w-3.5 h-3.5" />
               <span>Download Excel P&amp;L</span>
             </button>
+          </div>
+        </div>
+
+        {/* Integrated Filter Status + Periode Tanggal (termasuk lintas bulan e.g. 26 September - 25 Oktober) */}
+        <div className="mt-4 p-3.5 rounded-xl bg-white/95 border border-emerald-200/90 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-900 border border-emerald-200 font-bold">
+              <Filter className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Periode Aktif: {activePeriodDisplayLabel}</span>
+            </span>
+            {filters.REGION !== 'ALL' && (
+              <span className="px-2 py-0.5 rounded-md bg-teal-50 text-teal-800 border border-teal-200 font-semibold text-[11px]">
+                Region: {filters.REGION}
+              </span>
+            )}
+            {filters.SALES !== 'ALL' && (
+              <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-800 border border-indigo-200 font-semibold text-[11px]">
+                Sales: {filters.SALES}
+              </span>
+            )}
+            {filters.NAMA_STORE !== 'ALL' && (
+              <span className="px-2 py-0.5 rounded-md bg-blue-50 text-blue-800 border border-blue-200 font-semibold text-[11px]">
+                Outlet: {filters.NAMA_STORE}
+              </span>
+            )}
+            <span className="text-[11px] font-mono text-slate-500">
+              ({scopedRecords.length} transaksi • {scopedRecords.filter(isSellInRecord).length} Sell In)
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1.5 bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-200">
+              <Calendar className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span className="text-[11px] font-bold text-slate-600">Periode Tanggal:</span>
+              <input
+                type="date"
+                value={dateRangeStart}
+                onChange={(e) => setDateRangeStart(e.target.value)}
+                className="text-xs font-mono font-semibold text-slate-800 bg-white border border-slate-200 rounded px-2 py-1 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+                title="Tanggal Mulai (contoh: 26 September)"
+              />
+              <span className="text-xs text-slate-400 font-bold">s/d</span>
+              <input
+                type="date"
+                value={dateRangeEnd}
+                onChange={(e) => setDateRangeEnd(e.target.value)}
+                className="text-xs font-mono font-semibold text-slate-800 bg-white border border-slate-200 rounded px-2 py-1 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+                title="Tanggal Akhir (contoh: 25 Oktober)"
+              />
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setDateRangeStart(`${resolvedYearForFilter}-09-26`);
+                setDateRangeEnd(`${resolvedYearForFilter}-10-25`);
+              }}
+              className="px-2.5 py-1.5 text-[11px] font-bold rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100 transition-colors cursor-pointer"
+              title={`Terapkan periode cut-off 26 September – 25 Oktober ${resolvedYearForFilter}`}
+            >
+              26 Sep – 25 Okt
+            </button>
+
+            {isCustomDateRangeActive && (
+              <button
+                type="button"
+                onClick={() => {
+                  setDateRangeStart('');
+                  setDateRangeEnd('');
+                }}
+                className="px-2.5 py-1.5 text-[11px] font-bold rounded-lg border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 transition-colors flex items-center gap-1 cursor-pointer"
+                title="Kembali mengikuti filter Bulan terintegrasi"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Reset Tanggal</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -834,12 +1259,16 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
             </div>
             <div className="text-[11px] text-slate-500 mt-2 flex flex-col gap-0.5 font-mono">
               <div className="flex justify-between">
-                <span>Biaya 33%:</span>
+                <span>Biaya Ops ({operatingCostPercent}%):</span>
                 <span className="font-bold text-slate-700">{formatRupiah(profitSummary.operatingCostValue, true)}</span>
               </div>
               <div className="flex justify-between">
-                <span>Gaji Area:</span>
-                <span className="font-bold text-slate-700">{formatRupiah(profitSummary.salaryCost, true)}</span>
+                <span>Gaji Sales + BA + Trainer:</span>
+                <span className="font-bold text-purple-700">{formatRupiah(profitSummary.salaryCost, true)}</span>
+              </div>
+              <div className="flex justify-between text-[10px] text-slate-400">
+                <span>Sales {formatRupiah(profitSummary.totalSalesSalary, true)} • BA {formatRupiah(profitSummary.totalBaSalary, true)}</span>
+                <span>Trainer {formatRupiah(profitSummary.totalTrainerSalary || 0, true)}</span>
               </div>
             </div>
           </div>
@@ -960,13 +1389,28 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
 
           {/* Step 4: Biaya Gaji Area */}
           <div className="p-3.5 rounded-xl bg-purple-50/70 border border-purple-200 relative">
-            <span className="text-[10px] font-bold text-purple-700 uppercase tracking-wider block mb-1">
-              Langkah 4: Gaji Area
-            </span>
-            <div className="text-sm font-extrabold text-purple-950 truncate">
-              Gaji &amp; Insentif (Sales+BA)
+            <div className="flex items-center justify-between gap-1 mb-1">
+              <span className="text-[10px] font-bold text-purple-700 uppercase tracking-wider truncate">
+                Langkah 4: Gaji Area ({activePeriodDisplayLabel})
+              </span>
+              <button
+                type="button"
+                onClick={() => setSalaryDetailTargetKey('ACTIVE_SCOPE')}
+                className="text-[10px] font-bold text-purple-800 bg-white/90 hover:bg-purple-100 border border-purple-200 px-1.5 py-0.5 rounded flex items-center gap-0.5 shrink-0 cursor-pointer"
+                title="Lihat rincian asal nominal Beban Gaji SDM"
+              >
+                <Eye className="w-2.5 h-2.5" />
+                <span>Rincian</span>
+              </button>
             </div>
-            <div className="text-base font-black text-purple-900 font-mono mt-1">
+            <div className="text-sm font-extrabold text-purple-950 truncate">
+              Total Beban Gaji SDM
+            </div>
+            <div
+              onClick={() => setSalaryDetailTargetKey('ACTIVE_SCOPE')}
+              className="text-base font-black text-purple-900 font-mono mt-1 cursor-pointer hover:underline"
+              title="Klik untuk lihat asal nominal Beban Gaji SDM"
+            >
               -{formatRupiah(profitSummary.salaryCost)}
             </div>
             <span className="text-[11px] font-mono font-bold text-purple-700 mt-1 block">
@@ -974,7 +1418,7 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
                 (profitSummary.salaryCost / (profitSummary.sellInActual || 1)) *
                 100
               ).toFixed(1)}
-              % dari Sell In
+              % dari Sell In (Sales+BA+Trainer)
             </span>
             <div className="hidden md:block absolute -right-3 top-1/2 -translate-y-1/2 z-10 text-slate-400">
               <ArrowRight className="w-4 h-4" />
@@ -1122,20 +1566,27 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold text-indigo-800 uppercase tracking-wider flex items-center gap-1.5">
                 <Users className="w-3.5 h-3.5 text-indigo-600" />
-                Kapasitas SDM Aktif
+                Kapasitas SDM ({selectedPnlMonth})
               </span>
               <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800">
                 TIM COVERAGE
               </span>
             </div>
-            <div className="text-lg font-black text-indigo-950 font-mono mt-1">
-              26 Personil SDM
-            </div>
-            <div className="text-xs text-indigo-700 font-semibold mt-0.5">
-              6 Sales • 17 BA • 2 Trainer • 1 SPV
-            </div>
+            {(() => {
+              const selCard = monthlyPnlData.monthlyList.find((m) => m.key === selectedPnlMonth) || monthlyPnlData.monthlyList[9];
+              return (
+                <>
+                  <div className="text-lg font-black text-indigo-950 font-mono mt-1">
+                    {selCard.sdmCount} Personil SDM
+                  </div>
+                  <div className="text-xs text-indigo-700 font-semibold mt-0.5">
+                    {selCard.salesCount} Sales • {selCard.baCount} BA • {selCard.trainerCount} Trainer • {selCard.spvCount} SPV
+                  </div>
+                </>
+              );
+            })()}
             <div className="text-[11px] text-slate-500 font-medium mt-1">
-              Rata-rata beban gaji bulanan: <strong>{formatRupiah(monthlyPnlData.avgMonthlySalary, true)}/bln</strong>
+              Rata-rata beban gaji: <strong>{formatRupiah(monthlyPnlData.avgMonthlySalary, true)}/bln aktif</strong>
             </div>
           </div>
 
@@ -1144,20 +1595,20 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold text-teal-800 uppercase tracking-wider flex items-center gap-1.5">
                 <TrendingUp className="w-3.5 h-3.5 text-teal-600" />
-                Total Profit Tahunan (12 Bln)
+                Total Profit Tahunan ({monthlyPnlData.activeMonthCount} Bln Aktif)
               </span>
               <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-teal-100 text-teal-800">
-                TAHUN 2026
+                TAHUN {filters.TAHUN === 'ALL' ? resolvedYearForFilter : filters.TAHUN}
               </span>
             </div>
             <div className="text-lg font-black text-teal-950 font-mono mt-1">
               {formatRupiah(monthlyPnlData.totalYearlyProfit)}
             </div>
             <div className="text-xs text-teal-700 font-semibold mt-0.5">
-              Rata-rata: {formatRupiah(monthlyPnlData.avgMonthlyProfit)} / bulan
+              Rata-rata: {formatRupiah(monthlyPnlData.avgMonthlyProfit)} / bln aktif
             </div>
             <div className="text-[11px] text-slate-500 font-medium mt-1">
-              Akumulasi Sell In: <strong>{formatRupiah(monthlyPnlData.totalYearlySellIn, true)}</strong> (Avg Margin: {monthlyPnlData.avgNetMarginPct.toFixed(1)}%)
+              Akumulasi Sell In Sheet: <strong>{formatRupiah(monthlyPnlData.totalYearlySellIn, true)}</strong> (Avg Margin: {monthlyPnlData.avgNetMarginPct.toFixed(1)}%)
             </div>
           </div>
         </div>
@@ -1308,25 +1759,31 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
           const sel =
             monthlyPnlData.monthlyList.find((m) => m.key === selectedPnlMonth) ||
             monthlyPnlData.monthlyList[9];
+          const isCardInlineEditing = inlineEditMonthKey === sel.key;
           return (
             <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-50 via-teal-50 to-blue-50 border border-emerald-200">
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-emerald-200/80">
                 <div className="flex items-center gap-2 flex-wrap">
                   <Calendar className="w-4 h-4 text-emerald-700" />
                   <h4 className="text-sm font-black text-emerald-950">
-                    Rincian Kinerja P&amp;L &amp; Tim: Bulan {sel.fullName} 2026
+                    Rincian Kinerja P&amp;L &amp; Tim: Bulan {sel.fullName} {filters.TAHUN === 'ALL' ? resolvedYearForFilter : filters.TAHUN}
                   </h4>
                   {sel.isCustomEdited && (
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300 font-mono">
                       ✓ Diedit Manual
                     </span>
                   )}
-                  {sel.key === monthlyPnlData.maxProfitItem.key && (
+                  {!sel.isSellInEdited && (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200 font-mono">
+                      Sheet SELL IN
+                    </span>
+                  )}
+                  {sel.key === monthlyPnlData.maxProfitItem.key && sel.sellIn > 0 && (
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-600 text-white font-mono">
                       🏆 Bulan Profit Tertinggi
                     </span>
                   )}
-                  {sel.key === monthlyPnlData.maxSalaryItem.key && (
+                  {sel.key === monthlyPnlData.maxSalaryItem.key && sel.salaryCost > 0 && (
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-600 text-white font-mono">
                       ⚠️ Bulan Biaya Gaji Tertinggi
                     </span>
@@ -1337,45 +1794,135 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
                     type="button"
                     onClick={() => openEditPnlModal(sel.key)}
                     className="px-3 py-1 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
-                    title={`Edit data P&L, Gaji & SDM Bulan ${sel.fullName} 2026`}
+                    title={`Edit lengkap P&L, Gaji & SDM Bulan ${sel.fullName}`}
                   >
                     <Edit3 className="w-3.5 h-3.5" />
-                    <span>Edit Kinerja Bulan {sel.fullName}</span>
+                    <span>Edit Lengkap {sel.fullName}</span>
                   </button>
                   <div className="text-xs font-mono font-bold text-emerald-900 bg-white/80 px-3 py-1 rounded-xl border border-emerald-200">
-                    Total SDM: {sel.sdmCount} Personil ({sel.salesCount} Sales, {sel.baCount} BA, {sel.trainerCount} Trainer, {sel.spvCount || 1} SPV)
+                    Total SDM: {sel.sdmCount} Personil ({sel.salesCount} Sales, {sel.baCount} BA, {sel.trainerCount} Trainer, {sel.spvCount} SPV)
                   </div>
                 </div>
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-3">
-                <div className="bg-white/90 p-2.5 rounded-xl border border-emerald-100">
-                  <span className="text-[10px] font-bold text-slate-500 uppercase block">1. Realisasi Sell In</span>
-                  <div className="text-sm font-black text-slate-900 font-mono mt-0.5">{formatRupiah(sel.sellIn)}</div>
-                  <span className="text-[10px] text-slate-500">Basis 100%</span>
+                <div className="bg-white/95 p-2.5 rounded-xl border border-emerald-200 shadow-2xs">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[10px] font-bold text-slate-600 uppercase block">1. Realisasi Sell In</span>
+                    <div className="flex items-center gap-1">
+                      {sel.isSellInEdited && (
+                        <button
+                          type="button"
+                          onClick={() => resetInlineSellInToSheet(sel.key)}
+                          className="p-0.5 text-amber-700 hover:text-rose-700 cursor-pointer"
+                          title={`Reset ke Data Sheet (${formatRupiah(sel.sheetSellIn)})`}
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                        </button>
+                      )}
+                      {!isCardInlineEditing && (
+                        <button
+                          type="button"
+                          onClick={() => startInlineEditSellIn(sel.key, sel.sellIn)}
+                          className="p-0.5 text-blue-600 hover:text-blue-800 cursor-pointer"
+                          title="Edit langsung nominal Realisasi Sell In"
+                        >
+                          <Edit3 className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {isCardInlineEditing ? (
+                    <div className="mt-1 space-y-1">
+                      <input
+                        type="number"
+                        autoFocus
+                        value={inlineEditSellInVal}
+                        onChange={(e) => setInlineEditSellInVal(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') commitInlineEditSellIn(sel.key);
+                          if (e.key === 'Escape') setInlineEditMonthKey(null);
+                        }}
+                        className="w-full px-2 py-1 text-xs font-mono font-bold border border-blue-400 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+                      />
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => commitInlineEditSellIn(sel.key)}
+                          className="flex-1 py-0.5 bg-emerald-600 text-white text-[10px] font-bold rounded flex items-center justify-center gap-0.5 cursor-pointer"
+                        >
+                          <Check className="w-3 h-3" /> Simpan
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setInlineEditMonthKey(null)}
+                          className="px-1.5 py-0.5 bg-slate-200 text-slate-700 text-[10px] font-bold rounded cursor-pointer"
+                        >
+                          Batal
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div
+                        onClick={() => startInlineEditSellIn(sel.key, sel.sellIn)}
+                        className="text-sm font-black text-slate-900 font-mono mt-0.5 cursor-pointer hover:text-blue-700 transition-colors"
+                        title="Klik untuk edit langsung nominal Realisasi Sell In"
+                      >
+                        {formatRupiah(sel.sellIn)}
+                      </div>
+                      <span className="text-[10px] text-slate-500 font-mono block truncate" title={`Sheet SELL IN: ${formatRupiah(sel.sheetSellIn)}`}>
+                        {sel.isSellInEdited
+                          ? `Sheet: ${formatRupiah(sel.sheetSellIn, true)}`
+                          : 'Data Google Sheet SELL IN'}
+                      </span>
+                    </>
+                  )}
                 </div>
 
                 <div className="bg-white/90 p-2.5 rounded-xl border border-emerald-100">
-                  <span className="text-[10px] font-bold text-blue-700 uppercase block">2. Margin Kotor (55%)</span>
+                  <span className="text-[10px] font-bold text-blue-700 uppercase block">2. Margin Kotor ({marginPercent}%)</span>
                   <div className="text-sm font-black text-blue-950 font-mono mt-0.5">{formatRupiah(sel.margin)}</div>
-                  <span className="text-[10px] text-blue-700 font-mono">55.0% Omset</span>
+                  <span className="text-[10px] text-blue-700 font-mono">{marginPercent.toFixed(1)}% Omset</span>
                 </div>
 
                 <div className="bg-white/90 p-2.5 rounded-xl border border-emerald-100">
-                  <span className="text-[10px] font-bold text-amber-800 uppercase block">3. Biaya Ops (33%)</span>
+                  <span className="text-[10px] font-bold text-amber-800 uppercase block">3. Biaya Ops ({operatingCostPercent}%)</span>
                   <div className="text-sm font-black text-amber-950 font-mono mt-0.5">-{formatRupiah(sel.opsCost)}</div>
-                  <span className="text-[10px] text-amber-800 font-mono">33.0% Omset</span>
+                  <span className="text-[10px] text-amber-800 font-mono">{operatingCostPercent.toFixed(1)}% Omset</span>
                 </div>
 
-                <div className="bg-white/90 p-2.5 rounded-xl border border-rose-200 bg-rose-50/40">
-                  <span className="text-[10px] font-bold text-rose-800 uppercase block">4. Beban Gaji SDM</span>
-                  <div className="text-sm font-black text-rose-950 font-mono mt-0.5">-{formatRupiah(sel.salaryCost)}</div>
-                  <span className="text-[10px] text-rose-700 font-mono">{sel.sdmCount} Personil Area</span>
+                <div className="bg-white/95 p-2.5 rounded-xl border border-rose-200 bg-rose-50/40">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[10px] font-bold text-rose-800 uppercase block">4. Beban Gaji SDM</span>
+                    <button
+                      type="button"
+                      onClick={() => setSalaryDetailTargetKey(sel.key)}
+                      className="text-[10px] font-bold text-rose-800 bg-white hover:bg-rose-100 border border-rose-200 px-1.5 py-0.5 rounded flex items-center gap-0.5 cursor-pointer"
+                      title={`Lihat asal nominal Beban Gaji SDM Bulan ${sel.fullName}`}
+                    >
+                      <Eye className="w-2.5 h-2.5" />
+                      <span>Rincian</span>
+                    </button>
+                  </div>
+                  <div
+                    onClick={() => setSalaryDetailTargetKey(sel.key)}
+                    className="text-sm font-black text-rose-950 font-mono mt-0.5 cursor-pointer hover:text-purple-800 hover:underline"
+                    title="Klik untuk melihat detail per personil & komponen gaji"
+                  >
+                    -{formatRupiah(sel.salaryCost)}
+                  </div>
+                  <span className="text-[10px] text-rose-700 font-mono block">
+                    {sel.sdmCount} SDM • S:{formatRupiah(sel.systemSalesSalary, true)} • BA:{formatRupiah(sel.systemBaSalary, true)} • Tr:{formatRupiah(sel.systemTrainerSalary, true)}
+                  </span>
                 </div>
 
                 <div className="bg-white/90 p-2.5 rounded-xl border border-emerald-200 bg-emerald-50/50">
                   <span className="text-[10px] font-bold text-emerald-800 uppercase block">5. Sisa Profit Bersih</span>
-                  <div className="text-sm font-black text-emerald-700 font-mono mt-0.5">{formatRupiah(sel.netProfit)}</div>
+                  <div className={`text-sm font-black font-mono mt-0.5 ${sel.netProfit >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                    {formatRupiah(sel.netProfit)}
+                  </div>
                   <span className="text-[10px] text-emerald-800 font-bold font-mono">Net Margin: {sel.profitPct.toFixed(1)}%</span>
                 </div>
 
@@ -1386,20 +1933,236 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
                   </div>
                 </div>
               </div>
+
+              {/* Inline Panel: Rincian Asal Nominal Beban Gaji SDM Bulan Terpilih */}
+              {(() => {
+                const cb = sel.costBreakdown;
+                const cbSales = cb?.salesList || [];
+                const cbBa = cb?.baList || [];
+                const cbTrainer = cb?.trainerList || [];
+                const totalPaidPeople = cbSales.length + cbBa.length + cbTrainer.length;
+
+                const salesBase = cb?.totalSalesBase || 0;
+                const salesSellInInc = cbSales.reduce((a, b) => a + b.incentiveNominal, 0);
+                const salesBaNet = cbSales.reduce((a, b) => a + (b.baProductivityBonus - b.baProductivityPenalty), 0);
+
+                const baBase = cb?.totalBaBase || 0;
+                const baOmsetInc = cb?.totalBaIncentive || 0;
+                const baFocusNet = cb?.totalBaFocusNetBonus || 0;
+
+                const trBaseTrans = (cb?.totalTrainerBase || 0) + (cb?.totalTrainerTransport || 0);
+                const trFocusNet = (cb?.totalTrainerFocusIncentive || 0) - (cb?.totalTrainerFocusPenalty || 0);
+                const trKpiNet = (cb?.totalTrainerKpiIncentive || 0) - (cb?.totalTrainerKpiPenalty || 0);
+
+                return (
+                  <div className="mt-3 bg-white/95 rounded-xl border border-rose-200/90 overflow-hidden shadow-2xs">
+                    <div className="px-3.5 py-2.5 bg-gradient-to-r from-rose-50 via-purple-50/60 to-indigo-50/60 border-b border-rose-200/70 flex flex-col md:flex-row md:items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Layers className="w-4 h-4 text-rose-700 shrink-0" />
+                        <span className="text-xs font-extrabold text-slate-900">
+                          Rincian Asal Nominal Beban Gaji SDM ({sel.fullName}):
+                        </span>
+                        <span className="text-[11px] font-mono font-bold text-rose-900 bg-white px-2 py-0.5 rounded-md border border-rose-200">
+                          Sales {formatRupiah(sel.systemSalesSalary)} + BA {formatRupiah(sel.systemBaSalary)} + Trainer {formatRupiah(sel.systemTrainerSalary)} = {formatRupiah(sel.systemSalaryCost)}
+                        </span>
+                        {sel.isSalaryEdited && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 font-mono">
+                            Override Manual Aktif: {formatRupiah(sel.salaryCost)}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setSalaryDetailTargetKey(sel.key)}
+                          className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Lihat Rincian Per Personil ({totalPaidPeople} Org)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowInlineSalaryOrigin((v) => !v)}
+                          className="p-1 rounded-lg text-slate-500 hover:bg-slate-200/70 cursor-pointer"
+                          title={showInlineSalaryOrigin ? 'Sembunyikan ringkasan komponen' : 'Tampilkan ringkasan komponen'}
+                        >
+                          {showInlineSalaryOrigin ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    {showInlineSalaryOrigin && (
+                      <div className="p-3 grid grid-cols-1 md:grid-cols-3 gap-2.5 text-xs">
+                        {/* 1. Sales Origin */}
+                        <div className="p-2.5 rounded-xl bg-indigo-50/40 border border-indigo-200/80">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-extrabold text-indigo-950">
+                              1. Beban Gaji Sales ({cbSales.length} Org)
+                            </span>
+                            <span className="text-xs font-black font-mono text-indigo-900">
+                              {formatRupiah(sel.systemSalesSalary)}
+                            </span>
+                          </div>
+                          <div className="mt-1.5 space-y-0.5 text-[11px] font-mono text-slate-600">
+                            <div className="flex justify-between">
+                              <span>• Gaji Pokok Sales:</span>
+                              <span className="font-bold text-slate-800">{formatRupiah(salesBase)}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>• Insentif Sell In:</span>
+                              <span className="font-bold text-emerald-700">+{formatRupiah(salesSellInInc)}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>• Net Bonus/SP1 BA:</span>
+                              <span className={`font-bold ${salesBaNet >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                {salesBaNet >= 0 ? '+' : ''}
+                                {formatRupiah(salesBaNet)}
+                              </span>
+                            </div>
+                          </div>
+                          {cbSales.length > 0 && (
+                            <div className="mt-2 pt-1.5 border-t border-indigo-200/60 flex flex-wrap gap-1">
+                              {cbSales.map((s) => (
+                                <span
+                                  key={s.salesName}
+                                  className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white border border-indigo-100 text-indigo-900"
+                                >
+                                  {s.salesName}: <strong>{formatRupiah(s.totalSalary, true)}</strong>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 2. BA Origin */}
+                        <div className="p-2.5 rounded-xl bg-purple-50/40 border border-purple-200/80">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-extrabold text-purple-950">
+                              2. Beban Gaji BA Toko ({cbBa.length} Org)
+                            </span>
+                            <span className="text-xs font-black font-mono text-purple-900">
+                              {formatRupiah(sel.systemBaSalary)}
+                            </span>
+                          </div>
+                          <div className="mt-1.5 space-y-0.5 text-[11px] font-mono text-slate-600">
+                            <div className="flex justify-between">
+                              <span>• Gaji Pokok BA:</span>
+                              <span className="font-bold text-slate-800">{formatRupiah(baBase)}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>• Insentif Non-Lav &amp; Lav 4%:</span>
+                              <span className="font-bold text-emerald-700">+{formatRupiah(baOmsetInc)}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>• Net Produk Fokus BA:</span>
+                              <span className={`font-bold ${baFocusNet >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                {baFocusNet >= 0 ? '+' : ''}
+                                {formatRupiah(baFocusNet)}
+                              </span>
+                            </div>
+                          </div>
+                          {cbBa.length > 0 && (
+                            <div className="mt-2 pt-1.5 border-t border-purple-200/60 flex flex-wrap gap-1">
+                              {cbBa.slice(0, 4).map((b, i) => (
+                                <span
+                                  key={`${b.storeName}-${i}`}
+                                  className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white border border-purple-100 text-purple-900 truncate max-w-[165px]"
+                                  title={`${b.baName} (${b.storeName}): ${formatRupiah(b.totalSalary)}`}
+                                >
+                                  {b.baName}: <strong>{formatRupiah(b.totalSalary, true)}</strong>
+                                </span>
+                              ))}
+                              {cbBa.length > 4 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setSalaryDetailTargetKey(sel.key)}
+                                  className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-purple-100 text-purple-900 hover:bg-purple-200 cursor-pointer"
+                                >
+                                  +{cbBa.length - 4} BA lainnya
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 3. Trainer Origin */}
+                        <div className="p-2.5 rounded-xl bg-teal-50/40 border border-teal-200/80">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-extrabold text-teal-950">
+                              3. Beban Gaji Trainer ({cbTrainer.length} Org)
+                            </span>
+                            <span className="text-xs font-black font-mono text-teal-900">
+                              {formatRupiah(sel.systemTrainerSalary)}
+                            </span>
+                          </div>
+                          <div className="mt-1.5 space-y-0.5 text-[11px] font-mono text-slate-600">
+                            <div className="flex justify-between">
+                              <span>• Gaji Pokok + Transport:</span>
+                              <span className="font-bold text-slate-800">{formatRupiah(trBaseTrans)}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>• Net Produk Fokus Trainer:</span>
+                              <span className={`font-bold ${trFocusNet >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                {trFocusNet >= 0 ? '+' : ''}
+                                {formatRupiah(trFocusNet)}
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>• Net Insentif/Denda KPI:</span>
+                              <span className={`font-bold ${trKpiNet >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                {trKpiNet >= 0 ? '+' : ''}
+                                {formatRupiah(trKpiNet)}
+                              </span>
+                            </div>
+                          </div>
+                          {cbTrainer.length > 0 && (
+                            <div className="mt-2 pt-1.5 border-t border-teal-200/60 flex flex-wrap gap-1">
+                              {cbTrainer.map((t) => (
+                                <span
+                                  key={t.trainerName}
+                                  className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white border border-teal-100 text-teal-900"
+                                >
+                                  {t.trainerName}: <strong>{formatRupiah(t.totalSalary, true)}</strong>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           );
         })()}
 
         {/* 12-Month Detailed Table (Januari - Desember) */}
         <div className="overflow-x-auto border border-slate-200 rounded-xl">
+          <div className="px-3 py-2 bg-blue-50/60 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] text-blue-900">
+            <span>
+              <strong>Sumber Data Sell In:</strong> Mengambil langsung data transaksi <strong>KET = SELL IN</strong> dari Google Sheet yang terhubung. Klik nominal <strong>Realisasi Sell In (IDR)</strong> atau ikon pensil untuk mengedit nominal langsung.
+            </span>
+            {Object.keys(monthlyPnlOverrides).length > 0 && (
+              <button
+                type="button"
+                onClick={handleResetAllPnlMonths}
+                className="px-2.5 py-1 rounded-lg bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 font-bold text-[11px] flex items-center gap-1 w-fit cursor-pointer shrink-0"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Reset Semua Editan ke Data Sheet</span>
+              </button>
+            )}
+          </div>
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="border-b border-slate-200 text-slate-600 font-bold bg-slate-50">
                 <th className="py-2.5 px-3">No</th>
                 <th className="py-2.5 px-3">Bulan</th>
                 <th className="py-2.5 px-3 text-right">Realisasi Sell In (IDR)</th>
-                <th className="py-2.5 px-3 text-right">Margin 55% (IDR)</th>
-                <th className="py-2.5 px-3 text-right">Biaya Ops 33% (IDR)</th>
+                <th className="py-2.5 px-3 text-right">Margin {marginPercent}% (IDR)</th>
+                <th className="py-2.5 px-3 text-right">Biaya Ops {operatingCostPercent}% (IDR)</th>
                 <th className="py-2.5 px-3 text-right">Beban Gaji SDM (IDR)</th>
                 <th className="py-2.5 px-3 text-right">Sisa Profit Bersih (IDR)</th>
                 <th className="py-2.5 px-3 text-center">% Net Margin</th>
@@ -1410,8 +2173,9 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
             </thead>
             <tbody className="divide-y divide-slate-100">
               {monthlyPnlData.monthlyList.map((m, idx) => {
-                const isMaxProfit = m.key === monthlyPnlData.maxProfitItem.key;
-                const isMaxSalary = m.key === monthlyPnlData.maxSalaryItem.key;
+                const isMaxProfit = m.key === monthlyPnlData.maxProfitItem.key && m.sellIn > 0;
+                const isMaxSalary = m.key === monthlyPnlData.maxSalaryItem.key && m.salaryCost > 0;
+                const isRowEditing = inlineEditMonthKey === m.key;
                 return (
                   <tr
                     key={m.key}
@@ -1427,33 +2191,126 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
                     }`}
                   >
                     <td className="py-2.5 px-3 font-mono text-slate-400">{idx + 1}</td>
-                    <td className="py-2.5 px-3 font-extrabold text-slate-900 flex items-center gap-1.5">
-                      {m.fullName}
-                      {m.isCustomEdited && (
-                        <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 border border-amber-300">
-                          Custom
-                        </span>
-                      )}
-                      {isMaxProfit && (
-                        <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 border border-emerald-300">
-                          Top Profit 🏆
-                        </span>
-                      )}
-                      {isMaxSalary && (
-                        <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-rose-100 text-rose-800 border border-rose-300">
-                          Biaya Max ⚠️
-                        </span>
+                    <td className="py-2.5 px-3 font-extrabold text-slate-900">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span>{m.fullName}</span>
+                        {m.isCustomEdited && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 border border-amber-300">
+                            Diedit
+                          </span>
+                        )}
+                        {isMaxProfit && (
+                          <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 border border-emerald-300">
+                            Top Profit 🏆
+                          </span>
+                        )}
+                        {isMaxSalary && (
+                          <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-rose-100 text-rose-800 border border-rose-300">
+                            Biaya Max ⚠️
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td
+                      className="py-2.5 px-3 text-right font-mono text-slate-800"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {isRowEditing ? (
+                        <div className="flex items-center justify-end gap-1">
+                          <input
+                            type="number"
+                            autoFocus
+                            value={inlineEditSellInVal}
+                            onChange={(e) => setInlineEditSellInVal(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') commitInlineEditSellIn(m.key);
+                              if (e.key === 'Escape') setInlineEditMonthKey(null);
+                            }}
+                            className="w-32 px-2 py-1 text-right text-xs font-mono font-bold border border-blue-500 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => commitInlineEditSellIn(m.key)}
+                            className="p-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded cursor-pointer"
+                            title="Simpan Sell In"
+                          >
+                            <Check className="w-3 h-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setInlineEditMonthKey(null)}
+                            className="p-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded cursor-pointer"
+                            title="Batal"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="inline-flex items-center justify-end gap-1.5 group">
+                          <button
+                            type="button"
+                            onClick={() => startInlineEditSellIn(m.key, m.sellIn)}
+                            className={`text-right font-mono font-bold cursor-pointer hover:underline ${
+                              m.sellIn === 0 ? 'text-slate-400' : 'text-slate-900 hover:text-blue-700'
+                            }`}
+                            title={
+                              m.isSellInEdited
+                                ? `Diedit manual (Data Sheet: ${formatRupiah(m.sheetSellIn)}). Klik untuk ubah.`
+                                : 'Klik untuk edit nominal Realisasi Sell In'
+                            }
+                          >
+                            {formatRupiah(m.sellIn)}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => startInlineEditSellIn(m.key, m.sellIn)}
+                            className="p-1 rounded text-blue-600 hover:bg-blue-100 opacity-75 group-hover:opacity-100 transition-opacity cursor-pointer"
+                            title={`Edit Sell In Bulan ${m.fullName}`}
+                          >
+                            <Edit3 className="w-3 h-3" />
+                          </button>
+                          {m.isSellInEdited && (
+                            <button
+                              type="button"
+                              onClick={() => resetInlineSellInToSheet(m.key)}
+                              className="p-1 rounded text-amber-700 hover:bg-rose-100 hover:text-rose-700 cursor-pointer"
+                              title={`Kembalikan ke Data Google Sheet (${formatRupiah(m.sheetSellIn)})`}
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
                       )}
                     </td>
-                    <td className="py-2.5 px-3 text-right font-mono text-slate-800">{formatRupiah(m.sellIn)}</td>
                     <td className="py-2.5 px-3 text-right font-mono text-blue-900">{formatRupiah(m.margin)}</td>
                     <td className="py-2.5 px-3 text-right font-mono text-amber-900">-{formatRupiah(m.opsCost)}</td>
-                    <td className="py-2.5 px-3 text-right font-mono font-bold text-rose-700">-{formatRupiah(m.salaryCost)}</td>
-                    <td className="py-2.5 px-3 text-right font-mono font-black text-emerald-700">
+                    <td
+                      className="py-2.5 px-3 text-right font-mono"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedPnlMonth(m.key);
+                        setSalaryDetailTargetKey(m.key);
+                      }}
+                    >
+                      <button
+                        type="button"
+                        className="inline-flex items-center justify-end gap-1 font-bold text-rose-700 hover:text-purple-800 hover:underline cursor-pointer"
+                        title={`Klik untuk lihat rincian sumber Beban Gaji SDM Bulan ${m.fullName}`}
+                      >
+                        <span>-{formatRupiah(m.salaryCost)}</span>
+                        <Eye className="w-3 h-3 text-rose-500 shrink-0" />
+                      </button>
+                      {(m.systemSalaryCost > 0 || m.isSalaryEdited) && (
+                        <div className="text-[9px] text-slate-500 leading-tight mt-0.5">
+                          S:{formatRupiah(m.systemSalesSalary, true)} • BA:{formatRupiah(m.systemBaSalary, true)} • Tr:{formatRupiah(m.systemTrainerSalary, true)}
+                        </div>
+                      )}
+                    </td>
+                    <td className={`py-2.5 px-3 text-right font-mono font-black ${m.netProfit >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
                       {formatRupiah(m.netProfit)}
                     </td>
                     <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-800">
-                      +{m.profitPct.toFixed(1)}%
+                      {m.profitPct >= 0 ? `+${m.profitPct.toFixed(1)}%` : `${m.profitPct.toFixed(1)}%`}
                     </td>
                     <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-700">
                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100">
@@ -1491,33 +2348,39 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
             <tfoot>
               <tr className="bg-slate-100 border-t-2 border-slate-300 font-black text-slate-900 text-xs">
                 <td colSpan={2} className="py-3 px-3 uppercase tracking-wider">
-                  Total Akumulasi Tahunan (12 Bulan)
+                  Total Akumulasi Tahunan ({monthlyPnlData.activeMonthCount} Bln Aktif)
                 </td>
                 <td className="py-3 px-3 text-right font-mono text-slate-900">
                   {formatRupiah(monthlyPnlData.totalYearlySellIn)}
                 </td>
                 <td className="py-3 px-3 text-right font-mono text-blue-950">
-                  {formatRupiah(Math.round(monthlyPnlData.totalYearlySellIn * (marginPercent / 100)))}
+                  {formatRupiah(monthlyPnlData.totalYearlyMargin)}
                 </td>
                 <td className="py-3 px-3 text-right font-mono text-amber-950">
-                  -{formatRupiah(Math.round(monthlyPnlData.totalYearlySellIn * (operatingCostPercent / 100)))}
+                  -{formatRupiah(monthlyPnlData.totalYearlyOpsCost)}
                 </td>
                 <td className="py-3 px-3 text-right font-mono text-rose-800">
                   -{formatRupiah(monthlyPnlData.totalYearlySalary)}
                 </td>
-                <td className="py-3 px-3 text-right font-mono text-emerald-800 text-sm">
+                <td className={`py-3 px-3 text-right font-mono text-sm ${monthlyPnlData.totalYearlyProfit >= 0 ? 'text-emerald-800' : 'text-rose-800'}`}>
                   {formatRupiah(monthlyPnlData.totalYearlyProfit)}
                 </td>
                 <td className="py-3 px-3 text-center font-mono text-emerald-800">
-                  +{monthlyPnlData.avgNetMarginPct.toFixed(1)}%
+                  {monthlyPnlData.avgNetMarginPct >= 0 ? `+${monthlyPnlData.avgNetMarginPct.toFixed(1)}%` : `${monthlyPnlData.avgNetMarginPct.toFixed(1)}%`}
                 </td>
                 <td className="py-3 px-3 text-center font-mono">
-                  26 SDM
+                  {(monthlyPnlData.monthlyList.find((m) => m.key === selectedPnlMonth)?.sdmCount || 0)} SDM
                 </td>
                 <td className="py-3 px-3 text-center">
-                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                    <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                    Sangat Sehat
+                  <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${
+                    monthlyPnlData.avgNetMarginPct >= 10
+                      ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                      : monthlyPnlData.avgNetMarginPct >= 0
+                      ? 'bg-amber-100 text-amber-800 border-amber-300'
+                      : 'bg-rose-100 text-rose-800 border-rose-300'
+                  }`}>
+                    <CheckCircle2 className="w-3 h-3" />
+                    {monthlyPnlData.avgNetMarginPct >= 10 ? 'Sangat Sehat' : monthlyPnlData.avgNetMarginPct >= 5 ? 'Sehat' : monthlyPnlData.avgNetMarginPct >= 0 ? 'Waspada' : 'Defisit'}
                   </span>
                 </td>
                 <td className="py-3 px-3 text-center font-mono text-slate-400">
@@ -2099,14 +2962,52 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
                 <tr className="border-b border-slate-200 text-slate-600 font-bold bg-slate-50">
                   <th className="py-3 px-3">No</th>
                   <th className="py-3 px-3">Nama Region</th>
-                  <th className="py-3 px-3 text-right">Realisasi Sell In</th>
-                  <th className="py-3 px-3 text-right">Margin (55%)</th>
-                  <th className="py-3 px-3 text-right">Biaya Ops (33%)</th>
-                  <th className="py-3 px-3 text-right">Total Beban Gaji</th>
-                  <th className="py-3 px-3.5 text-right bg-teal-50/70 font-black text-teal-950">
-                    Sisa Profit (IDR)
+                  <th
+                    onClick={() => toggleSort('sellin')}
+                    className="py-3 px-3 text-right cursor-pointer hover:bg-slate-100"
+                  >
+                    <div className="flex items-center justify-end gap-1">
+                      <span>Realisasi Sell In</span>
+                      <ArrowUpDown className="w-3 h-3 text-slate-400" />
+                    </div>
                   </th>
-                  <th className="py-3 px-3 text-right">% Net Margin</th>
+                  <th
+                    onClick={() => toggleSort('margin')}
+                    className="py-3 px-3 text-right cursor-pointer hover:bg-slate-100"
+                  >
+                    <div className="flex items-center justify-end gap-1">
+                      <span>Margin ({marginPercent}%)</span>
+                      <ArrowUpDown className="w-3 h-3 text-slate-400" />
+                    </div>
+                  </th>
+                  <th className="py-3 px-3 text-right">Biaya Ops ({operatingCostPercent}%)</th>
+                  <th
+                    onClick={() => toggleSort('salary')}
+                    className="py-3 px-3 text-right cursor-pointer hover:bg-slate-100"
+                  >
+                    <div className="flex items-center justify-end gap-1">
+                      <span>Total Beban Gaji</span>
+                      <ArrowUpDown className="w-3 h-3 text-slate-400" />
+                    </div>
+                  </th>
+                  <th
+                    onClick={() => toggleSort('profit')}
+                    className="py-3 px-3.5 text-right cursor-pointer hover:bg-slate-100 bg-teal-50/70 font-black text-teal-950"
+                  >
+                    <div className="flex items-center justify-end gap-1">
+                      <span>Sisa Profit (IDR)</span>
+                      <ArrowUpDown className="w-3 h-3 text-teal-600" />
+                    </div>
+                  </th>
+                  <th
+                    onClick={() => toggleSort('pct')}
+                    className="py-3 px-3 text-right cursor-pointer hover:bg-slate-100"
+                  >
+                    <div className="flex items-center justify-end gap-1">
+                      <span>% Net Margin</span>
+                      <ArrowUpDown className="w-3 h-3 text-slate-400" />
+                    </div>
+                  </th>
                   <th className="py-3 px-3 text-center">Status</th>
                 </tr>
               </thead>
@@ -2436,9 +3337,26 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {/* Realisasi Sell In */}
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">
-                      Realisasi Sell In (Rp):
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-bold text-slate-700">
+                        Realisasi Sell In (Rp):
+                      </label>
+                      {(() => {
+                        const sheetVal = monthlyPnlData.monthlyList.find((m) => m.key === editingPnlMonthKey)?.sheetSellIn ?? 0;
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditPnlSellIn(sheetVal);
+                              handleAutoCalculatePnlInputs(sheetVal, undefined);
+                            }}
+                            className="text-[11px] font-bold text-blue-700 hover:underline cursor-pointer"
+                          >
+                            Pakai Data Sheet ({formatRupiah(sheetVal, true)})
+                          </button>
+                        );
+                      })()}
+                    </div>
                     <input
                       type="number"
                       step="any"
@@ -2681,6 +3599,39 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
           </div>
         </div>
       )}
+
+      {/* MODAL: RINCIAN ASAL NOMINAL BEBAN GAJI SDM (SALES + BA + TRAINER) */}
+      {salaryDetailTargetKey && (() => {
+        if (salaryDetailTargetKey === 'ACTIVE_SCOPE') {
+          return (
+            <SalaryBreakdownModal
+              isOpen={true}
+              onClose={() => setSalaryDetailTargetKey(null)}
+              titlePeriodLabel={activePeriodDisplayLabel}
+              activeSalaryCost={profitSummary.salaryCost}
+              systemSalaryCost={profitSummary.salaryCost}
+              isManualSalaryOverride={false}
+              costBreakdown={profitSummary.costBreakdown}
+            />
+          );
+        }
+        const monthItem = monthlyPnlData.monthlyList.find((m) => m.key === salaryDetailTargetKey);
+        if (!monthItem) return null;
+        const yearLabel = filters.TAHUN === 'ALL' ? resolvedYearForFilter : filters.TAHUN;
+        return (
+          <SalaryBreakdownModal
+            isOpen={true}
+            onClose={() => setSalaryDetailTargetKey(null)}
+            titlePeriodLabel={`Bulan ${monthItem.fullName} ${yearLabel}`}
+            activeSalaryCost={monthItem.salaryCost}
+            systemSalaryCost={monthItem.systemSalaryCost}
+            isManualSalaryOverride={monthItem.isSalaryEdited}
+            spvCount={monthItem.spvCount}
+            costBreakdown={monthItem.costBreakdown}
+            onOpenEditModal={() => openEditPnlModal(monthItem.key)}
+          />
+        );
+      })()}
     </div>
   );
 };

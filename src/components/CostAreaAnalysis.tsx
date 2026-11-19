@@ -28,10 +28,23 @@ import {
   GraduationCap,
   FileText,
   FileDown,
+  Check,
 } from 'lucide-react';
 import { TransactionRecord, DashboardFilters, SalesSalaryItem, BaSalaryItem, TrainerSalaryItem, KpiTrainerScorecardItem } from '../types/dashboard';
-import { formatRupiah, formatNumber, formatPercent } from '../utils/analytics';
-import { aggregateAreaCost, calculateSalesSalary, calculateBaSalary, calculateTrainerSalary, DEFAULT_TRAINERS_DATA } from '../utils/costCalculations';
+import { formatRupiah, formatNumber, formatPercent, filterRecords } from '../utils/analytics';
+import {
+  aggregateAreaCost,
+  calculateSalesSalary,
+  calculateBaSalary,
+  calculateTrainerSalary,
+  DEFAULT_TRAINERS_DATA,
+  SalesBaProductivityOverride,
+  STORAGE_KEY_SALES_BA_PRODUCTIVITY,
+  loadSalesBaProductivityOverrides,
+  STORAGE_KEY_SALES_BONUSES_V2,
+  loadSalesBonusOverrides,
+} from '../utils/costCalculations';
+import { resolveWeeklyBaStores } from '../utils/weeklyBaRegistry';
 import { loadKpiTrainerData } from '../services/kpiTrainerService';
 import {
   loadSalesTargets,
@@ -63,22 +76,141 @@ import {
 import { SalarySlipModal } from './SalarySlipModal';
 import * as XLSX from 'xlsx';
 
-// Helper to robustly parse date strings in either M/D/YYYY or YYYY-MM-DD
-function parseRecordDate(dateStr: string): Date | null {
-  if (!dateStr) return null;
-  const trimmed = dateStr.trim();
-  if (trimmed.includes('/')) {
-    const parts = trimmed.split('/');
-    if (parts.length === 3) {
-      const m = parseInt(parts[0], 10) - 1;
-      const d = parseInt(parts[1], 10);
-      const y = parseInt(parts[2], 10);
-      const dt = new Date(y, m, d);
-      return isNaN(dt.getTime()) ? null : dt;
+const ORDERED_MONTHS = [
+  'JANUARI',
+  'FEBRUARI',
+  'MARET',
+  'APRIL',
+  'MEI',
+  'JUNI',
+  'JULI',
+  'AGUSTUS',
+  'SEPTEMBER',
+  'OKTOBER',
+  'NOVEMBER',
+  'DESEMBER',
+];
+
+const MONTH_NAME_TO_NUMBER: Record<string, number> = {
+  JANUARI: 1,
+  FEBRUARI: 2,
+  MARET: 3,
+  APRIL: 4,
+  MEI: 5,
+  JUNI: 6,
+  JULI: 7,
+  AGUSTUS: 8,
+  SEPTEMBER: 9,
+  OKTOBER: 10,
+  NOVEMBER: 11,
+  DESEMBER: 12,
+};
+
+function toIsoDateStr(dt: Date): string {
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const d = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function formatIsoShortId(isoDate: string): string {
+  if (!isoDate) return '';
+  const [y, m, d] = isoDate.split('-').map(Number);
+  if (!y || !m || !d) return isoDate;
+  return new Date(y, m - 1, d).toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
+function getCalendarMonthRange(monthName: string, year: number) {
+  const mNum = MONTH_NAME_TO_NUMBER[monthName.trim().toUpperCase()];
+  if (!mNum) return null;
+  const startDate = new Date(year, mNum - 1, 1, 0, 0, 0, 0);
+  const endDate = new Date(year, mNum, 0, 23, 59, 59, 999);
+  return {
+    startDate,
+    endDate,
+    startIso: toIsoDateStr(startDate),
+    endIso: toIsoDateStr(endDate),
+    totalDays: endDate.getDate(),
+  };
+}
+
+// Cut-off Sell Out periode gaji bulan M: 26 Bulan Sebelumnya s/d 25 Bulan Berjalan
+// Contoh: Periode Februari -> 26 Januari s/d 25 Februari; Periode Maret -> 26 Februari s/d 25 Maret
+function getCutOff26To25Range(monthName: string, year: number) {
+  const mNum = MONTH_NAME_TO_NUMBER[monthName.trim().toUpperCase()];
+  if (!mNum) return null;
+  const startDate = new Date(year, mNum - 2, 26, 0, 0, 0, 0);
+  const endDate = new Date(year, mNum - 1, 25, 23, 59, 59, 999);
+  return {
+    startDate,
+    endDate,
+    startIso: toIsoDateStr(startDate),
+    endIso: toIsoDateStr(endDate),
+  };
+}
+
+// Helper untuk mem-parsing tanggal transaksi secara akurat (ISO, D/M/YYYY, M/D/YYYY + BULAN/TAHUN fallback)
+function parseFullRecordDate(r: TransactionRecord): Date | null {
+  const raw = (r.TANGGAL || '').trim();
+  const bulanNum = MONTH_NAME_TO_NUMBER[(r.BULAN || '').trim().toUpperCase()];
+  const tahunNum = Number(r.TAHUN);
+
+  if (raw) {
+    const isoMatch = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+    if (isoMatch) {
+      const y = parseInt(isoMatch[1], 10);
+      const m = parseInt(isoMatch[2], 10);
+      const d = parseInt(isoMatch[3], 10);
+      if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+        return new Date(y, m - 1, d);
+      }
+    }
+
+    const slashMatch = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})/);
+    if (slashMatch) {
+      const a = parseInt(slashMatch[1], 10);
+      const b = parseInt(slashMatch[2], 10);
+      let y = parseInt(slashMatch[3], 10);
+      if (y < 100) y += 2000;
+
+      let month = a;
+      let day = b;
+
+      if (bulanNum) {
+        if (a === bulanNum && b >= 1 && b <= 31) {
+          month = a;
+          day = b;
+        } else if (b === bulanNum && a >= 1 && a <= 31) {
+          month = b;
+          day = a;
+        } else if (a > 12 && b <= 12) {
+          month = b;
+          day = a;
+        }
+      } else if (a > 12 && b <= 12) {
+        month = b;
+        day = a;
+      }
+
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        return new Date(y, month - 1, day);
+      }
+    }
+
+    const parsed = new Date(raw);
+    if (!isNaN(parsed.getTime())) {
+      return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
     }
   }
-  const dt = new Date(trimmed);
-  return isNaN(dt.getTime()) ? null : dt;
+
+  if (bulanNum && tahunNum) {
+    return new Date(tahunNum, bulanNum - 1, 1);
+  }
+  return null;
 }
 
 function getTrainerStatusBadge(status: 'insentif_500k' | 'insentif_300k' | 'aman' | 'denda_sp1') {
@@ -111,13 +243,14 @@ function getTrainerKpiStatusBadge(status: 'insentif_2jt' | 'insentif_1jt' | 'ins
 
 interface CostAreaAnalysisProps {
   records: TransactionRecord[];
+  allRecords?: TransactionRecord[];
   filters: DashboardFilters;
 }
 
 const STORAGE_KEY_SALES_TARGETS = 'salespro_custom_sales_targets';
 const STORAGE_KEY_BA_NON_LAVOJOY = 'salespro_custom_ba_non_lavojoy_targets';
 const STORAGE_KEY_BA_LAVOJOY = 'salespro_custom_ba_lavojoy_targets';
-const STORAGE_KEY_SALES_BONUSES = 'salespro_custom_sales_bonuses';
+const STORAGE_KEY_SALES_BONUSES = STORAGE_KEY_SALES_BONUSES_V2;
 const STORAGE_KEY_SALES_PENALTIES = 'salespro_custom_sales_penalties';
 const STORAGE_KEY_TRAINER_FOCUS = 'salespro_custom_trainer_focus';
 const STORAGE_KEY_TRAINER_INCENTIVES = 'salespro_custom_trainer_incentives';
@@ -126,7 +259,7 @@ const STORAGE_KEY_TRAINER_KPI_SCORES = 'salespro_custom_trainer_kpi_scores';
 const STORAGE_KEY_TRAINER_KPI_INCENTIVES = 'salespro_custom_trainer_kpi_incentives';
 const STORAGE_KEY_TRAINER_KPI_PENALTIES = 'salespro_custom_trainer_kpi_penalties';
 
-export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, filters }) => {
+export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, allRecords, filters }) => {
   // Sub-tabs inside Cost Area
   const [activeSubTab, setActiveSubTab] = useState<'overview' | 'sales' | 'ba' | 'trainer' | 'simulator'>('overview');
 
@@ -141,14 +274,9 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
   const [customBaNonLavojoyTargets, setCustomBaNonLavojoyTargets] = useState<Record<string, number>>(() => loadBaNonLavojoyTargets(filters.BULAN));
   const [customBaLavojoyTargets, setCustomBaLavojoyTargets] = useState<Record<string, number>>(() => loadBaLavojoyTargets(filters.BULAN));
 
-  const [customSalesBonuses, setCustomSalesBonuses] = useState<Record<string, number>>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY_SALES_BONUSES);
-      return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
-  });
+  const [customSalesBonuses, setCustomSalesBonuses] = useState<Record<string, number>>(() =>
+    loadSalesBonusOverrides()
+  );
 
   const [customSalesPenalties, setCustomSalesPenalties] = useState<Record<string, number>>(() => {
     try {
@@ -158,6 +286,10 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
       return {};
     }
   });
+
+  const [customSalesBaProductivity, setCustomSalesBaProductivity] = useState<Record<string, SalesBaProductivityOverride>>(() =>
+    loadSalesBaProductivityOverrides()
+  );
 
   const [customTrainerFocusTargets, setCustomTrainerFocusTargets] = useState<Record<string, number>>(() => {
     try {
@@ -235,6 +367,7 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
     try {
       localStorage.setItem(STORAGE_KEY_SALES_BONUSES, JSON.stringify(customSalesBonuses));
       localStorage.setItem(STORAGE_KEY_SALES_PENALTIES, JSON.stringify(customSalesPenalties));
+      localStorage.setItem(STORAGE_KEY_SALES_BA_PRODUCTIVITY, JSON.stringify(customSalesBaProductivity));
       localStorage.setItem(STORAGE_KEY_TRAINER_FOCUS, JSON.stringify(customTrainerFocusTargets));
       localStorage.setItem(STORAGE_KEY_TRAINER_INCENTIVES, JSON.stringify(customTrainerIncentives));
       localStorage.setItem(STORAGE_KEY_TRAINER_PENALTIES, JSON.stringify(customTrainerPenalties));
@@ -247,6 +380,7 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
   }, [
     customSalesBonuses,
     customSalesPenalties,
+    customSalesBaProductivity,
     customTrainerFocusTargets,
     customTrainerIncentives,
     customTrainerPenalties,
@@ -263,38 +397,113 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
   const [sortField, setSortField] = useState<'total' | 'actual' | 'achievement' | 'incentive'>('total');
   const [sortAsc, setSortAsc] = useState(false);
 
-  // Date Range filter specifically for BA (Toko ber-BA)
-  const [baStartDate, setBaStartDate] = useState<string>('');
-  const [baEndDate, setBaEndDate] = useState<string>('');
+  // Resolved active year from filters or records (iterative loop - stack-safe)
+  const resolvedYear = useMemo(() => {
+    if (filters.TAHUN && filters.TAHUN !== 'ALL') {
+      const yr = Number(filters.TAHUN);
+      if (Number.isFinite(yr) && yr > 2000) return yr;
+    }
+    const src = allRecords && allRecords.length > 0 ? allRecords : records;
+    let maxY = 0;
+    for (let i = 0; i < src.length; i++) {
+      const y = Number(src[i].TAHUN);
+      if (Number.isFinite(y) && y > 2000 && y > maxY) {
+        maxY = y;
+      }
+    }
+    return maxY > 0 ? maxY : 2026;
+  }, [filters.TAHUN, allRecords, records]);
 
-  // Date Range filter specifically for Trainer
-  const [trainerStartDate, setTrainerStartDate] = useState<string>('');
-  const [trainerEndDate, setTrainerEndDate] = useState<string>('');
+  // Payroll Period Windows:
+  // - Sales Sell In: Tanggal 1 s/d 28/29/30/31 bulan terpilih
+  // - BA, Produktivitas BA, & Trainer Sell Out: Cut-off 26 bulan lalu s/d 25 bulan berjalan
+  const payrollWindows = useMemo(() => {
+    if (!filters.BULAN || filters.BULAN === 'ALL') {
+      return {
+        hasMonthFilter: false,
+        sellInRange: null,
+        sellOutCutOffRange: null,
+      };
+    }
+    return {
+      hasMonthFilter: true,
+      sellInRange: getCalendarMonthRange(filters.BULAN, resolvedYear),
+      sellOutCutOffRange: getCutOff26To25Range(filters.BULAN, resolvedYear),
+    };
+  }, [filters.BULAN, resolvedYear]);
+
+  // Date Range filter specifically for BA & Sales BA Productivity (default: Cut-off 26-25)
+  const [baStartDate, setBaStartDate] = useState<string>(() => {
+    if (filters.BULAN && filters.BULAN !== 'ALL') {
+      const initY = filters.TAHUN !== 'ALL' ? Number(filters.TAHUN) || 2026 : 2026;
+      return getCutOff26To25Range(filters.BULAN, initY)?.startIso || '';
+    }
+    return '';
+  });
+  const [baEndDate, setBaEndDate] = useState<string>(() => {
+    if (filters.BULAN && filters.BULAN !== 'ALL') {
+      const initY = filters.TAHUN !== 'ALL' ? Number(filters.TAHUN) || 2026 : 2026;
+      return getCutOff26To25Range(filters.BULAN, initY)?.endIso || '';
+    }
+    return '';
+  });
+
+  // Date Range filter specifically for Trainer (default: Cut-off 26-25)
+  const [trainerStartDate, setTrainerStartDate] = useState<string>(() => {
+    if (filters.BULAN && filters.BULAN !== 'ALL') {
+      const initY = filters.TAHUN !== 'ALL' ? Number(filters.TAHUN) || 2026 : 2026;
+      return getCutOff26To25Range(filters.BULAN, initY)?.startIso || '';
+    }
+    return '';
+  });
+  const [trainerEndDate, setTrainerEndDate] = useState<string>(() => {
+    if (filters.BULAN && filters.BULAN !== 'ALL') {
+      const initY = filters.TAHUN !== 'ALL' ? Number(filters.TAHUN) || 2026 : 2026;
+      return getCutOff26To25Range(filters.BULAN, initY)?.endIso || '';
+    }
+    return '';
+  });
 
   // Month Period filter specifically for Trainer (Hubungan dengan Scorecard KPI Trainer)
   const [trainerMonthPeriod, setTrainerMonthPeriod] = useState<string>(() => {
     if (filters.BULAN && filters.BULAN !== 'ALL') {
-      return filters.BULAN.toUpperCase().includes('2026')
-        ? filters.BULAN.toUpperCase()
-        : `${filters.BULAN.toUpperCase()} 2026`;
+      const mUpper = filters.BULAN.toUpperCase();
+      return mUpper.includes('20') ? mUpper : `${mUpper} 2026`;
     }
     return 'OKTOBER 2026';
   });
 
-  // Available month periods for Trainer KPI from scorecard data
+  // Auto-sync Cut-off 26-25 dates & Trainer Month Period when global BULAN / TAHUN filters change
+  useEffect(() => {
+    if (payrollWindows.hasMonthFilter && payrollWindows.sellOutCutOffRange) {
+      setBaStartDate(payrollWindows.sellOutCutOffRange.startIso);
+      setBaEndDate(payrollWindows.sellOutCutOffRange.endIso);
+      setTrainerStartDate(payrollWindows.sellOutCutOffRange.startIso);
+      setTrainerEndDate(payrollWindows.sellOutCutOffRange.endIso);
+      const bUpper = filters.BULAN.toUpperCase();
+      setTrainerMonthPeriod(bUpper.includes(String(resolvedYear)) ? bUpper : `${bUpper} ${resolvedYear}`);
+    } else {
+      setBaStartDate('');
+      setBaEndDate('');
+      setTrainerStartDate('');
+      setTrainerEndDate('');
+    }
+  }, [payrollWindows, filters.BULAN, resolvedYear]);
+
+  // Available month periods for Trainer KPI from scorecard data + all months of resolvedYear
   const availableTrainerMonths = useMemo(() => {
+    const set = new Set<string>();
     try {
       const kpiItems = loadKpiTrainerData();
-      const set = new Set<string>();
       kpiItems.forEach((it: KpiTrainerScorecardItem) => {
         if (it.monthPeriod) set.add(it.monthPeriod);
       });
-      ['OKTOBER 2026', 'SEPTEMBER 2026', 'AGUSTUS 2026'].forEach((m) => set.add(m));
-      return Array.from(set);
     } catch {
-      return ['OKTOBER 2026', 'SEPTEMBER 2026', 'AGUSTUS 2026'];
+      // ignore
     }
-  }, []);
+    ORDERED_MONTHS.forEach((m) => set.add(`${m} ${resolvedYear}`));
+    return Array.from(set);
+  }, [resolvedYear]);
 
   // Modal State for Editing BA Targets
   const [editingBa, setEditingBa] = useState<BaSalaryItem | null>(null);
@@ -304,8 +513,16 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
   // Modal State for Editing Sales Target & Productivity Overrides
   const [editingSales, setEditingSales] = useState<SalesSalaryItem | null>(null);
   const [editSalesTarget, setEditSalesTarget] = useState<number>(150000000);
+  const [editSalesCoveredSellOut, setEditSalesCoveredSellOut] = useState<number>(0);
+  const [editSalesCoveredBaCount, setEditSalesCoveredBaCount] = useState<number>(0);
   const [editSalesBonus, setEditSalesBonus] = useState<number>(0);
   const [editSalesPenalty, setEditSalesPenalty] = useState<number>(0);
+
+  // Inline Edit State for Rincian Produktivitas BA untuk Sales Table
+  const [inlineProdSalesName, setInlineProdSalesName] = useState<string | null>(null);
+  const [inlineProdSellOutVal, setInlineProdSellOutVal] = useState<string>('');
+  const [inlineProdBaCountVal, setInlineProdBaCountVal] = useState<string>('');
+  const [inlineProdBonusVal, setInlineProdBonusVal] = useState<string>('');
 
   // Modal State for Editing Trainer (Target Fokus & Poin KPI Trainer)
   const [editingTrainer, setEditingTrainer] = useState<TrainerSalaryItem | null>(null);
@@ -362,134 +579,158 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
     [trainerMonthPeriod, filters.BULAN, targetSyncVersion]
   );
 
-  // Calculate aggregated area cost
-  const costSummary = useMemo(() => {
-    return aggregateAreaCost(
-      records,
-      customSalesTargets,
-      customBaNonLavojoyTargets,
-      customBaLavojoyTargets,
-      customSalesBonuses,
-      customSalesPenalties,
-      defaultSalesTarget,
-      defaultBaNonLavojoyTarget,
-      defaultBaLavojoyTarget,
-      undefined,
-      undefined,
-      customTrainerFocusTargets,
-      customTrainerIncentives,
-      customTrainerPenalties,
-      customTrainerKpiScores,
-      customTrainerKpiIncentives,
-      customTrainerKpiPenalties,
-      trainerMonthPeriod,
-      dynamicTrainerConfigs,
-      trainerMonthlyTargets,
-      baFocusTargetsMap
-    );
-  }, [
-    records,
-    customSalesTargets,
-    customBaNonLavojoyTargets,
-    customBaLavojoyTargets,
-    customSalesBonuses,
-    customSalesPenalties,
-    defaultSalesTarget,
-    defaultBaNonLavojoyTarget,
-    defaultBaLavojoyTarget,
-    customTrainerFocusTargets,
-    customTrainerIncentives,
-    customTrainerPenalties,
-    customTrainerKpiScores,
-    customTrainerKpiIncentives,
-    customTrainerKpiPenalties,
-    trainerMonthPeriod,
-    dynamicTrainerConfigs,
-    trainerMonthlyTargets,
-    baFocusTargetsMap,
-  ]);
+  // Non-period filtered base records (keep Region, Area, Sales, Store, Brand, Kategori, SPV, SKU, Search; ignore BULAN/TAHUN/KET for accurate cross-month 26-25 cut-off & 1-30/31 Sell In)
+  const nonDateFilteredRecords = useMemo(() => {
+    const baseSource = allRecords && allRecords.length > 0 ? allRecords : records;
+    return filterRecords(baseSource, {
+      ...filters,
+      BULAN: 'ALL',
+      TAHUN: 'ALL',
+      KET: 'ALL',
+    });
+  }, [allRecords, records, filters]);
 
-  // Filtered records for BA date range
+  // 1. Transaksi SELL IN untuk Gaji & Insentif Sales (strictly Tanggal 1 s/d akhir bulan 28/29/30/31)
+  const salesSellInRecords = useMemo(() => {
+    return nonDateFilteredRecords.filter((r) => {
+      const ketUpper = (r.KET || '').trim().toUpperCase();
+      if (ketUpper !== 'SELL IN' && !ketUpper.includes('SELL IN')) return false;
+
+      if (payrollWindows.hasMonthFilter && payrollWindows.sellInRange) {
+        const dt = parseFullRecordDate(r);
+        if (!dt) return false;
+        return dt >= payrollWindows.sellInRange.startDate && dt <= payrollWindows.sellInRange.endDate;
+      }
+
+      if (filters.TAHUN && filters.TAHUN !== 'ALL') {
+        const dt = parseFullRecordDate(r);
+        if (dt) return dt.getFullYear() === resolvedYear;
+        return String(r.TAHUN || '').trim() === String(filters.TAHUN).trim();
+      }
+
+      return true;
+    });
+  }, [nonDateFilteredRecords, payrollWindows, filters.TAHUN, resolvedYear]);
+
+  // 2. Semua transaksi SELL OUT (terfilter atribut global kecuali bulan/tahun) sebagai sumber cut-off 26-25
+  const allSellOutScopedRecords = useMemo(() => {
+    return nonDateFilteredRecords.filter((r) => {
+      const ketUpper = (r.KET || '').trim().toUpperCase();
+      return ketUpper === 'SELL OUT' || ketUpper.includes('SELL OUT');
+    });
+  }, [nonDateFilteredRecords]);
+
+  // Filtered SELL OUT records for BA & Sales BA Productivity (default: 26 prev month - 25 current month)
   const effectiveBaRecords = useMemo(() => {
-    if (!baStartDate && !baEndDate) return records;
+    if (!baStartDate && !baEndDate) {
+      if (filters.TAHUN && filters.TAHUN !== 'ALL') {
+        return allSellOutScopedRecords.filter((r) => {
+          const dt = parseFullRecordDate(r);
+          return dt ? dt.getFullYear() === resolvedYear : String(r.TAHUN || '').trim() === String(filters.TAHUN).trim();
+        });
+      }
+      return allSellOutScopedRecords;
+    }
+
     const start = baStartDate ? new Date(`${baStartDate}T00:00:00`) : null;
     const end = baEndDate ? new Date(`${baEndDate}T23:59:59`) : null;
 
-    return records.filter((r) => {
-      const d = parseRecordDate(r.TANGGAL);
-      if (!d) return true;
+    return allSellOutScopedRecords.filter((r) => {
+      const d = parseFullRecordDate(r);
+      if (!d) return false;
       if (start && d < start) return false;
       if (end && d > end) return false;
       return true;
     });
-  }, [records, baStartDate, baEndDate]);
+  }, [allSellOutScopedRecords, baStartDate, baEndDate, filters.TAHUN, resolvedYear]);
 
-  // BA specific cost summary calculated from date-filtered transactions
-  const baCostSummary = useMemo(() => {
-    return aggregateAreaCost(
-      effectiveBaRecords,
-      customSalesTargets,
-      customBaNonLavojoyTargets,
-      customBaLavojoyTargets,
-      customSalesBonuses,
-      customSalesPenalties,
-      defaultSalesTarget,
-      defaultBaNonLavojoyTarget,
-      defaultBaLavojoyTarget,
-      undefined,
-      undefined,
-      customTrainerFocusTargets,
-      customTrainerIncentives,
-      customTrainerPenalties,
-      customTrainerKpiScores,
-      customTrainerKpiIncentives,
-      customTrainerKpiPenalties,
-      trainerMonthPeriod,
-      dynamicTrainerConfigs,
-      trainerMonthlyTargets,
-      baFocusTargetsMap
-    );
-  }, [
-    effectiveBaRecords,
-    customSalesTargets,
-    customBaNonLavojoyTargets,
-    customBaLavojoyTargets,
-    customSalesBonuses,
-    customSalesPenalties,
-    defaultSalesTarget,
-    defaultBaNonLavojoyTarget,
-    defaultBaLavojoyTarget,
-    customTrainerFocusTargets,
-    customTrainerIncentives,
-    customTrainerPenalties,
-    customTrainerKpiScores,
-    customTrainerKpiIncentives,
-    customTrainerKpiPenalties,
-    trainerMonthPeriod,
-    dynamicTrainerConfigs,
-    trainerMonthlyTargets,
-    baFocusTargetsMap,
-  ]);
-
-  // Filtered records for Trainer date range
+  // Filtered SELL OUT records for Trainer (default: 26 prev month - 25 current month)
   const effectiveTrainerRecords = useMemo(() => {
-    if (!trainerStartDate && !trainerEndDate) return records;
+    if (!trainerStartDate && !trainerEndDate) {
+      if (filters.TAHUN && filters.TAHUN !== 'ALL') {
+        return allSellOutScopedRecords.filter((r) => {
+          const dt = parseFullRecordDate(r);
+          return dt ? dt.getFullYear() === resolvedYear : String(r.TAHUN || '').trim() === String(filters.TAHUN).trim();
+        });
+      }
+      return allSellOutScopedRecords;
+    }
+
     const start = trainerStartDate ? new Date(`${trainerStartDate}T00:00:00`) : null;
     const end = trainerEndDate ? new Date(`${trainerEndDate}T23:59:59`) : null;
 
-    return records.filter((r) => {
-      const d = parseRecordDate(r.TANGGAL);
-      if (!d) return true;
+    return allSellOutScopedRecords.filter((r) => {
+      const d = parseFullRecordDate(r);
+      if (!d) return false;
       if (start && d < start) return false;
       if (end && d > end) return false;
       return true;
     });
-  }, [records, trainerStartDate, trainerEndDate]);
+  }, [allSellOutScopedRecords, trainerStartDate, trainerEndDate, filters.TAHUN, resolvedYear]);
 
-  // Trainer specific cost summary calculated from date-filtered transactions
-  const trainerCostSummary = useMemo(() => {
+  // Sync BA & Toko list directly with Weekly Sell Out BA menu (respecting active global filters)
+  const [weeklyRegistryVersion, setWeeklyRegistryVersion] = useState(0);
+  useEffect(() => {
+    const onWeeklyChange = () => setWeeklyRegistryVersion((v) => v + 1);
+    window.addEventListener('storage', onWeeklyChange);
+    window.addEventListener('weekly_ba_stores_updated', onWeeklyChange);
+    return () => {
+      window.removeEventListener('storage', onWeeklyChange);
+      window.removeEventListener('weekly_ba_stores_updated', onWeeklyChange);
+    };
+  }, []);
+
+  const filteredWeeklyBaStores = useMemo(() => {
+    const rawList = resolveWeeklyBaStores(allSellOutScopedRecords);
+    return rawList.filter((s) => {
+      if (filters.SALES && filters.SALES !== 'ALL') {
+        if ((s.salesName || '').trim().toUpperCase() !== filters.SALES.trim().toUpperCase()) return false;
+      }
+      if (filters.REGION && filters.REGION !== 'ALL') {
+        const reg = filters.REGION.trim().toUpperCase();
+        if (
+          (s.region || '').trim().toUpperCase() !== reg &&
+          (s.coverArea || '').trim().toUpperCase() !== reg
+        ) {
+          return false;
+        }
+      }
+      if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL') {
+        if ((s.storeName || '').trim().toUpperCase() !== filters.NAMA_STORE.trim().toUpperCase()) return false;
+      }
+      if (filters.TRAINER && filters.TRAINER !== 'ALL') {
+        if ((s.trainerName || '').trim().toUpperCase() !== filters.TRAINER.trim().toUpperCase()) return false;
+      }
+      if (filters.searchQuery && filters.searchQuery.trim()) {
+        const q = filters.searchQuery.trim().toLowerCase();
+        const match =
+          s.storeName.toLowerCase().includes(q) ||
+          s.baName.toLowerCase().includes(q) ||
+          s.salesName.toLowerCase().includes(q) ||
+          (s.trainerName || '').toLowerCase().includes(q) ||
+          (s.coverArea || '').toLowerCase().includes(q) ||
+          (s.region || '').toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    });
+  }, [
+    allSellOutScopedRecords,
+    filters.SALES,
+    filters.REGION,
+    filters.NAMA_STORE,
+    filters.TRAINER,
+    filters.searchQuery,
+    weeklyRegistryVersion,
+  ]);
+
+  // Unified Cost Summary:
+  // - Sales Sell In: 1 - 28/29/30/31
+  // - Produktivitas BA (di Sales), Gaji BA, & Gaji Trainer: Cut-off 26 - 25 (Sell Out)
+  // - Daftar BA yang dicover: Synced dengan menu Weekly Sell Out BA
+  const costSummary = useMemo(() => {
     return aggregateAreaCost(
-      effectiveTrainerRecords,
+      salesSellInRecords,
       customSalesTargets,
       customBaNonLavojoyTargets,
       customBaLavojoyTargets,
@@ -509,15 +750,31 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
       trainerMonthPeriod,
       dynamicTrainerConfigs,
       trainerMonthlyTargets,
-      baFocusTargetsMap
+      baFocusTargetsMap,
+      {
+        strictSellInForSales: true,
+        strictSellOutForBa: true,
+        disableDummyBaFallback: true,
+        disableTrainerDummyActualFallback: true,
+        sellOutRecordsOverride: effectiveBaRecords,
+        trainerSellOutRecordsOverride: effectiveTrainerRecords,
+        weeklyBaStoresOverride: filteredWeeklyBaStores,
+        syncBaFromWeeklyRegistry: true,
+        skipEmptyPeriodBaPenalty: true,
+        salesBaProductivityOverrides: customSalesBaProductivity,
+      }
     );
   }, [
+    salesSellInRecords,
+    effectiveBaRecords,
     effectiveTrainerRecords,
+    filteredWeeklyBaStores,
     customSalesTargets,
     customBaNonLavojoyTargets,
     customBaLavojoyTargets,
     customSalesBonuses,
     customSalesPenalties,
+    customSalesBaProductivity,
     defaultSalesTarget,
     defaultBaNonLavojoyTarget,
     defaultBaLavojoyTarget,
@@ -532,6 +789,10 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
     trainerMonthlyTargets,
     baFocusTargetsMap,
   ]);
+
+  // BA & Trainer summaries remain aliases / consistent with costSummary
+  const baCostSummary = costSummary;
+  const trainerCostSummary = costSummary;
 
   // Simulator result calculation
   const simSalesResult = useMemo(() => {
@@ -602,10 +863,19 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
 
   // Filtered & Sorted BA List (Using baCostSummary which respects date range)
   const filteredBaList = useMemo(() => {
+    const q = searchQuery.toLowerCase();
     let list = baCostSummary.baList.filter((b) =>
-      b.baName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      b.storeName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      b.coverArea.toLowerCase().includes(searchQuery.toLowerCase())
+      b.baName.toLowerCase().includes(q) ||
+      b.storeName.toLowerCase().includes(q) ||
+      b.coverArea.toLowerCase().includes(q) ||
+      b.region.toLowerCase().includes(q) ||
+      b.salesName.toLowerCase().includes(q) ||
+      (b.storeDetails || []).some(
+        (sd) =>
+          sd.storeName.toLowerCase().includes(q) ||
+          sd.coverArea.toLowerCase().includes(q) ||
+          sd.region.toLowerCase().includes(q)
+      )
     );
 
     list.sort((a, b) => {
@@ -679,23 +949,113 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
   // Save BA Edit
   const handleSaveEditBa = () => {
     if (!editingBa) return;
-    setSingleTargetOverride('baNonLavojoy', editingBa.storeName, editBaNonLavojoyTarget, filters.BULAN);
-    setSingleTargetOverride('baLavojoy', editingBa.storeName, editBaLavojoyTarget, filters.BULAN);
+    const baUpper = (editingBa.baName || '').trim().toUpperCase();
+    const isRealBaName =
+      baUpper &&
+      !['-', 'NON BA', 'NON-BA', '- (NON-BA)', 'STANDBY', 'BA COUNTER'].includes(baUpper);
+    const primaryKey = isRealBaName ? editingBa.baName.trim() : editingBa.storeName;
+
+    setSingleTargetOverride('baNonLavojoy', primaryKey, editBaNonLavojoyTarget, filters.BULAN);
+    setSingleTargetOverride('baLavojoy', primaryKey, editBaLavojoyTarget, filters.BULAN);
+
+    const isSingleStore = !editingBa.storeDetails || editingBa.storeDetails.length <= 1;
+    if (isSingleStore && editingBa.storeName && editingBa.storeName !== primaryKey) {
+      setSingleTargetOverride('baNonLavojoy', editingBa.storeName, editBaNonLavojoyTarget, filters.BULAN);
+      setSingleTargetOverride('baLavojoy', editingBa.storeName, editBaLavojoyTarget, filters.BULAN);
+    }
+
     setCustomBaNonLavojoyTargets((prev) => ({
       ...prev,
-      [editingBa.storeName]: editBaNonLavojoyTarget,
+      [primaryKey]: editBaNonLavojoyTarget,
+      ...(isSingleStore && editingBa.storeName ? { [editingBa.storeName]: editBaNonLavojoyTarget } : {}),
     }));
     setCustomBaLavojoyTargets((prev) => ({
       ...prev,
-      [editingBa.storeName]: editBaLavojoyTarget,
+      [primaryKey]: editBaLavojoyTarget,
+      ...(isSingleStore && editingBa.storeName ? { [editingBa.storeName]: editBaLavojoyTarget } : {}),
     }));
     setEditingBa(null);
+  };
+
+  const computeAutoBonusFromProductivity = (totalSellOut: number, baCount: number): number => {
+    if (baCount <= 0) return 0;
+    const avg = Math.round(totalSellOut / baCount);
+    if (avg >= 55000000) return 1000000;
+    if (avg >= 45000000) return 500000;
+    return 0;
+  };
+
+  // Inline Edit Handlers for Rincian Produktivitas BA untuk Sales
+  const handleStartInlineProdEdit = (sales: SalesSalaryItem) => {
+    setInlineProdSalesName(sales.salesName);
+    setInlineProdSellOutVal(String(Math.round(sales.coveredBaTotalSellOut || 0)));
+    setInlineProdBaCountVal(String(sales.coveredBaCount || 0));
+    setInlineProdBonusVal(String(Math.round(sales.baProductivityBonus || 0)));
+  };
+
+  const handleInlineProdMetricChange = (nextSellOutStr: string, nextBaCountStr: string) => {
+    setInlineProdSellOutVal(nextSellOutStr);
+    setInlineProdBaCountVal(nextBaCountStr);
+    const sOut = Math.max(0, Number(nextSellOutStr) || 0);
+    const bCnt = Math.max(0, Math.round(Number(nextBaCountStr) || 0));
+    setInlineProdBonusVal(String(computeAutoBonusFromProductivity(sOut, bCnt)));
+  };
+
+  const handleCommitInlineProdEdit = (sales: SalesSalaryItem) => {
+    const cleanSellOut = Math.max(0, Math.round(Number(inlineProdSellOutVal) || 0));
+    const cleanBaCount = Math.max(0, Math.round(Number(inlineProdBaCountVal) || 0));
+    const cleanBonus = Math.max(0, Math.round(Number(inlineProdBonusVal) || 0));
+    const expectedAutoBonus = computeAutoBonusFromProductivity(cleanSellOut, cleanBaCount);
+
+    setCustomSalesBaProductivity((prev) => ({
+      ...prev,
+      [sales.salesName]: {
+        customTotalSellOut: cleanSellOut,
+        customBaCount: cleanBaCount,
+      },
+    }));
+
+    setCustomSalesBonuses((prev) => {
+      const next = { ...prev };
+      if (cleanBonus === expectedAutoBonus) {
+        delete next[sales.salesName];
+      } else {
+        next[sales.salesName] = cleanBonus;
+      }
+      return next;
+    });
+
+    setInlineProdSalesName(null);
+  };
+
+  const handleResetSalesProductivity = (salesName: string) => {
+    setCustomSalesBaProductivity((prev) => {
+      const next = { ...prev };
+      delete next[salesName];
+      return next;
+    });
+    setCustomSalesBonuses((prev) => {
+      const next = { ...prev };
+      delete next[salesName];
+      return next;
+    });
+    if (inlineProdSalesName === salesName) {
+      setInlineProdSalesName(null);
+    }
+  };
+
+  const handleResetAllSalesProductivity = () => {
+    setCustomSalesBaProductivity({});
+    setCustomSalesBonuses({});
+    setInlineProdSalesName(null);
   };
 
   // Open Sales Edit Modal
   const handleOpenEditSales = (sales: SalesSalaryItem) => {
     setEditingSales(sales);
     setEditSalesTarget(sales.sellInTarget);
+    setEditSalesCoveredSellOut(sales.coveredBaTotalSellOut || 0);
+    setEditSalesCoveredBaCount(sales.coveredBaCount || 0);
     setEditSalesBonus(sales.baProductivityBonus);
     setEditSalesPenalty(sales.baProductivityPenalty);
   };
@@ -703,15 +1063,43 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
   // Save Sales Edit
   const handleSaveEditSales = () => {
     if (!editingSales) return;
-    setSingleTargetOverride('sales', editingSales.salesName, editSalesTarget, filters.BULAN);
+    const cleanTarget = Math.max(1, Number(editSalesTarget) || 1);
+    const cleanSellOut = Math.max(0, Math.round(Number(editSalesCoveredSellOut) || 0));
+    const cleanBaCount = Math.max(0, Math.round(Number(editSalesCoveredBaCount) || 0));
+    const cleanBonus = Math.max(0, Math.round(Number(editSalesBonus) || 0));
+    const expectedAutoBonus = computeAutoBonusFromProductivity(cleanSellOut, cleanBaCount);
+
+    setSingleTargetOverride('sales', editingSales.salesName, cleanTarget, filters.BULAN);
     setCustomSalesTargets((prev) => ({
       ...prev,
-      [editingSales.salesName]: editSalesTarget,
+      [editingSales.salesName]: cleanTarget,
     }));
-    setCustomSalesBonuses((prev) => ({
-      ...prev,
-      [editingSales.salesName]: editSalesBonus,
-    }));
+
+    const sysSellOut = editingSales.systemCoveredBaTotalSellOut ?? cleanSellOut;
+    const sysCount = editingSales.systemCoveredBaCount ?? cleanBaCount;
+    setCustomSalesBaProductivity((prev) => {
+      const next = { ...prev };
+      if (cleanSellOut === sysSellOut && cleanBaCount === sysCount) {
+        delete next[editingSales.salesName];
+      } else {
+        next[editingSales.salesName] = {
+          customTotalSellOut: cleanSellOut,
+          customBaCount: cleanBaCount,
+        };
+      }
+      return next;
+    });
+
+    setCustomSalesBonuses((prev) => {
+      const next = { ...prev };
+      if (cleanBonus === expectedAutoBonus) {
+        delete next[editingSales.salesName];
+      } else {
+        next[editingSales.salesName] = cleanBonus;
+      }
+      return next;
+    });
+
     setCustomSalesPenalties((prev) => ({
       ...prev,
       [editingSales.salesName]: editSalesPenalty,
@@ -873,14 +1261,16 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
       ['Tanggal Cetak:', new Date().toLocaleString('id-ID')],
       ['Filter Bulan:', filters.BULAN],
       ['Filter Tahun:', filters.TAHUN],
+      ['Periode Sales Sell In:', payrollWindows.sellInRange ? `${formatIsoShortId(payrollWindows.sellInRange.startIso)} s/d ${formatIsoShortId(payrollWindows.sellInRange.endIso)}` : 'Semua Periode'],
+      ['Periode Sell Out (BA & Trainer):', baStartDate || baEndDate ? `${formatIsoShortId(baStartDate) || 'Awal'} s/d ${formatIsoShortId(baEndDate) || 'Sekarang'}` : 'Semua Periode'],
       ['Filter Region:', filters.REGION],
       [''],
       ['KOMPONEN BIAYA', 'NOMINAL (IDR)', 'KETERANGAN'],
       ['Total Estimasi Cost Area', costSummary.totalCost, 'Total Beban Gaji & Insentif (Sales + BA + Trainer)'],
       ['Total Biaya Sales', costSummary.totalSalesCost, `${costSummary.salesCount} Personil Sales`],
       ['  - Gaji Pokok Sales', costSummary.totalSalesBase, 'Rp 4.900.000 / personil'],
-      ['  - Insentif & Penalti Sales', costSummary.totalSalesIncentive, 'Sell In (0.2%-4%) & Insentif/Denda Prod BA'],
-      ['Total Biaya BA Toko', costSummary.totalBaCost, `${costSummary.baCount} Toko Ber-BA`],
+      ['  - Insentif & Penalti Sales', costSummary.totalSalesIncentive, 'Sell In (0.2%-0.4%) & Insentif/Denda Prod BA'],
+      ['Total Biaya BA Toko', costSummary.totalBaCost, `${costSummary.baCount} Personil BA`],
       ['  - Gaji Pokok BA', costSummary.totalBaBase, 'Berdasarkan pencapaian Sell Out Non-Lavojoy'],
       ['  - Insentif BA (Non-Lavojoy + Lavojoy 4%)', costSummary.totalBaIncentive, 'Insentif Non-Lavojoy + 4% Lavojoy'],
       ['Total Biaya Trainer', costSummary.totalTrainerCost || 0, `${costSummary.trainerCount || 4} Personil Trainer`],
@@ -907,7 +1297,10 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
       '% Pencapaian',
       'Gaji Pokok',
       'Insentif Sell In',
-      'Bonus Produktivitas BA',
+      'Total Sell Out BA Dicover',
+      'Jumlah BA Dicover',
+      'Produktivitas Rata-rata / BA',
+      'Bonus Produktivitas BA untuk Sales',
       'Denda Produktivitas BA',
       'Status SP1',
       'Total Gaji (THP)',
@@ -922,6 +1315,9 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
       Number(s.achievementPercent.toFixed(2)),
       s.baseSalary,
       s.incentiveNominal,
+      s.coveredBaTotalSellOut,
+      s.coveredBaCount,
+      s.baProductivityAverage,
       s.baProductivityBonus,
       s.baProductivityPenalty,
       s.baProductivitySpCount > 0 ? `SP1 (${s.baProductivitySpCount} BA <35Jt)` : 'AMAN',
@@ -1051,7 +1447,7 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
               </h2>
             </div>
             <p className="text-xs text-slate-600 mt-1 font-medium">
-              Kalkulasi gaji Sales (Sell In + Insentif/Denda Produktivitas BA) dan BA Toko Multi-Brand (Non-Lavojoy + Skema Khusus Lavojoy 4%)
+              Sales Sell In dihitung per bulan kalender (Tgl 1–28/30/31), sedangkan Produktivitas BA, Gaji BA &amp; Trainer menggunakan Cut-off Sell Out tgl 26 bulan lalu s/d 25 bulan berjalan (BA mengikuti Weekly Sell Out BA).
             </p>
           </div>
 
@@ -1286,15 +1682,15 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                 <li className="flex items-start gap-1.5">
                   <span className="font-bold text-indigo-700">·</span>
                   <span>
-                    <strong>Insentif Sell In:</strong> Capai <strong>≥ 100%</strong> (<strong>4%</strong> × Realisasi Sell In) | 80%-99% (<strong>0,2%</strong> × Sell In) | &lt; 80% (0%).
+                    <strong>Insentif Sell In:</strong> Capai <strong>≥ 100%</strong> (<strong>0,4%</strong> × Realisasi Sell In) | 80%-99% (<strong>0,2%</strong> × Sell In) | &lt; 80% (0%).
                   </span>
                 </li>
                 <li className="flex items-start gap-1.5 text-emerald-800 bg-emerald-50/60 p-1.5 rounded-lg border border-emerald-200">
                   <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
                   <span>
-                    <strong>Insentif Produktivitas BA yang Dicover:</strong>
-                    <br />• BA Sell Out <strong>Rp 45 Jt – Rp 54 Jt:</strong> Bonus <strong>+Rp 500.000</strong> per BA
-                    <br />• BA Sell Out <strong>≥ Rp 55 Jt:</strong> Bonus <strong>+Rp 1.000.000</strong> per BA
+                    <strong>Bonus Produktivitas BA untuk Sales (Total Sell Out ÷ Jumlah BA Dicover):</strong>
+                    <br />• Rata-rata Produktivitas BA <strong>Rp 45 Jt – Rp 54 Jt:</strong> Bonus <strong>+Rp 500.000</strong> (flat per Sales, tidak dikali jumlah BA)
+                    <br />• Rata-rata Produktivitas BA <strong>≥ Rp 55 Jt:</strong> Bonus <strong>+Rp 1.000.000</strong> (flat per Sales, tidak dikali jumlah BA)
                   </span>
                 </li>
                 <li className="flex items-start gap-1.5 text-rose-800 bg-rose-50/60 p-1.5 rounded-lg border border-rose-200">
@@ -1483,13 +1879,13 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                 <span className="font-mono font-bold text-slate-900">{formatRupiah(costSummary.totalSalesBase)}</span>
               </div>
               <div className="flex justify-between py-1 border-b border-slate-100">
-                <span className="text-slate-600">Insentif Sell In (0,2% – 0,3%):</span>
+                <span className="text-slate-600">Insentif Sell In (0,2% – 0,4%):</span>
                 <span className="font-mono font-bold text-indigo-600">
                   {formatRupiah(costSummary.salesList.reduce((acc, s) => acc + s.incentiveNominal, 0))}
                 </span>
               </div>
               <div className="flex justify-between py-1 border-b border-slate-100">
-                <span className="text-emerald-700 font-semibold">Bonus Produktivitas BA (45-54M: +500rb, ≥55M: +1Jt):</span>
+                <span className="text-emerald-700 font-semibold">Bonus Produktivitas BA untuk Sales (Rata2 45-54M: +500rb, ≥55M: +1Jt / Sales):</span>
                 <span className="font-mono font-bold text-emerald-600">
                   +{formatRupiah(costSummary.salesList.reduce((acc, s) => acc + s.baProductivityBonus, 0))}
                 </span>
@@ -1638,8 +2034,28 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                 Rincian Estimasi Gaji Sales, Insentif Sell In &amp; Produktivitas BA
               </h3>
               <p className="text-xs text-slate-500 font-medium mt-0.5">
-                Gaji Pokok Rp 4.900.000 + Insentif Sell In (≥100%: 4% | 80-99%: 0,2%) + Bonus BA (45-54M: +500rb, ≥55M: +1Jt) - Denda BA (&lt;35M: -300rb, SP1)
+                Gaji Pokok Rp 4.900.000 + Insentif Sell In (≥100%: 0,4% | 80-99%: 0,2%) + Bonus Produktivitas BA untuk Sales (Total Sell Out ÷ Jumlah BA: 45-54M = +500rb, ≥55M = +1Jt) - Denda BA (&lt;35M: -300rb, SP1)
               </p>
+              <div className="flex flex-wrap items-center gap-2 mt-2">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-200 text-[11px] font-bold text-indigo-800">
+                  <Calendar className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>
+                    Sell In Sales:{' '}
+                    {payrollWindows.sellInRange
+                      ? `1–${payrollWindows.sellInRange.totalDays} ${filters.BULAN} (${formatIsoShortId(payrollWindows.sellInRange.startIso)} s/d ${formatIsoShortId(payrollWindows.sellInRange.endIso)})`
+                      : `Tahun ${filters.TAHUN !== 'ALL' ? resolvedYear : 'Semua'} (Tgl 1–Akhir Bulan)`}
+                  </span>
+                </span>
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-teal-50 border border-teal-200 text-[11px] font-bold text-teal-800">
+                  <Store className="w-3.5 h-3.5 text-teal-600" />
+                  <span>
+                    Produktivitas BA (Weekly Sell Out BA):{' '}
+                    {baStartDate || baEndDate
+                      ? `${formatIsoShortId(baStartDate) || 'Awal'} s/d ${formatIsoShortId(baEndDate) || 'Sekarang'}`
+                      : 'Semua Periode'}
+                  </span>
+                </span>
+              </div>
             </div>
             <div className="flex flex-wrap items-center gap-2.5">
               <div className="text-xs text-slate-500 font-mono">
@@ -1687,7 +2103,7 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                   <th className="py-3 px-3 text-right">Gaji Pokok</th>
                   <th className="py-3 px-3 text-right">Insentif Sell In</th>
                   <th className="py-3 px-3">BA Toko yang Dicover</th>
-                  <th className="py-3 px-3 text-right text-emerald-800">Bonus BA</th>
+                  <th className="py-3 px-3 text-right text-emerald-800">Bonus Produktivitas BA untuk Sales</th>
                   <th className="py-3 px-3 text-right text-rose-800">Denda BA &amp; SP</th>
                   <th
                     onClick={() => toggleSort('total')}
@@ -1746,18 +2162,43 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                         {item.coveredBaList.length === 0 ? (
                           <span className="text-slate-400 text-[11px]">- (Tidak ada BA)</span>
                         ) : (
-                          <div className="space-y-1 max-w-[200px]">
-                            {item.coveredBaList.map((b) => (
-                              <div key={b.storeName} className="text-[10px] flex items-center justify-between gap-1 p-1 rounded bg-slate-50 border border-slate-200">
-                                <span className="font-bold text-slate-800 truncate">{b.baName}</span>
-                                <span className="font-mono text-slate-600">{formatRupiah(b.sellOut, true)}</span>
-                              </div>
-                            ))}
+                          <div className="space-y-1 max-w-[240px]">
+                            <div className="text-[10px] font-bold text-teal-700 bg-teal-50/70 px-1.5 py-0.5 rounded border border-teal-200 inline-block">
+                              {item.coveredBaList.length} BA (Sync Weekly Sell Out BA)
+                            </div>
+                            <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
+                              {item.coveredBaList.map((b) => (
+                                <div
+                                  key={b.storeName}
+                                  title={`${b.baName} — ${b.storeName}: ${formatRupiah(b.sellOut)}`}
+                                  className="text-[10px] flex items-center justify-between gap-1.5 p-1 rounded bg-slate-50 border border-slate-200"
+                                >
+                                  <div className="min-w-0">
+                                    <div className="font-bold text-slate-800 truncate">{b.baName}</div>
+                                    <div className="text-[9px] text-slate-500 truncate">{b.storeName}</div>
+                                  </div>
+                                  <span className="font-mono font-semibold text-slate-700 shrink-0">{formatRupiah(b.sellOut, true)}</span>
+                                </div>
+                              ))}
+                            </div>
                           </div>
                         )}
                       </td>
                       <td className="py-3 px-3 text-right font-mono font-bold text-emerald-600">
-                        {item.baProductivityBonus > 0 ? `+${formatRupiah(item.baProductivityBonus)}` : 'Rp 0'}
+                        <div className="flex items-center justify-end gap-1">
+                          <span>{item.baProductivityBonus > 0 ? `+${formatRupiah(item.baProductivityBonus)}` : 'Rp 0'}</span>
+                          {item.isProductivityEdited && (
+                            <span className="text-[9px] px-1 py-0.2 rounded bg-amber-100 text-amber-800 border border-amber-300 font-sans font-bold">
+                              Edit
+                            </span>
+                          )}
+                        </div>
+                        {item.coveredBaCount > 0 && (
+                          <div className="text-[9px] font-normal text-slate-500 mt-0.5 leading-tight">
+                            {formatRupiah(item.coveredBaTotalSellOut, true)} ÷ {item.coveredBaCount} ={' '}
+                            <strong className="text-slate-700">{formatRupiah(item.baProductivityAverage, true)}</strong>
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-3 text-right font-mono">
                         {item.baProductivityPenalty > 0 ? (
@@ -1803,6 +2244,323 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
               </tbody>
             </table>
           </div>
+
+          {/* RINCIAN PRODUKTIVITAS BA UNTUK SALES (TOTAL SELL OUT ÷ JUMLAH BA DICOVER) - EDITABLE */}
+          <div className="mt-6 rounded-2xl border border-emerald-200/90 bg-gradient-to-br from-emerald-50/40 via-white to-teal-50/30 p-4 sm:p-5 shadow-2xs space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-emerald-200/70">
+              <div>
+                <h4 className="text-sm sm:text-base font-extrabold text-emerald-950 flex items-center gap-2">
+                  <Calculator className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>Rincian Bonus Produktivitas BA untuk Sales (Total Sell Out ÷ Jumlah BA Dicover)</span>
+                </h4>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Rumus: <strong>Total Semua Sell Out BA yang Dicover Sales ÷ Jumlah BA Dicover</strong> = Produktivitas Rata-rata/BA
+                  <span className="ml-1.5 inline-flex items-center gap-1 font-mono text-[11px] text-emerald-800 bg-emerald-100/80 px-2 py-0.5 rounded-md border border-emerald-200">
+                    45–54 Jt: Rp 500rb | ≥ 55 Jt: Rp 1 Jt (Flat / Sales, tidak dikali jumlah BA)
+                  </span>
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-teal-200 text-[11px] font-bold text-teal-800">
+                  <Calendar className="w-3.5 h-3.5 text-teal-600" />
+                  <span>
+                    Periode Sell Out:{' '}
+                    {baStartDate || baEndDate
+                      ? `${formatIsoShortId(baStartDate) || 'Awal'} – ${formatIsoShortId(baEndDate) || 'Sekarang'}`
+                      : 'Semua Periode'}
+                  </span>
+                </span>
+                {(Object.keys(customSalesBaProductivity).length > 0 || Object.keys(customSalesBonuses).length > 0) && (
+                  <button
+                    type="button"
+                    onClick={handleResetAllSalesProductivity}
+                    className="px-2.5 py-1 rounded-lg bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                    title="Kembalikan semua angka Total Sell Out, Jumlah BA & Bonus ke hitungan otomatis data"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Reset Semua Editan</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="overflow-x-auto bg-white border border-emerald-200/80 rounded-xl">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-emerald-50/80 border-b border-emerald-200 text-emerald-950 font-bold">
+                    <th className="py-2.5 px-3">No</th>
+                    <th className="py-2.5 px-3">Nama Sales &amp; Area</th>
+                    <th className="py-2.5 px-3 text-right">Total Sell Out Dicover (IDR)</th>
+                    <th className="py-2.5 px-3 text-center">Jumlah BA Dicover</th>
+                    <th className="py-2.5 px-3 text-right">Produktivitas (Total ÷ Jumlah BA)</th>
+                    <th className="py-2.5 px-3 text-right bg-emerald-100/60">Bonus Produktivitas BA untuk Sales</th>
+                    <th className="py-2.5 px-3 text-center">Aksi</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {filteredSalesList.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-6 text-center text-slate-400">
+                        Tidak ada data Sales yang sesuai.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredSalesList.map((item, idx) => {
+                      const isRowEditing = inlineProdSalesName === item.salesName;
+                      const liveSellOut = isRowEditing
+                        ? Math.max(0, Number(inlineProdSellOutVal) || 0)
+                        : item.coveredBaTotalSellOut;
+                      const liveBaCount = isRowEditing
+                        ? Math.max(0, Math.round(Number(inlineProdBaCountVal) || 0))
+                        : item.coveredBaCount;
+                      const liveAvg = liveBaCount > 0 ? Math.round(liveSellOut / liveBaCount) : 0;
+                      const liveBonus = isRowEditing
+                        ? Math.max(0, Number(inlineProdBonusVal) || 0)
+                        : item.baProductivityBonus;
+
+                      const hasSystemDiff =
+                        item.isProductivityEdited ||
+                        customSalesBonuses[item.salesName] !== undefined ||
+                        customSalesBaProductivity[item.salesName] !== undefined;
+
+                      return (
+                        <tr
+                          key={`prod-${item.salesName}`}
+                          className={`transition-colors ${
+                            isRowEditing ? 'bg-blue-50/50' : 'hover:bg-emerald-50/25'
+                          }`}
+                        >
+                          <td className="py-2.5 px-3 font-mono text-slate-400">{idx + 1}</td>
+                          <td className="py-2.5 px-3">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-extrabold text-slate-900">{item.salesName}</span>
+                              {hasSystemDiff && (
+                                <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 border border-amber-300">
+                                  Diedit
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-slate-500">
+                              {item.coverArea} ({item.spv})
+                            </div>
+                          </td>
+
+                          {/* Total Sell Out Covered BA */}
+                          <td className="py-2.5 px-3 text-right font-mono">
+                            {isRowEditing ? (
+                              <input
+                                type="number"
+                                min={0}
+                                step="any"
+                                value={inlineProdSellOutVal}
+                                onChange={(e) => handleInlineProdMetricChange(e.target.value, inlineProdBaCountVal)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') handleCommitInlineProdEdit(item);
+                                  if (e.key === 'Escape') setInlineProdSalesName(null);
+                                }}
+                                className="w-36 px-2 py-1 text-right text-xs font-mono font-bold border border-blue-400 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+                              />
+                            ) : (
+                              <div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartInlineProdEdit(item)}
+                                  className="font-bold text-slate-900 hover:text-blue-700 hover:underline cursor-pointer"
+                                  title="Klik untuk edit Total Sell Out BA yang dicover"
+                                >
+                                  {formatRupiah(item.coveredBaTotalSellOut)}
+                                </button>
+                                {item.systemCoveredBaTotalSellOut !== undefined &&
+                                  item.systemCoveredBaTotalSellOut !== item.coveredBaTotalSellOut && (
+                                    <div className="text-[9px] text-slate-400">
+                                      Sistem: {formatRupiah(item.systemCoveredBaTotalSellOut, true)}
+                                    </div>
+                                  )}
+                              </div>
+                            )}
+                          </td>
+
+                          {/* Jumlah BA Dicover */}
+                          <td className="py-2.5 px-3 text-center font-mono">
+                            {isRowEditing ? (
+                              <input
+                                type="number"
+                                min={0}
+                                step={1}
+                                value={inlineProdBaCountVal}
+                                onChange={(e) => handleInlineProdMetricChange(inlineProdSellOutVal, e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') handleCommitInlineProdEdit(item);
+                                  if (e.key === 'Escape') setInlineProdSalesName(null);
+                                }}
+                                className="w-20 px-2 py-1 text-center text-xs font-mono font-bold border border-blue-400 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+                              />
+                            ) : (
+                              <div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartInlineProdEdit(item)}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-teal-50 text-teal-900 border border-teal-200 font-bold hover:bg-teal-100 cursor-pointer"
+                                  title={
+                                    item.coveredBaList.length > 0
+                                      ? `Daftar BA: ${item.coveredBaList.map((b) => `${b.baName} (${b.storeName})`).join(', ')}`
+                                      : 'Klik untuk edit jumlah BA'
+                                  }
+                                >
+                                  <span>{item.coveredBaCount} BA</span>
+                                </button>
+                                {item.systemCoveredBaCount !== undefined &&
+                                  item.systemCoveredBaCount !== item.coveredBaCount && (
+                                    <div className="text-[9px] text-slate-400 mt-0.5">
+                                      Sistem: {item.systemCoveredBaCount} BA
+                                    </div>
+                                  )}
+                              </div>
+                            )}
+                          </td>
+
+                          {/* Perhitungan Produktivitas */}
+                          <td className="py-2.5 px-3 text-right font-mono">
+                            <div
+                              className={`font-black text-xs sm:text-sm ${
+                                liveAvg >= 55000000
+                                  ? 'text-emerald-700'
+                                  : liveAvg >= 45000000
+                                  ? 'text-teal-700'
+                                  : 'text-slate-700'
+                              }`}
+                            >
+                              {formatRupiah(liveAvg)}
+                            </div>
+                            <div className="text-[10px] text-slate-500">
+                              ({formatRupiah(liveSellOut, true)} ÷ {liveBaCount} BA)
+                            </div>
+                          </td>
+
+                          {/* Bonus Produktivitas BA untuk Sales */}
+                          <td className="py-2.5 px-3 text-right font-mono bg-emerald-50/40">
+                            {isRowEditing ? (
+                              <input
+                                type="number"
+                                min={0}
+                                step="any"
+                                value={inlineProdBonusVal}
+                                onChange={(e) => setInlineProdBonusVal(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') handleCommitInlineProdEdit(item);
+                                  if (e.key === 'Escape') setInlineProdSalesName(null);
+                                }}
+                                className="w-32 px-2 py-1 text-right text-xs font-mono font-bold border border-emerald-500 rounded-lg bg-white focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+                              />
+                            ) : (
+                              <div>
+                                <div className="font-black text-emerald-700 text-xs sm:text-sm">
+                                  {liveBonus > 0 ? `+${formatRupiah(liveBonus)}` : 'Rp 0'}
+                                </div>
+                                <span
+                                  className={`inline-block text-[9px] font-sans font-bold px-1.5 py-0.2 rounded mt-0.5 border ${
+                                    liveAvg >= 55000000
+                                      ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                                      : liveAvg >= 45000000
+                                      ? 'bg-teal-100 text-teal-800 border-teal-300'
+                                      : 'bg-slate-100 text-slate-600 border-slate-200'
+                                  }`}
+                                >
+                                  {liveAvg >= 55000000
+                                    ? '≥ 55 Jt • Flat Rp 1 Jt'
+                                    : liveAvg >= 45000000
+                                    ? '45–54 Jt • Flat Rp 500rb'
+                                    : '< 45 Jt • Belum Bonus'}
+                                </span>
+                              </div>
+                            )}
+                          </td>
+
+                          {/* Aksi */}
+                          <td className="py-2.5 px-3 text-center">
+                            {isRowEditing ? (
+                              <div className="inline-flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleCommitInlineProdEdit(item)}
+                                  className="px-2 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                                  title="Simpan"
+                                >
+                                  <Check className="w-3 h-3" />
+                                  <span>Simpan</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setInlineProdSalesName(null)}
+                                  className="p-1 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 cursor-pointer"
+                                  title="Batal"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="inline-flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartInlineProdEdit(item)}
+                                  className="px-2.5 py-1 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-600 text-blue-700 hover:text-white text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                                  title={`Edit Total Sell Out, Jumlah BA & Bonus ${item.salesName}`}
+                                >
+                                  <Edit3 className="w-3 h-3" />
+                                  <span>Edit</span>
+                                </button>
+                                {hasSystemDiff && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleResetSalesProductivity(item.salesName)}
+                                    className="p-1 rounded-lg border border-rose-200 text-rose-700 hover:bg-rose-50 cursor-pointer"
+                                    title="Reset ke hitungan otomatis sistem"
+                                  >
+                                    <RotateCcw className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+                {filteredSalesList.length > 0 && (() => {
+                  const sumSellOut = filteredSalesList.reduce((a, b) => a + (b.coveredBaTotalSellOut || 0), 0);
+                  const sumBaCount = filteredSalesList.reduce((a, b) => a + (b.coveredBaCount || 0), 0);
+                  const overallAvg = sumBaCount > 0 ? Math.round(sumSellOut / sumBaCount) : 0;
+                  const sumBonus = filteredSalesList.reduce((a, b) => a + (b.baProductivityBonus || 0), 0);
+                  return (
+                    <tfoot>
+                      <tr className="bg-emerald-50/90 border-t-2 border-emerald-200 font-black text-emerald-950 text-xs">
+                        <td colSpan={2} className="py-2.5 px-3">
+                          TOTAL PRODUKTIVITAS BA ({filteredSalesList.length} Sales)
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-mono">{formatRupiah(sumSellOut)}</td>
+                        <td className="py-2.5 px-3 text-center font-mono">{sumBaCount} BA</td>
+                        <td className="py-2.5 px-3 text-right font-mono">
+                          {formatRupiah(overallAvg)}
+                          <span className="block text-[9px] font-normal text-emerald-800">
+                            Rata-rata gabungan/BA
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-mono text-emerald-800 text-sm">
+                          +{formatRupiah(sumBonus)}
+                          <span className="block text-[9px] font-sans font-normal text-emerald-800">
+                            {filteredSalesList.filter((s) => (s.baProductivityBonus || 0) > 0).length} Sales dapat bonus (flat)
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-center text-slate-400">-</td>
+                      </tr>
+                    </tfoot>
+                  );
+                })()}
+              </table>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1820,9 +2578,23 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2.5">
-              <div className="text-xs text-slate-500 font-mono">
-                Total Gerai BA: <strong className="text-slate-800">{baCostSummary.baCount}</strong> | Total Beban:{' '}
-                <strong className="text-teal-700 font-bold">{formatRupiah(baCostSummary.totalBaCost)}</strong>
+              <div className="text-xs text-slate-500 font-mono tabular-nums">
+                {(() => {
+                  const totalStores = baCostSummary.baList.reduce(
+                    (acc, b) => acc + (b.storeDetails ? b.storeDetails.length : 1),
+                    0
+                  );
+                  return (
+                    <>
+                      Total BA: <strong className="text-slate-800">{baCostSummary.baCount}</strong>
+                      {totalStores > baCostSummary.baCount && (
+                        <span className="text-slate-500"> ({totalStores} Toko)</span>
+                      )}{' '}
+                      | Total Beban:{' '}
+                      <strong className="text-teal-700 font-bold">{formatRupiah(baCostSummary.totalBaCost)}</strong>
+                    </>
+                  );
+                })()}
               </div>
               {filteredBaList.length > 0 && (
                 <button
@@ -1836,13 +2608,13 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
             </div>
           </div>
 
-          {/* FILTER PERIODE TANGGAL BA (DARI TANGGAL S/D SAMPAI TANGGAL) */}
+          {/* FILTER PERIODE TANGGAL BA (CUT-OFF SELL OUT 26 - 25) */}
           <div className="mt-4 p-3.5 bg-gradient-to-r from-teal-50/60 via-slate-50 to-indigo-50/40 rounded-xl border border-teal-200/70">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-2.5">
                 <div className="flex items-center gap-1.5 text-xs font-bold text-teal-900 mr-1">
                   <Calendar className="w-4 h-4 text-teal-600" />
-                  <span>Filter Periode BA:</span>
+                  <span>Cut-off Sell Out BA (26–25):</span>
                 </div>
 
                 <div className="flex items-center gap-1.5 bg-white px-2.5 py-1.5 rounded-lg border border-slate-300 shadow-2xs">
@@ -1870,62 +2642,47 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                 {(baStartDate || baEndDate) && (
                   <button
                     onClick={() => {
-                      setBaStartDate('');
-                      setBaEndDate('');
+                      if (payrollWindows.sellOutCutOffRange) {
+                        setBaStartDate(payrollWindows.sellOutCutOffRange.startIso);
+                        setBaEndDate(payrollWindows.sellOutCutOffRange.endIso);
+                      } else {
+                        setBaStartDate('');
+                        setBaEndDate('');
+                      }
                     }}
                     className="flex items-center gap-1 text-[11px] font-semibold text-rose-600 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2 py-1 rounded-md transition-colors cursor-pointer"
                   >
                     <RotateCcw className="w-3 h-3" />
-                    Reset Periode
+                    <span>{payrollWindows.sellOutCutOffRange ? 'Reset ke 26–25' : 'Reset Periode'}</span>
                   </button>
                 )}
               </div>
 
-              {/* Quick Preset Buttons */}
+              {/* Quick Cut-off 26-25 Preset Buttons */}
               <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-[11px] font-medium text-slate-500 mr-1">Preset:</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setBaStartDate('2026-10-01');
-                    setBaEndDate('2026-10-31');
-                  }}
-                  className={`px-2 py-1 text-[11px] font-semibold rounded-md transition-colors border cursor-pointer ${
-                    baStartDate === '2026-10-01' && baEndDate === '2026-10-31'
-                      ? 'bg-teal-600 text-white border-teal-600 shadow-2xs'
-                      : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
-                  }`}
-                >
-                  Okt 2026
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setBaStartDate('2026-09-01');
-                    setBaEndDate('2026-09-30');
-                  }}
-                  className={`px-2 py-1 text-[11px] font-semibold rounded-md transition-colors border cursor-pointer ${
-                    baStartDate === '2026-09-01' && baEndDate === '2026-09-30'
-                      ? 'bg-teal-600 text-white border-teal-600 shadow-2xs'
-                      : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
-                  }`}
-                >
-                  Sep 2026
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setBaStartDate('2026-08-01');
-                    setBaEndDate('2026-08-31');
-                  }}
-                  className={`px-2 py-1 text-[11px] font-semibold rounded-md transition-colors border cursor-pointer ${
-                    baStartDate === '2026-08-01' && baEndDate === '2026-08-31'
-                      ? 'bg-teal-600 text-white border-teal-600 shadow-2xs'
-                      : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
-                  }`}
-                >
-                  Ags 2026
-                </button>
+                <span className="text-[11px] font-medium text-slate-500 mr-1">Cut-off 26–25:</span>
+                {(['FEBRUARI', 'MARET', 'OKTOBER', 'SEPTEMBER', 'AGUSTUS'] as const).map((mName) => {
+                  const range = getCutOff26To25Range(mName, resolvedYear);
+                  if (!range) return null;
+                  const isActive = baStartDate === range.startIso && baEndDate === range.endIso;
+                  return (
+                    <button
+                      key={mName}
+                      type="button"
+                      onClick={() => {
+                        setBaStartDate(range.startIso);
+                        setBaEndDate(range.endIso);
+                      }}
+                      className={`px-2 py-1 text-[11px] font-semibold rounded-md transition-colors border cursor-pointer ${
+                        isActive
+                          ? 'bg-teal-600 text-white border-teal-600 shadow-2xs'
+                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      {mName.slice(0, 3)} ({range.startIso.slice(8)}/{range.startIso.slice(5, 7)}–25/{range.endIso.slice(5, 7)})
+                    </button>
+                  );
+                })}
                 <button
                   type="button"
                   onClick={() => {
@@ -1944,24 +2701,25 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
             </div>
 
             {/* Status indicator bar */}
-            <div className="flex items-center justify-between text-[11px] text-teal-800 mt-2 pt-2 border-t border-teal-100">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-teal-800 mt-2 pt-2 border-t border-teal-100">
               <span className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-teal-500 animate-pulse"></span>
+                <span className="w-2 h-2 rounded-full bg-teal-500"></span>
                 <span>
                   {baStartDate || baEndDate ? (
                     <>
-                      Menampilkan transaksi BA rentang:{' '}
+                      Perhitungan Sell Out BA rentang:{' '}
                       <strong className="font-semibold text-teal-950">
-                        {baStartDate || 'Awal'} s/d {baEndDate || 'Sekarang'}
-                      </strong>
+                        {formatIsoShortId(baStartDate) || 'Awal'} s/d {formatIsoShortId(baEndDate) || 'Sekarang'}
+                      </strong>{' '}
+                      (Daftar BA sinkron Weekly Sell Out BA)
                     </>
                   ) : (
-                    'Menampilkan akumulasi seluruh periode transaksi BA'
+                    'Menampilkan akumulasi seluruh transaksi Sell Out BA (Daftar BA sinkron Weekly Sell Out BA)'
                   )}
                 </span>
               </span>
               <span className="font-mono text-slate-600">
-                Matched Transaksi: <strong className="text-teal-900 font-bold">{effectiveBaRecords.length}</strong> / {records.length} data
+                Matched Sell Out: <strong className="text-teal-900 font-bold">{effectiveBaRecords.length}</strong> / {allSellOutScopedRecords.length} transaksi
               </span>
             </div>
           </div>
@@ -2010,18 +2768,49 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                     </td>
                   </tr>
                 ) : (
-                  filteredBaList.map((item, idx) => (
-                    <tr key={item.storeName} className="hover:bg-teal-50/20 transition-colors">
-                      <td className="py-3 px-3 font-mono text-slate-400">{idx + 1}</td>
-                      <td className="py-3 px-3">
+                  filteredBaList.map((item, idx) => {
+                    const isMergedMultiStore = Boolean(item.storeDetails && item.storeDetails.length > 1);
+                    return (
+                    <tr key={`${item.baName}__${item.storeName}__${idx}`} className="hover:bg-teal-50/20 transition-colors">
+                      <td className="py-3 px-3 font-mono text-slate-400 tabular-nums">{idx + 1}</td>
+                      <td className="py-3 px-3 align-top">
                         <div className="font-extrabold text-slate-900">{item.baName}</div>
                         <div className="text-[10px] text-slate-400 font-mono">{item.baNumber}</div>
+                        {isMergedMultiStore && item.storeDetails && (
+                          <div className="text-[10px] font-semibold text-teal-700 mt-0.5">
+                            Gabungan {item.storeDetails.length} Toko &amp; Area
+                          </div>
+                        )}
                       </td>
-                      <td className="py-3 px-3">
-                        <div className="font-bold text-slate-800">{item.storeName}</div>
-                        <div className="text-[10px] text-slate-500">{item.coverArea} ({item.region})</div>
+                      <td className="py-3 px-3 align-top">
+                        {isMergedMultiStore && item.storeDetails ? (
+                          <div className="space-y-1.5 min-w-[210px]">
+                            {item.storeDetails.map((sd, sIdx) => (
+                              <div
+                                key={`${sd.storeName}_${sIdx}`}
+                                className={sIdx > 0 ? 'pt-1.5 border-t border-slate-100' : ''}
+                              >
+                                <div className="font-bold text-slate-800">
+                                  {sIdx + 1}. {sd.storeName}
+                                </div>
+                                <div className="text-[10px] text-slate-500">
+                                  {sd.coverArea} ({sd.region})
+                                </div>
+                                <div className="text-[10px] font-mono tabular-nums text-slate-500">
+                                  Non-Lav: <span className="text-slate-700 font-semibold">{formatRupiah(sd.sellOutNonLavojoy)}</span> · Lav:{' '}
+                                  <span className="text-purple-700 font-semibold">{formatRupiah(sd.sellOutLavojoy)}</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <>
+                            <div className="font-bold text-slate-800">{item.storeName}</div>
+                            <div className="text-[10px] text-slate-500">{item.coverArea} ({item.region})</div>
+                          </>
+                        )}
                       </td>
-                      <td className="py-3 px-3 font-medium text-slate-700">{item.salesName}</td>
+                      <td className="py-3 px-3 font-medium text-slate-700 align-top">{item.salesName}</td>
 
                       {/* Non-Lavojoy */}
                       <td className="py-3 px-3 text-right font-mono text-slate-500 bg-teal-50/20">
@@ -2134,7 +2923,8 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                         </div>
                       </td>
                     </tr>
-                  ))
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -2172,8 +2962,8 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
             </div>
           </div>
 
-          {/* FILTER PERIODE BULAN KPI & TANGGAL TRANSAKSI TRAINER */}
-          <div className="mt-4 p-3.5 bg-gradient-to-r from-purple-50/70 via-indigo-50/40 to-slate-50 rounded-xl border border-purple-200">
+          {/* FILTER PERIODE BULAN KPI & CUT-OFF TANGGAL TRANSAKSI TRAINER (26 - 25) */}
+          <div className="mt-4 p-3.5 bg-gradient-to-r from-purple-50/70 via-indigo-50/40 to-slate-50 rounded-xl border border-purple-200 space-y-2.5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-2.5">
                 {/* FILTER BULAN KPI TRAINER */}
@@ -2193,10 +2983,10 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                   </select>
                 </div>
 
-                {/* Range Tanggal Transaksi */}
+                {/* Range Tanggal Transaksi Sell Out (Cut-off 26-25) */}
                 <div className="flex items-center gap-1.5 text-xs font-bold text-purple-900 ml-1">
                   <Calendar className="w-3.5 h-3.5 text-purple-600" />
-                  <span>Tanggal Transaksi:</span>
+                  <span>Cut-off Sell Out (26–25):</span>
                 </div>
 
                 <div className="flex items-center gap-1.5 bg-white px-2.5 py-1.5 rounded-lg border border-slate-300 shadow-2xs">
@@ -2224,28 +3014,74 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                 {(trainerStartDate || trainerEndDate) && (
                   <button
                     onClick={() => {
-                      setTrainerStartDate('');
-                      setTrainerEndDate('');
+                      if (payrollWindows.sellOutCutOffRange) {
+                        setTrainerStartDate(payrollWindows.sellOutCutOffRange.startIso);
+                        setTrainerEndDate(payrollWindows.sellOutCutOffRange.endIso);
+                      } else {
+                        setTrainerStartDate('');
+                        setTrainerEndDate('');
+                      }
                     }}
                     className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-lg bg-purple-100 text-purple-800 hover:bg-purple-200 transition-colors cursor-pointer"
                   >
                     <RotateCcw className="w-3 h-3" />
-                    <span>Reset Tanggal</span>
+                    <span>{payrollWindows.sellOutCutOffRange ? 'Reset ke 26–25' : 'Reset Tanggal'}</span>
                   </button>
                 )}
               </div>
 
-              <div className="text-[11px] font-mono flex items-center gap-2">
+              <div className="text-[11px] font-mono flex flex-wrap items-center gap-2">
                 <span className="font-bold text-indigo-800 bg-indigo-100/80 px-2.5 py-1 rounded-lg border border-indigo-200 flex items-center gap-1">
                   <Award className="w-3 h-3 text-indigo-600" />
                   KPI Terhubung: {trainerMonthPeriod}
                 </span>
                 {trainerStartDate || trainerEndDate ? (
                   <span className="font-semibold text-purple-700 bg-purple-50 px-2 py-0.5 rounded border border-purple-200">
-                    Filter: {trainerStartDate || 'Awal'} s/d {trainerEndDate || 'Sekarang'}
+                    Cut-off: {formatIsoShortId(trainerStartDate) || 'Awal'} s/d {formatIsoShortId(trainerEndDate) || 'Sekarang'} ({effectiveTrainerRecords.length} Sell Out)
                   </span>
                 ) : null}
               </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-purple-100">
+              <span className="text-[11px] font-medium text-slate-500 mr-1">Preset Cut-off 26–25:</span>
+              {(['FEBRUARI', 'MARET', 'OKTOBER', 'SEPTEMBER', 'AGUSTUS'] as const).map((mName) => {
+                const range = getCutOff26To25Range(mName, resolvedYear);
+                if (!range) return null;
+                const isActive = trainerStartDate === range.startIso && trainerEndDate === range.endIso;
+                return (
+                  <button
+                    key={mName}
+                    type="button"
+                    onClick={() => {
+                      setTrainerStartDate(range.startIso);
+                      setTrainerEndDate(range.endIso);
+                      setTrainerMonthPeriod(`${mName} ${resolvedYear}`);
+                    }}
+                    className={`px-2 py-1 text-[11px] font-semibold rounded-md transition-colors border cursor-pointer ${
+                      isActive
+                        ? 'bg-purple-600 text-white border-purple-600 shadow-2xs'
+                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    {mName.slice(0, 3)} ({range.startIso.slice(8)}/{range.startIso.slice(5, 7)}–25/{range.endIso.slice(5, 7)})
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => {
+                  setTrainerStartDate('');
+                  setTrainerEndDate('');
+                }}
+                className={`px-2 py-1 text-[11px] font-semibold rounded-md transition-colors border cursor-pointer ${
+                  !trainerStartDate && !trainerEndDate
+                    ? 'bg-slate-700 text-white border-slate-700 shadow-2xs'
+                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                Semua Periode
+              </button>
             </div>
           </div>
 
@@ -2830,7 +3666,9 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                 <h4 className="text-sm font-extrabold text-slate-900">
                   Edit Target BA: {editingBa.baName}
                 </h4>
-                <p className="text-xs text-slate-500 font-medium">{editingBa.storeName}</p>
+                <p className="text-xs text-slate-500 font-medium">
+                  {editingBa.storeName} ({editingBa.coverArea})
+                </p>
               </div>
               <button
                 onClick={() => setEditingBa(null)}
@@ -2925,20 +3763,92 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, fil
                 />
               </div>
 
-              <div>
-                <label className="text-xs font-bold text-slate-700 block mb-1">
-                  Bonus Produktivitas BA (Rp)
-                </label>
-                <input
-                  type="number"
-                  step="any"
-                  value={editSalesBonus}
-                  onChange={(e) => setEditSalesBonus(Math.max(0, Number(e.target.value)))}
-                  className="w-full px-3 py-2 text-xs font-mono font-bold rounded-xl border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
-                />
-                <span className="text-[10px] text-slate-500 mt-0.5 block">
-                  Standar sistem: Rp 500k (BA 45-54M), Rp 1M (BA ≥ 55M)
-                </span>
+              <div className="p-3 rounded-xl bg-emerald-50/60 border border-emerald-200 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-extrabold text-emerald-950 uppercase">
+                    Rincian Produktivitas BA Dicover Sales
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const sysSellOut = editingSales.systemCoveredBaTotalSellOut ?? 0;
+                      const sysCount = editingSales.systemCoveredBaCount ?? 0;
+                      setEditSalesCoveredSellOut(sysSellOut);
+                      setEditSalesCoveredBaCount(sysCount);
+                      setEditSalesBonus(computeAutoBonusFromProductivity(sysSellOut, sysCount));
+                    }}
+                    className="text-[10px] font-bold text-blue-700 hover:underline cursor-pointer flex items-center gap-0.5"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Reset ke Data Sistem</span>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="text-[11px] font-bold text-slate-700 block mb-1">
+                      Total Sell Out Covered BA (Rp)
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      min={0}
+                      value={editSalesCoveredSellOut}
+                      onChange={(e) => {
+                        const val = Math.max(0, Number(e.target.value) || 0);
+                        setEditSalesCoveredSellOut(val);
+                        setEditSalesBonus(computeAutoBonusFromProductivity(val, editSalesCoveredBaCount));
+                      }}
+                      className="w-full px-2.5 py-1.5 text-xs font-mono font-bold rounded-lg border border-emerald-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-bold text-slate-700 block mb-1">
+                      Jumlah BA Dicover
+                    </label>
+                    <input
+                      type="number"
+                      step={1}
+                      min={0}
+                      value={editSalesCoveredBaCount}
+                      onChange={(e) => {
+                        const cnt = Math.max(0, Math.round(Number(e.target.value) || 0));
+                        setEditSalesCoveredBaCount(cnt);
+                        setEditSalesBonus(computeAutoBonusFromProductivity(editSalesCoveredSellOut, cnt));
+                      }}
+                      className="w-full px-2.5 py-1.5 text-xs font-mono font-bold rounded-lg border border-emerald-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="p-2 rounded-lg bg-white border border-emerald-200 text-[11px] font-mono flex items-center justify-between">
+                  <span className="text-slate-600">
+                    Produktivitas ({formatRupiah(editSalesCoveredSellOut, true)} ÷ {editSalesCoveredBaCount} BA):
+                  </span>
+                  <strong className="text-emerald-800">
+                    {formatRupiah(
+                      editSalesCoveredBaCount > 0
+                        ? Math.round(editSalesCoveredSellOut / editSalesCoveredBaCount)
+                        : 0
+                    )}
+                  </strong>
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Bonus Produktivitas BA untuk Sales (Rp)
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={editSalesBonus}
+                    onChange={(e) => setEditSalesBonus(Math.max(0, Number(e.target.value)))}
+                    className="w-full px-3 py-2 text-xs font-mono font-bold rounded-xl border border-slate-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+                  />
+                  <span className="text-[10px] text-slate-500 mt-0.5 block">
+                    Standar sistem: Flat Rp 500rb (Produktivitas 45–54 Jt) | Flat Rp 1 Jt (Produktivitas ≥ 55 Jt) — tidak dikali jumlah BA
+                  </span>
+                </div>
               </div>
 
               <div>

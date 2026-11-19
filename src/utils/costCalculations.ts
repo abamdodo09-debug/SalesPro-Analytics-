@@ -2,6 +2,7 @@ import {
   TransactionRecord,
   SalesSalaryItem,
   BaSalaryItem,
+  BaCoveredStoreDetail,
   TrainerSalaryItem,
   AreaCostSummary,
   SalesCoveredBaItem,
@@ -10,9 +11,58 @@ import {
 import { loadFocusOverrides, DEFAULT_FOCUS_TARGET_PCS } from '../services/focusProductService';
 import { loadKpiTrainerData } from '../services/kpiTrainerService';
 import { getTrainerForRecord, isFocusProduct } from './analytics';
+import {
+  WeeklyStoreConfig,
+  normalizeStoreAlnum,
+  resolveWeeklyBaStores,
+} from './weeklyBaRegistry';
 
 export const DEFAULT_TRAINER_BASE_SALARY = 3900000;
 export const DEFAULT_TRAINER_TRANSPORT_ALLOWANCE = 500000;
+export const STORAGE_KEY_SALES_BA_PRODUCTIVITY = 'salespro_sales_ba_productivity_v1';
+export const STORAGE_KEY_SALES_BONUSES_V2 = 'salespro_custom_sales_bonuses_v2';
+const LEGACY_STORAGE_KEY_SALES_BONUSES = 'salespro_custom_sales_bonuses';
+
+const normalizeBaKey = (name: string): string =>
+  (name || '').trim().toUpperCase().replace(/\s+/g, ' ');
+
+const isGenericBaPlaceholder = (normalizedKey: string): boolean =>
+  !normalizedKey ||
+  normalizedKey === '-' ||
+  normalizedKey === 'NON BA' ||
+  normalizedKey === 'NON-BA' ||
+  normalizedKey === '- (NON-BA)' ||
+  normalizedKey === 'STANDBY' ||
+  normalizedKey === 'BA COUNTER' ||
+  normalizedKey === 'KOSONG' ||
+  normalizedKey === 'VACANT';
+
+export interface SalesBaProductivityOverride {
+  customTotalSellOut?: number;
+  customBaCount?: number;
+}
+
+export function loadSalesBaProductivityOverrides(): Record<string, SalesBaProductivityOverride> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_SALES_BA_PRODUCTIVITY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function loadSalesBonusOverrides(): Record<string, number> {
+  try {
+    // Hapus cache lama (skema lama per-BA) agar tidak menimpa perhitungan flat per-Sales (500rb / 1Jt)
+    if (localStorage.getItem(LEGACY_STORAGE_KEY_SALES_BONUSES) !== null) {
+      localStorage.removeItem(LEGACY_STORAGE_KEY_SALES_BONUSES);
+    }
+    const raw = localStorage.getItem(STORAGE_KEY_SALES_BONUSES_V2);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
 
 export interface TrainerCostConfigInput {
   id: string;
@@ -186,15 +236,16 @@ export function calculateTrainerSalary(
 /**
  * ATURAN PERHITUNGAN GAJI & INSENTIF SALES:
  * - Gaji Pokok: Rp 4.900.000
- * - Capai Sell In >= 100%: Insentif 4% x Pencapaian Sell In + Rp 4.900.000
+ * - Capai Sell In >= 100%: Insentif 0,4% x Pencapaian Sell In + Rp 4.900.000
  * - Capai Sell In 80% - 99%: Insentif 0,2% x Pencapaian Sell In + Rp 4.900.000
  * - Capai Sell In < 80%: Insentif 0% + Rp 4.900.000 (Belum mencapai batas minimal insentif 80%)
  *
  * INSENTIF & PENALTI TAMBAHAN PRODUKTIVITAS SELL OUT BA (YANG DICOVER SALES):
- * - Produktivitas Sell Out BA < Rp 35.000.000: Diberi SP1 dan Denda -Rp 300.000 per BA
- * - Produktivitas Sell Out BA Rp 45.000.000 - Rp 54.999.999: Diberi Insentif +Rp 500.000 per BA
- * - Produktivitas Sell Out BA >= Rp 55.000.000: Diberi Insentif +Rp 1.000.000 per BA
- * - Produktivitas Sell Out BA Rp 35.000.000 - Rp 44.999.999: Normal (Rp 0)
+ * - Produktivitas BA per Sales = Total Semua Sell Out BA Dicover ÷ Jumlah BA yang Dicover Sales
+ * - Jika Produktivitas BA Rp 45.000.000 - Rp 54.999.999: Bonus Produktivitas BA untuk Sales +Rp 500.000 per Sales
+ * - Jika Produktivitas BA >= Rp 55.000.000: Bonus Produktivitas BA untuk Sales +Rp 1.000.000 per Sales
+ * - Produktivitas BA < Rp 45.000.000: Bonus Rp 0
+ * - Denda Produktivitas BA: Sell Out BA < Rp 35.000.000 dikenakan SP1 dan Denda -Rp 300.000 per BA
  */
 export function calculateSalesSalary(
   salesName: string,
@@ -204,7 +255,9 @@ export function calculateSalesSalary(
   spv: string = '-',
   coveredBaList: { storeName: string; baName: string; sellOut: number }[] = [],
   manualBonusOverride?: number,
-  manualPenaltyOverride?: number
+  manualPenaltyOverride?: number,
+  manualTotalSellOutOverride?: number,
+  manualBaCountOverride?: number
 ): SalesSalaryItem {
   const target = sellInTarget > 0 ? sellInTarget : 1;
   const achievementPercent = (sellInActual / target) * 100;
@@ -215,12 +268,12 @@ export function calculateSalesSalary(
   let tierColor = '';
 
   if (achievementPercent >= 120) {
-    incentivePercent = 4.0;
-    tierLabel = 'Super Target (≥ 120%) - Insentif 4%';
+    incentivePercent = 0.4;
+    tierLabel = 'Super Target (≥ 120%) - Insentif 0,4%';
     tierColor = 'bg-emerald-100 text-emerald-800 border-emerald-300';
   } else if (achievementPercent >= 100) {
-    incentivePercent = 4.0;
-    tierLabel = 'Capai Target (≥ 100%) - Insentif 4%';
+    incentivePercent = 0.4;
+    tierLabel = 'Capai Target (≥ 100%) - Insentif 0,4%';
     tierColor = 'bg-emerald-100 text-emerald-800 border-emerald-300';
   } else if (achievementPercent >= 80) {
     incentivePercent = 0.2;
@@ -235,7 +288,6 @@ export function calculateSalesSalary(
   const incentiveNominal = Math.round((incentivePercent / 100) * sellInActual);
 
   // Evaluasi Produktivitas BA yang dicover oleh Sales
-  let calculatedBonus = 0;
   let calculatedPenalty = 0;
   let spCount = 0;
 
@@ -252,14 +304,12 @@ export function calculateSalesSalary(
       description = 'BA < 35 Jt: Denda -Rp 300.000 (SP1)';
     } else if (ba.sellOut >= 55000000) {
       status = 'bonus_1m';
-      amount = 1000000;
-      calculatedBonus += 1000000;
-      description = 'BA ≥ 55 Jt: Bonus +Rp 1.000.000';
+      amount = 0;
+      description = 'BA ≥ 55 Jt';
     } else if (ba.sellOut >= 45000000) {
       status = 'bonus_500k';
-      amount = 500000;
-      calculatedBonus += 500000;
-      description = 'BA 45-54 Jt: Bonus +Rp 500.000';
+      amount = 0;
+      description = 'BA 45-54 Jt';
     }
 
     return {
@@ -272,8 +322,30 @@ export function calculateSalesSalary(
     };
   });
 
+  // Hitung Produktivitas Rata-Rata BA = Total Semua Sell Out BA Dicover / Jumlah BA Dicover
+  const systemTotalSellOut = coveredBaList.reduce((acc, ba) => acc + (ba.sellOut || 0), 0);
+  const systemBaCount = coveredBaList.length;
+
+  const hasSellOutOverride = manualTotalSellOutOverride !== undefined && manualTotalSellOutOverride >= 0;
+  const hasBaCountOverride = manualBaCountOverride !== undefined && manualBaCountOverride >= 0;
+
+  const coveredBaTotalSellOut = hasSellOutOverride ? manualTotalSellOutOverride! : systemTotalSellOut;
+  const effectiveCoveredBaCount = hasBaCountOverride ? manualBaCountOverride! : systemBaCount;
+  const baProductivityAverage =
+    effectiveCoveredBaCount > 0 ? Math.round(coveredBaTotalSellOut / effectiveCoveredBaCount) : 0;
+
+  let calculatedBonus = 0;
+  if (effectiveCoveredBaCount > 0) {
+    if (baProductivityAverage >= 55000000) {
+      calculatedBonus = 1000000;
+    } else if (baProductivityAverage >= 45000000) {
+      calculatedBonus = 500000;
+    }
+  }
+
   const baProductivityBonus = manualBonusOverride !== undefined ? manualBonusOverride : calculatedBonus;
   const baProductivityPenalty = manualPenaltyOverride !== undefined ? manualPenaltyOverride : calculatedPenalty;
+  const isProductivityEdited = hasSellOutOverride || hasBaCountOverride || manualBonusOverride !== undefined;
 
   const totalSalary = baseSalary + incentiveNominal + baProductivityBonus - baProductivityPenalty;
 
@@ -290,8 +362,13 @@ export function calculateSalesSalary(
     incentivePercent,
     incentiveNominal,
     coveredStores: coveredBaList.map((b) => b.storeName),
-    coveredBaCount: coveredBaList.length,
+    coveredBaCount: effectiveCoveredBaCount,
     coveredBaList: detailedBaList,
+    coveredBaTotalSellOut,
+    systemCoveredBaTotalSellOut: systemTotalSellOut,
+    systemCoveredBaCount: systemBaCount,
+    baProductivityAverage,
+    isProductivityEdited,
     baProductivityBonus,
     baProductivityPenalty,
     baProductivitySpCount: spCount,
@@ -468,6 +545,21 @@ export function calculateBaSalary(
 /**
  * Agregasi Keseluruhan Cost Area dari Transaksi yang Terfilter
  */
+export interface AggregateCostOptions {
+  strictSellInForSales?: boolean;
+  strictSellOutForBa?: boolean;
+  disableDummyBaFallback?: boolean;
+  disableTrainerDummyActualFallback?: boolean;
+  activeTrainersOnlyFromRecords?: boolean;
+  zeroCostOnEmptyRecords?: boolean;
+  sellOutRecordsOverride?: TransactionRecord[];
+  trainerSellOutRecordsOverride?: TransactionRecord[];
+  weeklyBaStoresOverride?: WeeklyStoreConfig[];
+  syncBaFromWeeklyRegistry?: boolean;
+  skipEmptyPeriodBaPenalty?: boolean;
+  salesBaProductivityOverrides?: Record<string, SalesBaProductivityOverride>;
+}
+
 export function aggregateAreaCost(
   records: TransactionRecord[],
   customSalesTargets: Record<string, number> = {},
@@ -489,12 +581,51 @@ export function aggregateAreaCost(
   trainerMonthPeriod: string = 'OKTOBER 2026',
   trainerConfigsOverride?: TrainerCostConfigInput[],
   trainerMonthlyTargetsOverride?: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; notes?: string }>,
-  baFocusTargetsOverride?: Record<string, number>
+  baFocusTargetsOverride?: Record<string, number>,
+  options?: AggregateCostOptions
 ): AreaCostSummary {
   const activeTrainerDefs =
     trainerConfigsOverride && trainerConfigsOverride.length > 0
       ? trainerConfigsOverride
       : DEFAULT_TRAINERS_DATA;
+
+  const sellInSource = records;
+  const baSellOutSource = options?.sellOutRecordsOverride ?? records;
+  const trainerSellOutSource =
+    options?.trainerSellOutRecordsOverride ?? options?.sellOutRecordsOverride ?? records;
+
+  // Build case-insensitive lookup maps for targets & adjustments
+  const toUpperLookup = <T,>(src?: Record<string, T>): Record<string, T> => {
+    const out: Record<string, T> = {};
+    if (!src) return out;
+    for (const [k, v] of Object.entries(src)) {
+      out[k] = v;
+      out[k.trim().toUpperCase()] = v;
+    }
+    return out;
+  };
+  const salesTargetLookup = toUpperLookup(customSalesTargets);
+  const baNonLavojoyLookup = toUpperLookup(customBaNonLavojoyTargets);
+  const baLavojoyLookup = toUpperLookup(customBaLavojoyTargets);
+  const baFocusTargetLookup = toUpperLookup(baFocusTargetsOverride);
+  const salesBonusLookup = toUpperLookup(customSalesBonuses);
+  const salesPenaltyLookup = toUpperLookup(customSalesPenalties);
+  const salesProdLookup = toUpperLookup(
+    options?.salesBaProductivityOverrides ?? loadSalesBaProductivityOverrides()
+  );
+
+  // Resolve Weekly BA Store registry if provided or requested
+  let weeklyBaList: WeeklyStoreConfig[] | undefined = undefined;
+  if (options?.weeklyBaStoresOverride !== undefined) {
+    const dedup = new Map<string, WeeklyStoreConfig>();
+    for (const ws of options.weeklyBaStoresOverride) {
+      const k = (ws.storeName || '').trim().toLowerCase();
+      if (k && !dedup.has(k)) dedup.set(k, ws);
+    }
+    weeklyBaList = Array.from(dedup.values());
+  } else if (options?.syncBaFromWeeklyRegistry) {
+    weeklyBaList = resolveWeeklyBaStores(baSellOutSource);
+  }
 
   // 1. Group by Sales Representative (SELL IN)
   const salesMap: Record<
@@ -525,52 +656,175 @@ export function aggregateAreaCost(
     }
   > = {};
 
+  const baLookupByLower = new Map<string, string>();
+  const baLookupByAlnum = new Map<string, string>();
+  const weeklyTrainerByStoreLower = new Map<string, string>();
+
+  if (weeklyBaList) {
+    weeklyBaList.forEach((ws, idx) => {
+      const storeName = ws.storeName.trim();
+      const salesName = (ws.salesName || '-').trim().toUpperCase();
+      baStoreMap[storeName] = {
+        baName: ws.baName || 'BA COUNTER',
+        baNumber: ws.id ? ws.id.toUpperCase() : `BA-${String(idx + 1).padStart(3, '0')}`,
+        storeName,
+        coverArea: ws.coverArea || '-',
+        region: ws.region || '-',
+        salesName,
+        spv: 'WIDODO',
+        sellOutNonLavojoy: 0,
+        sellOutLavojoy: 0,
+        sellOutActual: 0,
+        focusActualPcs: 0,
+      };
+      baLookupByLower.set(storeName.toLowerCase(), storeName);
+      const alnum = normalizeStoreAlnum(storeName);
+      if (alnum) baLookupByAlnum.set(alnum, storeName);
+      if (ws.trainerName) {
+        weeklyTrainerByStoreLower.set(storeName.toLowerCase(), ws.trainerName.trim().toUpperCase());
+      }
+
+      if (salesName && salesName !== '-' && salesName !== 'ALL' && salesName !== 'OPERASIONAL' && salesName !== 'SALES UMUM') {
+        if (!salesMap[salesName]) {
+          salesMap[salesName] = {
+            sellInActual: 0,
+            coverArea: ws.coverArea || '-',
+            spv: 'WIDODO',
+            coveredStores: new Set<string>(),
+          };
+        }
+        salesMap[salesName].coveredStores.add(storeName);
+      }
+    });
+  }
+
   // 3. Group by Trainer (Produk Fokus & Sell Out)
   const trainerMap: Record<string, { focusQty: number; sellOut: number }> = {};
   for (const t of activeTrainerDefs) {
     trainerMap[t.trainerName] = { focusQty: 0, sellOut: 0 };
   }
 
+  if (
+    options?.zeroCostOnEmptyRecords &&
+    sellInSource.length === 0 &&
+    baSellOutSource.length === 0 &&
+    trainerSellOutSource.length === 0 &&
+    (!weeklyBaList || weeklyBaList.length === 0)
+  ) {
+    return {
+      totalCost: 0,
+      totalSalesCost: 0,
+      totalSalesBase: 0,
+      totalSalesIncentive: 0,
+      totalBaCost: 0,
+      totalBaBase: 0,
+      totalBaIncentive: 0,
+      totalBaFocusIncentive: 0,
+      totalBaFocusPenalty: 0,
+      totalBaFocusNetBonus: 0,
+      totalTrainerCost: 0,
+      totalTrainerBase: 0,
+      totalTrainerTransport: 0,
+      totalTrainerFocusIncentive: 0,
+      totalTrainerFocusPenalty: 0,
+      totalTrainerKpiIncentive: 0,
+      totalTrainerKpiPenalty: 0,
+      totalAreaRevenue: 0,
+      costToRevenueRatio: 0,
+      salesCount: 0,
+      baCount: 0,
+      trainerCount: 0,
+      salesList: [],
+      baList: [],
+      trainerList: [],
+    };
+  }
+
   let totalAreaRevenue = 0;
 
-  for (const r of records) {
+  // PASS A: Sales SELL IN (1 - akhir bulan) & Total Omset Area
+  for (const r of sellInSource) {
     const val = r.VALUE || 0;
-    totalAreaRevenue += val;
+    const ketUpper = (r.KET || '').trim().toUpperCase();
+    const isSellInTx = ketUpper === 'SELL IN' || ketUpper.includes('SELL IN') || !ketUpper;
 
-    // Track for Trainer
-    const tName = getTrainerForRecord(r);
-    if (!trainerMap[tName]) {
-      trainerMap[tName] = { focusQty: 0, sellOut: 0 };
-    }
-    trainerMap[tName].sellOut += val;
-    if (isFocusProduct(r.PRODUK_FOCUS || r)) {
-      trainerMap[tName].focusQty += (r.QTY || 0);
+    if (!options?.strictSellInForSales || isSellInTx) {
+      totalAreaRevenue += val;
     }
 
-    // Aggregate Sales (fokus Sell In)
     if (r.SALES && r.SALES !== '-' && r.SALES !== 'ALL') {
-      if (!salesMap[r.SALES]) {
-        salesMap[r.SALES] = {
+      const salesKey = r.SALES.trim().toUpperCase();
+      if (!salesMap[salesKey]) {
+        salesMap[salesKey] = {
           sellInActual: 0,
           coverArea: r.COVER_AREA || '-',
           spv: r.SPV || '-',
           coveredStores: new Set<string>(),
         };
-      }
-      if (r.NAMA_STORE) {
-        salesMap[r.SALES].coveredStores.add(r.NAMA_STORE);
-      }
-      // Akumulasikan penjualan Sell In
-      if (r.KET === 'SELL IN' || !r.KET) {
-        salesMap[r.SALES].sellInActual += val;
       } else {
-        salesMap[r.SALES].sellInActual += val;
+        if (salesMap[salesKey].coverArea === '-' && r.COVER_AREA) {
+          salesMap[salesKey].coverArea = r.COVER_AREA;
+        }
+        if (salesMap[salesKey].spv === '-' && r.SPV) {
+          salesMap[salesKey].spv = r.SPV;
+        }
+      }
+      if (r.NAMA_STORE && !weeklyBaList) {
+        salesMap[salesKey].coveredStores.add(r.NAMA_STORE);
+      }
+      if (options?.strictSellInForSales) {
+        if (isSellInTx) {
+          salesMap[salesKey].sellInActual += val;
+        }
+      } else {
+        salesMap[salesKey].sellInActual += val;
       }
     }
+  }
 
-    // Toko yang ada BA
-    const hasBa = r.BA && r.BA !== '-' && r.BA.trim().length > 0;
-    if (hasBa) {
+  if (totalAreaRevenue === 0 && baSellOutSource.length > 0 && baSellOutSource !== sellInSource) {
+    for (const r of baSellOutSource) {
+      totalAreaRevenue += r.VALUE || 0;
+    }
+  }
+
+  // PASS B: BA SELL OUT (Cut-off tgl 26 bulan lalu s/d 25 bulan berjalan)
+  for (const r of baSellOutSource) {
+    const val = r.VALUE || 0;
+    const ketUpper = (r.KET || '').trim().toUpperCase();
+    const isSellOutTx = ketUpper === 'SELL OUT' || ketUpper.includes('SELL OUT') || !ketUpper;
+    if (options?.strictSellOutForBa && !isSellOutTx) continue;
+
+    if (weeklyBaList) {
+      const rawStore = (r.NAMA_STORE || '').trim();
+      if (!rawStore) continue;
+      const matchedKey =
+        baLookupByLower.get(rawStore.toLowerCase()) ||
+        baLookupByAlnum.get(normalizeStoreAlnum(rawStore));
+      if (!matchedKey || !baStoreMap[matchedKey]) continue;
+
+      if (r.BA && r.BA !== '-' && r.BA.trim().length > 0) {
+        const baTrim = r.BA.trim();
+        const baNorm = normalizeBaKey(baTrim);
+        if (!isGenericBaPlaceholder(baNorm)) {
+          baStoreMap[matchedKey].baName = baTrim;
+        }
+      }
+
+      const isLavojoy = (r.BRAND || '').trim().toLowerCase() === 'lavojoy';
+      if (isLavojoy) {
+        baStoreMap[matchedKey].sellOutLavojoy += val;
+      } else {
+        baStoreMap[matchedKey].sellOutNonLavojoy += val;
+      }
+      baStoreMap[matchedKey].sellOutActual += val;
+
+      if (isFocusProduct(r.PRODUK_FOCUS || r)) {
+        baStoreMap[matchedKey].focusActualPcs += (r.QTY || 0);
+      }
+    } else {
+      const baNorm = normalizeBaKey(r.BA || '');
+      if (isGenericBaPlaceholder(baNorm)) continue;
       const storeKey = r.NAMA_STORE;
       if (!baStoreMap[storeKey]) {
         baStoreMap[storeKey] = {
@@ -594,7 +848,6 @@ export function aggregateAreaCost(
         baStoreMap[storeKey].spv = r.SPV;
       }
 
-      // Pisahkan brand Lavojoy dan Non-Lavojoy
       const isLavojoy = (r.BRAND || '').trim().toLowerCase() === 'lavojoy';
       if (isLavojoy) {
         baStoreMap[storeKey].sellOutLavojoy += val;
@@ -603,7 +856,6 @@ export function aggregateAreaCost(
       }
       baStoreMap[storeKey].sellOutActual += val;
 
-      // Akumulasi penjualan produk fokus (Pcs)
       const isFocus = isFocusProduct(r.PRODUK_FOCUS || r);
       if (isFocus && (r.KET === 'SELL OUT' || !r.KET || r.KET === 'SELL IN')) {
         baStoreMap[storeKey].focusActualPcs += (r.QTY || 0);
@@ -611,10 +863,38 @@ export function aggregateAreaCost(
     }
   }
 
+  // PASS C: Trainer SELL OUT & Produk Fokus (Cut-off tgl 26 bulan lalu s/d 25 bulan berjalan)
+  for (const r of trainerSellOutSource) {
+    const val = r.VALUE || 0;
+    const ketUpper = (r.KET || '').trim().toUpperCase();
+    const isSellOutTx = ketUpper === 'SELL OUT' || ketUpper.includes('SELL OUT') || !ketUpper;
+    if (options?.strictSellOutForBa && !isSellOutTx) continue;
+
+    let tName = getTrainerForRecord(r);
+    if (weeklyBaList && r.NAMA_STORE) {
+      const matchedStoreKey =
+        baLookupByLower.get(r.NAMA_STORE.trim().toLowerCase()) ||
+        baLookupByAlnum.get(normalizeStoreAlnum(r.NAMA_STORE));
+      if (matchedStoreKey && weeklyTrainerByStoreLower.has(matchedStoreKey.toLowerCase())) {
+        const wt = weeklyTrainerByStoreLower.get(matchedStoreKey.toLowerCase())!;
+        if (wt && wt !== 'ONLINE') {
+          tName = wt;
+        }
+      }
+    }
+    if (!trainerMap[tName]) {
+      trainerMap[tName] = { focusQty: 0, sellOut: 0 };
+    }
+    trainerMap[tName].sellOut += val;
+    if (isFocusProduct(r.PRODUK_FOCUS || r)) {
+      trainerMap[tName].focusQty += (r.QTY || 0);
+    }
+  }
+
   // Fallback jika tidak ada data BA terfilter
-  if (Object.keys(baStoreMap).length === 0) {
+  if (Object.keys(baStoreMap).length === 0 && !options?.disableDummyBaFallback) {
     const storeTotals: Record<string, { value: number; region: string; area: string; sales: string; spv: string; lavojoy: number; nonLavojoy: number; focusQty: number }> = {};
-    for (const r of records) {
+    for (const r of baSellOutSource) {
       if (r.NAMA_STORE) {
         if (!storeTotals[r.NAMA_STORE]) {
           storeTotals[r.NAMA_STORE] = { value: 0, region: r.REGION || '-', area: r.COVER_AREA || '-', sales: r.SALES || '-', spv: r.SPV || '-', lavojoy: 0, nonLavojoy: 0, focusQty: 0 };
@@ -656,19 +936,162 @@ export function aggregateAreaCost(
       });
   }
 
+  // Gabungkan entri BA jika memiliki Nama BA yang sama meskipun beda Nama Toko & Area
+  interface MergedBaAccumulator {
+    baName: string;
+    baNumber: string;
+    storeName: string;
+    coverArea: string;
+    region: string;
+    salesName: string;
+    spv: string;
+    sellOutNonLavojoy: number;
+    sellOutLavojoy: number;
+    sellOutActual: number;
+    focusActualPcs: number;
+    storeDetails: BaCoveredStoreDetail[];
+    storeNamesSet: Set<string>;
+    coverAreasSet: Set<string>;
+    regionsSet: Set<string>;
+    salesNamesSet: Set<string>;
+    spvsSet: Set<string>;
+  }
+
+  const mergedBaMap = new Map<string, MergedBaAccumulator>();
+  const addUniqueToken = (set: Set<string>, rawValue: string) => {
+    const clean = (rawValue || '').trim();
+    if (!clean || clean === '-') return;
+    for (const part of clean.split(',')) {
+      const p = part.trim();
+      if (!p || p === '-') continue;
+      const upper = p.toUpperCase();
+      const exists = Array.from(set).some((x) => x.toUpperCase() === upper);
+      if (!exists) set.add(p);
+    }
+  };
+
+  Object.entries(baStoreMap).forEach(([rawKey, entry]) => {
+    const baNorm = normalizeBaKey(entry.baName);
+    const groupKey = isGenericBaPlaceholder(baNorm) ? `__RAW__${rawKey}` : baNorm;
+
+    const existing = mergedBaMap.get(groupKey);
+    const detailItem: BaCoveredStoreDetail = {
+      storeName: entry.storeName,
+      coverArea: entry.coverArea || '-',
+      region: entry.region || '-',
+      salesName: entry.salesName || '-',
+      sellOutNonLavojoy: entry.sellOutNonLavojoy,
+      sellOutLavojoy: entry.sellOutLavojoy,
+    };
+
+    if (!existing) {
+      const acc: MergedBaAccumulator = {
+        baName: entry.baName.trim(),
+        baNumber: entry.baNumber,
+        storeName: entry.storeName,
+        coverArea: entry.coverArea || '-',
+        region: entry.region || '-',
+        salesName: entry.salesName || '-',
+        spv: entry.spv || '-',
+        sellOutNonLavojoy: entry.sellOutNonLavojoy,
+        sellOutLavojoy: entry.sellOutLavojoy,
+        sellOutActual: entry.sellOutActual,
+        focusActualPcs: entry.focusActualPcs,
+        storeDetails: [detailItem],
+        storeNamesSet: new Set<string>(),
+        coverAreasSet: new Set<string>(),
+        regionsSet: new Set<string>(),
+        salesNamesSet: new Set<string>(),
+        spvsSet: new Set<string>(),
+      };
+      addUniqueToken(acc.storeNamesSet, entry.storeName);
+      addUniqueToken(acc.coverAreasSet, entry.coverArea);
+      addUniqueToken(acc.regionsSet, entry.region);
+      addUniqueToken(acc.salesNamesSet, entry.salesName);
+      addUniqueToken(acc.spvsSet, entry.spv);
+      mergedBaMap.set(groupKey, acc);
+    } else {
+      existing.sellOutNonLavojoy += entry.sellOutNonLavojoy;
+      existing.sellOutLavojoy += entry.sellOutLavojoy;
+      existing.sellOutActual += entry.sellOutActual;
+      existing.focusActualPcs += entry.focusActualPcs;
+
+      const storeUpper = entry.storeName.trim().toUpperCase();
+      const existingDetail = existing.storeDetails.find(
+        (d) => d.storeName.trim().toUpperCase() === storeUpper
+      );
+      if (existingDetail) {
+        existingDetail.sellOutNonLavojoy += entry.sellOutNonLavojoy;
+        existingDetail.sellOutLavojoy += entry.sellOutLavojoy;
+      } else {
+        existing.storeDetails.push(detailItem);
+      }
+
+      addUniqueToken(existing.storeNamesSet, entry.storeName);
+      addUniqueToken(existing.coverAreasSet, entry.coverArea);
+      addUniqueToken(existing.regionsSet, entry.region);
+      addUniqueToken(existing.salesNamesSet, entry.salesName);
+      addUniqueToken(existing.spvsSet, entry.spv);
+
+      existing.storeName =
+        existing.storeNamesSet.size > 0 ? Array.from(existing.storeNamesSet).join(', ') : existing.storeName;
+      existing.coverArea =
+        existing.coverAreasSet.size > 0 ? Array.from(existing.coverAreasSet).join(', ') : '-';
+      existing.region =
+        existing.regionsSet.size > 0 ? Array.from(existing.regionsSet).join(', ') : '-';
+      existing.salesName =
+        existing.salesNamesSet.size > 0 ? Array.from(existing.salesNamesSet).join(', ') : '-';
+      existing.spv =
+        existing.spvsSet.size > 0 ? Array.from(existing.spvsSet).join(', ') : '-';
+    }
+  });
+
   // Load Focus Product Overrides (LocalStorage)
   const focusOverrides = customBaFocusOverrides && Object.keys(customBaFocusOverrides).length > 0
     ? customBaFocusOverrides
     : loadFocusOverrides();
+  const focusOverrideUpper = toUpperLookup(focusOverrides);
 
-  // Calculate BA Salaries with Focus Product Rules
-  const baList: BaSalaryItem[] = Object.values(baStoreMap)
+  const lookupByBaOrStore = <T,>(
+    map: Record<string, T>,
+    baName: string,
+    mergedStoreName: string,
+    storeDetails: BaCoveredStoreDetail[]
+  ): T | undefined => {
+    const baTrim = baName.trim();
+    const baUpper = normalizeBaKey(baName);
+    if (map[baTrim] !== undefined) return map[baTrim];
+    if (map[baUpper] !== undefined) return map[baUpper];
+    const storeUpper = mergedStoreName.trim().toUpperCase();
+    if (map[mergedStoreName] !== undefined) return map[mergedStoreName];
+    if (map[storeUpper] !== undefined) return map[storeUpper];
+    for (const sd of storeDetails) {
+      const sTrim = sd.storeName.trim();
+      const sUp = sTrim.toUpperCase();
+      if (map[sTrim] !== undefined) return map[sTrim];
+      if (map[sUp] !== undefined) return map[sUp];
+    }
+    return undefined;
+  };
+
+  // Calculate BA Salaries with Focus Product Rules (sudah digabung per Nama BA)
+  const baList: BaSalaryItem[] = Array.from(mergedBaMap.values())
     .map((ba) => {
-      const targetNonLavojoy = customBaNonLavojoyTargets[ba.storeName] || defaultBaNonLavojoyTarget;
-      const targetLavojoy = customBaLavojoyTargets[ba.storeName] || defaultBaLavojoyTarget;
+      const targetNonLavojoy =
+        lookupByBaOrStore(baNonLavojoyLookup, ba.baName, ba.storeName, ba.storeDetails) ||
+        defaultBaNonLavojoyTarget;
+      const targetLavojoy =
+        lookupByBaOrStore(baLavojoyLookup, ba.baName, ba.storeName, ba.storeDetails) ||
+        defaultBaLavojoyTarget;
 
-      const ov = focusOverrides[ba.storeName] || focusOverrides[ba.baName] || {};
-      const monthFocusTarget = baFocusTargetsOverride?.[ba.storeName] ?? baFocusTargetsOverride?.[ba.baName];
+      const ov =
+        lookupByBaOrStore(focusOverrideUpper, ba.baName, ba.storeName, ba.storeDetails) || {};
+      const monthFocusTarget = lookupByBaOrStore(
+        baFocusTargetLookup,
+        ba.baName,
+        ba.storeName,
+        ba.storeDetails
+      );
       const fTarget =
         monthFocusTarget !== undefined && monthFocusTarget > 0
           ? monthFocusTarget
@@ -677,7 +1100,10 @@ export function aggregateAreaCost(
           : defaultBaFocusTarget;
       const fActual = ov.customActualPcs !== undefined && ov.customActualPcs >= 0 ? ov.customActualPcs : ba.focusActualPcs;
 
-      return calculateBaSalary(
+      const suppressFocusPenaltyOnEmpty =
+        Boolean(options?.skipEmptyPeriodBaPenalty && baSellOutSource.length === 0 && fActual === 0);
+
+      const salaryItem = calculateBaSalary(
         ba.baName,
         ba.baNumber,
         ba.storeName,
@@ -692,40 +1118,116 @@ export function aggregateAreaCost(
         fTarget,
         fActual,
         ov.customIncentive,
-        ov.customPenalty
+        suppressFocusPenaltyOnEmpty ? 0 : ov.customPenalty
       );
+      salaryItem.storeDetails = ba.storeDetails;
+      return salaryItem;
     })
     .sort((a, b) => b.sellOutActual - a.sellOutActual);
 
-  // Map BA per store for sales lookup
+  // Map BA per store for sales lookup (daftarkan semua toko gabungan milik BA tsb)
   const baByStoreLookup: Record<string, BaSalaryItem> = {};
   for (const ba of baList) {
     baByStoreLookup[ba.storeName] = ba;
+    baByStoreLookup[ba.storeName.trim().toUpperCase()] = ba;
+    if (ba.storeDetails) {
+      for (const sd of ba.storeDetails) {
+        baByStoreLookup[sd.storeName] = ba;
+        baByStoreLookup[sd.storeName.trim().toUpperCase()] = ba;
+      }
+    }
   }
+
+  const suppressSalesBaPenaltyOnEmpty =
+    Boolean(options?.skipEmptyPeriodBaPenalty && baSellOutSource.length === 0);
 
   // Calculate Sales Salaries with BA Productivity connection
   const salesList: SalesSalaryItem[] = Object.entries(salesMap)
     .map(([sName, data]) => {
-      const target = customSalesTargets[sName] || defaultSalesTarget;
+      const sUpper = sName.trim().toUpperCase();
+      const target = salesTargetLookup[sName] || salesTargetLookup[sUpper] || defaultSalesTarget;
 
-      // Ambil daftar BA yang berada di gerai yang dicover oleh sales ini
+      // Ambil daftar BA yang berada di gerai yang dicover oleh sales ini (mengikuti Weekly Sell Out BA jika aktif)
       const coveredBaForSales: { storeName: string; baName: string; sellOut: number }[] = [];
-      data.coveredStores.forEach((storeName) => {
-        const ba = baByStoreLookup[storeName];
-        if (ba) {
-          coveredBaForSales.push({
-            storeName: ba.storeName,
-            baName: ba.baName,
-            sellOut: ba.sellOutActual,
-          });
+      const seenBaKeys = new Set<string>();
+
+      if (weeklyBaList) {
+        for (const ba of baList) {
+          const matchingStores = (ba.storeDetails || []).filter(
+            (sd) => sd.salesName.trim().toUpperCase() === sUpper
+          );
+          const salesTokens = (ba.salesName || '')
+            .split(',')
+            .map((x) => x.trim().toUpperCase())
+            .filter(Boolean);
+
+          if (matchingStores.length > 0 || salesTokens.includes(sUpper)) {
+            const baKey = isGenericBaPlaceholder(normalizeBaKey(ba.baName))
+              ? ba.storeName.trim().toLowerCase()
+              : normalizeBaKey(ba.baName);
+            if (!seenBaKeys.has(baKey)) {
+              seenBaKeys.add(baKey);
+              const useMatchedSubset =
+                matchingStores.length > 0 &&
+                ba.storeDetails &&
+                matchingStores.length < ba.storeDetails.length;
+              const storeLabel = useMatchedSubset
+                ? matchingStores.map((sd) => sd.storeName).join(', ')
+                : ba.storeName;
+              const sellOutVal = useMatchedSubset
+                ? matchingStores.reduce((acc, sd) => acc + sd.sellOutNonLavojoy + sd.sellOutLavojoy, 0)
+                : ba.sellOutActual;
+              coveredBaForSales.push({
+                storeName: storeLabel,
+                baName: ba.baName,
+                sellOut: sellOutVal,
+              });
+            }
+          }
         }
-      });
+      } else {
+        data.coveredStores.forEach((storeName) => {
+          const ba = baByStoreLookup[storeName] || baByStoreLookup[storeName.trim().toUpperCase()];
+          if (ba) {
+            const baKey = isGenericBaPlaceholder(normalizeBaKey(ba.baName))
+              ? ba.storeName.trim().toLowerCase()
+              : normalizeBaKey(ba.baName);
+            if (!seenBaKeys.has(baKey)) {
+              seenBaKeys.add(baKey);
+              coveredBaForSales.push({
+                storeName: ba.storeName,
+                baName: ba.baName,
+                sellOut: ba.sellOutActual,
+              });
+            }
+          }
+        });
+      }
 
-      // Override jika diset manual
-      const manualBonus = customSalesBonuses[sName];
-      const manualPenalty = customSalesPenalties[sName];
+      const prodOv = salesProdLookup[sName] || salesProdLookup[sUpper];
+      const hasProdOverride =
+        prodOv !== undefined &&
+        (prodOv.customTotalSellOut !== undefined || prodOv.customBaCount !== undefined);
 
-      return calculateSalesSalary(
+      // Override jika diset manual (atau cegah denda SP1 semu jika bulan tsb benar-benar kosong data Sell Out)
+      const manualBonus =
+        salesBonusLookup[sName] !== undefined
+          ? salesBonusLookup[sName]
+          : salesBonusLookup[sUpper] !== undefined
+          ? salesBonusLookup[sUpper]
+          : suppressSalesBaPenaltyOnEmpty && !hasProdOverride
+          ? 0
+          : undefined;
+      const manualPenalty =
+        salesPenaltyLookup[sName] !== undefined
+          ? salesPenaltyLookup[sName]
+          : salesPenaltyLookup[sUpper] !== undefined
+          ? salesPenaltyLookup[sUpper]
+          : suppressSalesBaPenaltyOnEmpty
+          ? 0
+          : undefined;
+
+      const salaryItem = calculateSalesSalary(
         sName,
         data.sellInActual,
         target,
@@ -733,8 +1235,22 @@ export function aggregateAreaCost(
         data.spv,
         coveredBaForSales,
         manualBonus,
-        manualPenalty
+        manualPenalty,
+        prodOv?.customTotalSellOut,
+        prodOv?.customBaCount
       );
+
+      if (suppressSalesBaPenaltyOnEmpty) {
+        salaryItem.baProductivitySpCount = 0;
+        salaryItem.coveredBaList = salaryItem.coveredBaList.map((b) => ({
+          ...b,
+          status: 'normal',
+          amount: 0,
+          description: 'Belum ada transaksi Sell Out di periode ini',
+        }));
+      }
+
+      return salaryItem;
     })
     .sort((a, b) => b.sellInActual - a.sellInActual);
 
@@ -748,7 +1264,14 @@ export function aggregateAreaCost(
   }
 
   // Calculate Trainer Salaries (Gaji Pokok Rp 3.9M, Transport Rp 500k, Insentif/Denda Produk Fokus, Insentif/Denda KPI Trainer)
-  const trainerList: TrainerSalaryItem[] = activeTrainerDefs.map((t) => {
+  const trainerDefsToProcess = options?.activeTrainersOnlyFromRecords
+    ? activeTrainerDefs.filter((t) => {
+        const d = trainerMap[t.trainerName];
+        return d && (d.sellOut > 0 || d.focusQty > 0 || trainerSellOutSource.some((r) => getTrainerForRecord(r) === t.trainerName));
+      })
+    : activeTrainerDefs;
+
+  const trainerList: TrainerSalaryItem[] = trainerDefsToProcess.map((t) => {
     const monthlyTr = trainerMonthlyTargetsOverride?.[t.id] || trainerMonthlyTargetsOverride?.[t.trainerName] || {};
     const resolvedFocusDefault =
       monthlyTr.targetProdukFokusPcs !== undefined && monthlyTr.targetProdukFokusPcs > 0
@@ -763,8 +1286,16 @@ export function aggregateAreaCost(
         : t.targetSellOut;
 
     const actualData = trainerMap[t.trainerName] || { focusQty: 0, sellOut: 0 };
-    const actualFocus = actualData.focusQty > 0 ? actualData.focusQty : Math.round(targetFocus * 0.92);
-    const actualSellOut = actualData.sellOut > 0 ? actualData.sellOut : Math.round(resolvedSellOutTarget * 0.95);
+    const actualFocus = options?.disableTrainerDummyActualFallback
+      ? actualData.focusQty
+      : actualData.focusQty > 0
+      ? actualData.focusQty
+      : Math.round(targetFocus * 0.92);
+    const actualSellOut = options?.disableTrainerDummyActualFallback
+      ? actualData.sellOut
+      : actualData.sellOut > 0
+      ? actualData.sellOut
+      : Math.round(resolvedSellOutTarget * 0.95);
 
     // KPI Score lookup: from custom override, or from month's KPI dataset, or fallback
     const kpiScore = customTrainerKpiScores[t.trainerName] !== undefined

@@ -1,6 +1,5 @@
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
-import { FirebaseErrorBoundary } from './components/FirebaseErrorBoundary';
 import './index.css';
 
 // Tier 1 Google Maps auth / quota failure detection
@@ -27,8 +26,4 @@ console.error = (...args: unknown[]) => {
   origConsoleError(...args);
 };
 
-createRoot(document.getElementById('root')!).render(
-  <FirebaseErrorBoundary>
-    <App />
-  </FirebaseErrorBoundary>
-);
+createRoot(document.getElementById('root')!).render(<App />);

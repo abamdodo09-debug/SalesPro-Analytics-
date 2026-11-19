@@ -30,11 +30,7 @@ import {
   MapPin,
   Tag,
   PieChart,
-  Database,
-  LogIn,
-  LogOut,
 } from 'lucide-react';
-import type { User } from 'firebase/auth';
 import { ActiveTab, GasConfig, DashboardFilters } from '../types/dashboard';
 
 export interface SubMenuItem {
@@ -69,13 +65,6 @@ interface HeaderProps {
   onSyncGas: () => void;
   isSyncing: boolean;
   filters?: DashboardFilters;
-  firebaseUser?: User | null;
-  isAuthReady?: boolean;
-  isCloudSyncing?: boolean;
-  lastCloudSyncedAt?: string | null;
-  onFirebaseLogin?: () => void;
-  onFirebaseLogout?: () => void;
-  onSyncCloudDb?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -92,13 +81,6 @@ export const Header: React.FC<HeaderProps> = ({
   onSyncGas,
   isSyncing,
   filters,
-  firebaseUser,
-  isAuthReady = false,
-  isCloudSyncing = false,
-  lastCloudSyncedAt,
-  onFirebaseLogin,
-  onFirebaseLogout,
-  onSyncCloudDb,
 }) => {
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
@@ -443,52 +425,6 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin text-emerald-600' : ''}`} />
               </button>
-            )}
-
-            {/* Firebase Cloud Database & Google Auth Control */}
-            {isAuthReady && (
-              firebaseUser ? (
-                <div className="flex items-center gap-1 bg-indigo-50/90 border border-indigo-200 rounded-lg px-2 py-1 shadow-2xs">
-                  <button
-                    type="button"
-                    onClick={onSyncCloudDb}
-                    disabled={isCloudSyncing}
-                    title={
-                      lastCloudSyncedAt
-                        ? `Database Firebase Terhubung (${firebaseUser.email || ''}) • Sinkron: ${lastCloudSyncedAt}`
-                        : `Sinkronkan data & pengaturan ke Database Firebase (${firebaseUser.email || ''})`
-                    }
-                    className="flex items-center gap-1.5 text-xs font-bold text-indigo-800 hover:text-indigo-950 disabled:opacity-60 cursor-pointer whitespace-nowrap"
-                  >
-                    <Database className={`w-3.5 h-3.5 text-indigo-600 ${isCloudSyncing ? 'animate-pulse' : ''}`} />
-                    <span className="hidden xl:inline">
-                      {isCloudSyncing
-                        ? 'Menyimpan...'
-                        : `DB: ${(firebaseUser.displayName || firebaseUser.email || 'Aktif').split(' ')[0]}`}
-                    </span>
-                    <RefreshCw className={`w-3 h-3 text-indigo-500 ${isCloudSyncing ? 'animate-spin' : ''}`} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onFirebaseLogout}
-                    title="Keluar dari akun Google / Database Firebase"
-                    className="p-1 rounded hover:bg-indigo-200/70 text-indigo-700 transition-colors cursor-pointer"
-                  >
-                    <LogOut className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={onFirebaseLogin}
-                  title="Hubungkan & simpan database ke Firebase Cloud dengan Google Login"
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-bold rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100 transition-all shadow-2xs cursor-pointer whitespace-nowrap"
-                >
-                  <Database className="w-3.5 h-3.5 text-indigo-600" />
-                  <LogIn className="w-3 h-3 text-indigo-600" />
-                  <span className="hidden md:inline">Cloud DB</span>
-                </button>
-              )
             )}
 
             {/* Quick Access to Form Kunjungan Sales */}

@@ -482,8 +482,8 @@ export function filterRecords(
     // Brand
     if (filters.BRAND !== 'ALL' && (r.BRAND || '').trim().toUpperCase() !== filters.BRAND.trim().toUpperCase()) return false;
 
-    // Kategori
-    if (filters.KATEGORI && filters.KATEGORI !== 'ALL' && (r.KATEGORI || '').trim().toUpperCase() !== filters.KATEGORI.trim().toUpperCase()) return false;
+    // Kategori (selalu konsisten dengan resolveCategory)
+    if (filters.KATEGORI && filters.KATEGORI !== 'ALL' && resolveCategory(r).trim().toUpperCase() !== filters.KATEGORI.trim().toUpperCase()) return false;
 
     // Status Produk (Lifecycle Status)
     if (filters.STATUS_PRODUK && filters.STATUS_PRODUK !== 'ALL') {
@@ -498,7 +498,7 @@ export function filterRecords(
     if (filters.REGION !== 'ALL' && (r.REGION || '').trim().toUpperCase() !== filters.REGION.trim().toUpperCase()) return false;
 
     // Ket
-    if (filters.KET !== 'ALL' && (r.KET || '').trim().toUpperCase() !== filters.KET.trim().toUpperCase()) return false;
+    if (filters.KET && filters.KET !== 'ALL' && (r.KET || '').trim().toUpperCase() !== filters.KET.trim().toUpperCase()) return false;
 
     // SKU
     if (filters.SKU !== 'ALL') {
@@ -513,9 +513,12 @@ export function filterRecords(
     if (filters.searchQuery && filters.searchQuery.trim()) {
       const q = filters.searchQuery.trim().toLowerCase();
       const trainerName = getTrainerForRecord(r).toLowerCase();
+      const resolvedCat = resolveCategory(r).toLowerCase();
       const match =
+        (r.TANGGAL && r.TANGGAL.toLowerCase().includes(q)) ||
+        (r.BULAN && r.BULAN.toLowerCase().includes(q)) ||
         (r.SKU && r.SKU.toLowerCase().includes(q)) ||
-        (r.KATEGORI && r.KATEGORI.toLowerCase().includes(q)) ||
+        resolvedCat.includes(q) ||
         (r.STATUS_PRODUK && r.STATUS_PRODUK.toLowerCase().includes(q)) ||
         (r.NAMA_STORE && r.NAMA_STORE.toLowerCase().includes(q)) ||
         (r.SALES && r.SALES.toLowerCase().includes(q)) ||
@@ -551,7 +554,7 @@ export function getCascadingOptions(
       }
       if (ignoreKey !== 'SPV' && currentFilters.SPV !== 'ALL' && (r.SPV || '').trim().toUpperCase() !== currentFilters.SPV.trim().toUpperCase()) return false;
       if (ignoreKey !== 'BRAND' && currentFilters.BRAND !== 'ALL' && (r.BRAND || '').trim().toUpperCase() !== currentFilters.BRAND.trim().toUpperCase()) return false;
-      if (ignoreKey !== 'KATEGORI' && currentFilters.KATEGORI && currentFilters.KATEGORI !== 'ALL' && (r.KATEGORI || '').trim().toUpperCase() !== currentFilters.KATEGORI.trim().toUpperCase()) return false;
+      if (ignoreKey !== 'KATEGORI' && currentFilters.KATEGORI && currentFilters.KATEGORI !== 'ALL' && resolveCategory(r).trim().toUpperCase() !== currentFilters.KATEGORI.trim().toUpperCase()) return false;
       if (ignoreKey !== 'STATUS_PRODUK' && currentFilters.STATUS_PRODUK && currentFilters.STATUS_PRODUK !== 'ALL') {
         const st = resolveProductStatus(r);
         if (st !== currentFilters.STATUS_PRODUK) return false;
@@ -564,12 +567,12 @@ export function getCascadingOptions(
   };
 
   const getUnique = (arr: TransactionRecord[], key: keyof TransactionRecord) => {
-    return Array.from(new Set(arr.map((item) => String(item[key] || '')).filter(Boolean))).sort();
+    return Array.from(new Set(arr.map((item) => String(item[key] || '').trim()).filter(Boolean))).sort();
   };
 
   // Sort months by calendar order
   const availableMonths = getUnique(filterIgnoring('BULAN'), 'BULAN').sort((a, b) => {
-    return (MONTH_ORDER[a] || 99) - (MONTH_ORDER[b] || 99);
+    return (MONTH_ORDER[a.toUpperCase()] || 99) - (MONTH_ORDER[b.toUpperCase()] || 99);
   });
 
   const availableYears = getUnique(filterIgnoring('TAHUN'), 'TAHUN').sort((a, b) => Number(b) - Number(a));
@@ -582,7 +585,9 @@ export function getCascadingOptions(
   ).sort();
   const availableSpv = getUnique(filterIgnoring('SPV'), 'SPV');
   const availableBrands = getUnique(filterIgnoring('BRAND'), 'BRAND');
-  const availableCategories = getUnique(filterIgnoring('KATEGORI'), 'KATEGORI');
+  const availableCategories = Array.from(
+    new Set(filterIgnoring('KATEGORI').map((r) => resolveCategory(r)).filter(Boolean))
+  ).sort();
   const availableStores = getUnique(filterIgnoring('NAMA_STORE'), 'NAMA_STORE');
   const availableRegions = getUnique(filterIgnoring('REGION'), 'REGION');
   const availableKet = getUnique(filterIgnoring('KET'), 'KET');
@@ -979,6 +984,70 @@ export function aggregateCategoryDetails(records: TransactionRecord[]): Category
   return results.sort((a, b) => b.totalValue - a.totalValue);
 }
 
+// Robust date parser for Google Sheet records (handles YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY, ISO)
+export function parseTransactionDate(r: Partial<TransactionRecord>): Date | null {
+  const raw = String(r.TANGGAL || '').trim();
+  if (!raw) return null;
+
+  // ISO YYYY-MM-DD or YYYY-MM-DDTHH:mm...
+  const isoMatch = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (isoMatch) {
+    const y = Number(isoMatch[1]);
+    const m = Number(isoMatch[2]);
+    const d = Number(isoMatch[3]);
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return new Date(y, m - 1, d);
+    }
+  }
+
+  // Slash or dash D/M/Y or M/D/Y
+  const slashMatch = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (slashMatch) {
+    const partA = Number(slashMatch[1]);
+    const partB = Number(slashMatch[2]);
+    let year = Number(slashMatch[3]);
+    if (year < 100) year += 2000;
+
+    let day = partA;
+    let month = partB;
+
+    if (partA > 12) {
+      day = partA;
+      month = partB;
+    } else if (partB > 12) {
+      month = partA;
+      day = partB;
+    } else {
+      // Ambiguous (both <= 12): disambiguate using BULAN column if available
+      const expectedMonth = r.BULAN ? MONTH_ORDER[String(r.BULAN).trim().toUpperCase()] : undefined;
+      if (expectedMonth === partB) {
+        day = partA;
+        month = partB;
+      } else if (expectedMonth === partA) {
+        month = partA;
+        day = partB;
+      } else {
+        // Default Indonesian DD/MM/YYYY
+        day = partA;
+        month = partB;
+      }
+    }
+
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return new Date(year, month - 1, day);
+    }
+  }
+
+  const parsed = new Date(raw);
+  return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function getWeekNumberFromDate(d: Date): number {
+  const startOfYear = new Date(d.getFullYear(), 0, 1);
+  const diffDays = Math.floor((d.getTime() - startOfYear.getTime()) / (24 * 60 * 60 * 1000));
+  return Math.max(1, Math.min(53, Math.ceil((diffDays + startOfYear.getDay() + 1) / 7)));
+}
+
 // Timeframe aggregator (Harian, Mingguan, Bulanan, Tahunan)
 export function aggregateTimeframe(
   records: TransactionRecord[],
@@ -987,35 +1056,41 @@ export function aggregateTimeframe(
   if (records.length === 0) return [];
 
   if (mode === 'harian') {
-    // Group by Date string
-    const map: Record<string, { value: number; qty: number; txCount: number; dateObj: Date }> = {};
+    const map: Record<string, { value: number; qty: number; txCount: number; dateObj: Date | null; rawKey: string }> = {};
 
     for (const r of records) {
-      const key = r.TANGGAL;
-      if (!map[key]) {
-        const d = new Date(key);
-        map[key] = { value: 0, qty: 0, txCount: 0, dateObj: isNaN(d.getTime()) ? new Date() : d };
+      const d = parseTransactionDate(r);
+      const normalizedKey = d
+        ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+        : String(r.TANGGAL || 'Tanpa Tanggal').trim();
+
+      if (!map[normalizedKey]) {
+        map[normalizedKey] = { value: 0, qty: 0, txCount: 0, dateObj: d, rawKey: String(r.TANGGAL || normalizedKey) };
       }
-      map[key].value += r.VALUE || 0;
-      map[key].qty += r.QTY || 0;
-      map[key].txCount += 1;
+      map[normalizedKey].value += r.VALUE || 0;
+      map[normalizedKey].qty += r.QTY || 0;
+      map[normalizedKey].txCount += 1;
     }
 
     return Object.entries(map)
-      .sort((a, b) => a[1].dateObj.getTime() - b[1].dateObj.getTime())
+      .sort((a, b) => {
+        const ta = a[1].dateObj ? a[1].dateObj.getTime() : Number.MAX_SAFE_INTEGER;
+        const tb = b[1].dateObj ? b[1].dateObj.getTime() : Number.MAX_SAFE_INTEGER;
+        if (ta !== tb) return ta - tb;
+        return a[0].localeCompare(b[0]);
+      })
       .map(([key, data]) => {
-        // Format day name e.g. "29 Sep"
         const d = data.dateObj;
-        const dayStr = !isNaN(d.getTime())
+        const dayStr = d && !isNaN(d.getTime())
           ? d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' })
-          : key;
-        const weekdayStr = !isNaN(d.getTime())
-          ? d.toLocaleDateString('id-ID', { weekday: 'short' })
-          : '';
+          : data.rawKey;
+        const fullStr = d && !isNaN(d.getTime())
+          ? d.toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })
+          : data.rawKey;
 
         return {
           label: dayStr,
-          subLabel: weekdayStr,
+          subLabel: fullStr,
           value: data.value,
           qty: data.qty,
           txCount: data.txCount,
@@ -1025,58 +1100,80 @@ export function aggregateTimeframe(
   }
 
   if (mode === 'mingguan') {
-    // Group by Week Number
-    const map: Record<number, { value: number; qty: number; txCount: number }> = {};
+    const yearsSet = new Set<number>();
+    const parsedRows = records.map((r) => {
+      const d = parseTransactionDate(r);
+      const year = (d ? d.getFullYear() : Number(r.TAHUN)) || 2026;
+      const week = r.weekNumber && r.weekNumber > 0 ? r.weekNumber : d ? getWeekNumberFromDate(d) : 1;
+      yearsSet.add(year);
+      return { r, year, week };
+    });
 
-    for (const r of records) {
-      const w = r.weekNumber || 1;
-      if (!map[w]) {
-        map[w] = { value: 0, qty: 0, txCount: 0 };
+    const isMultiYear = yearsSet.size > 1;
+    const map: Record<string, { year: number; week: number; value: number; qty: number; txCount: number }> = {};
+
+    for (const { r, year, week } of parsedRows) {
+      const key = isMultiYear ? `${year}-W${String(week).padStart(2, '0')}` : `W${String(week).padStart(2, '0')}`;
+      if (!map[key]) {
+        map[key] = { year, week, value: 0, qty: 0, txCount: 0 };
       }
-      map[w].value += r.VALUE || 0;
-      map[w].qty += r.QTY || 0;
-      map[w].txCount += 1;
+      map[key].value += r.VALUE || 0;
+      map[key].qty += r.QTY || 0;
+      map[key].txCount += 1;
     }
 
     return Object.entries(map)
-      .map(([w, data]) => ({ week: Number(w), ...data }))
-      .sort((a, b) => a.week - b.week)
-      .map((item) => ({
-        label: `Mgg ${item.week}`,
-        subLabel: `Week ${item.week}`,
+      .sort((a, b) => (a[1].year !== b[1].year ? a[1].year - b[1].year : a[1].week - b[1].week))
+      .map(([key, item]) => ({
+        label: isMultiYear ? `Mgg ${item.week} '${String(item.year).slice(-2)}` : `Mgg ${item.week}`,
+        subLabel: isMultiYear ? `Week ${item.week} (${item.year})` : `Week ${item.week}`,
         value: item.value,
         qty: item.qty,
         txCount: item.txCount,
+        dateRef: key,
       }));
   }
 
   if (mode === 'bulanan') {
-    // Group by Month
-    const map: Record<string, { value: number; qty: number; txCount: number; order: number }> = {};
-
-    for (const r of records) {
-      const m = r.BULAN || 'UNKNOWN';
-      if (!map[m]) {
-        map[m] = {
-          value: 0,
-          qty: 0,
-          txCount: 0,
-          order: MONTH_ORDER[m] || 99,
-        };
+    const yearsSet = new Set<number>();
+    const normalizedRows = records.map((r) => {
+      const d = parseTransactionDate(r);
+      const year = (d ? d.getFullYear() : Number(r.TAHUN)) || 2026;
+      let month = (r.BULAN || '').trim().toUpperCase();
+      if (!month && d) {
+        month = MONTH_NAMES_ID[d.getMonth()] || 'UNKNOWN';
       }
-      map[m].value += r.VALUE || 0;
-      map[m].qty += r.QTY || 0;
-      map[m].txCount += 1;
+      if (!month) month = 'UNKNOWN';
+      yearsSet.add(year);
+      return { r, year, month, order: MONTH_ORDER[month] || 99 };
+    });
+
+    const isMultiYear = yearsSet.size > 1;
+    const map: Record<string, { year: number; month: string; order: number; value: number; qty: number; txCount: number }> = {};
+
+    for (const { r, year, month, order } of normalizedRows) {
+      const key = isMultiYear ? `${year}-${month}` : month;
+      if (!map[key]) {
+        map[key] = { year, month, order, value: 0, qty: 0, txCount: 0 };
+      }
+      map[key].value += r.VALUE || 0;
+      map[key].qty += r.QTY || 0;
+      map[key].txCount += 1;
     }
 
     return Object.entries(map)
-      .sort((a, b) => a[1].order - b[1].order)
-      .map(([month, data]) => ({
-        label: month.length > 3 ? month.slice(0, 3) : month,
-        subLabel: month,
+      .sort((a, b) => (a[1].year !== b[1].year ? a[1].year - b[1].year : a[1].order - b[1].order))
+      .map(([key, data]) => ({
+        label: isMultiYear
+          ? `${data.month.length > 3 ? data.month.slice(0, 3) : data.month} '${String(data.year).slice(-2)}`
+          : data.month.length > 3
+          ? data.month.slice(0, 3)
+          : data.month,
+        subLabel: isMultiYear ? `${data.month} ${data.year}` : data.month,
         value: data.value,
         qty: data.qty,
         txCount: data.txCount,
+        dateRef: key,
       }));
   }
 
@@ -1084,7 +1181,8 @@ export function aggregateTimeframe(
   const map: Record<number, { value: number; qty: number; txCount: number }> = {};
 
   for (const r of records) {
-    const y = r.TAHUN || 2026;
+    const d = parseTransactionDate(r);
+    const y = (d ? d.getFullYear() : Number(r.TAHUN)) || 2026;
     if (!map[y]) {
       map[y] = { value: 0, qty: 0, txCount: 0 };
     }
@@ -1101,6 +1199,7 @@ export function aggregateTimeframe(
       value: data.value,
       qty: data.qty,
       txCount: data.txCount,
+      dateRef: String(year),
     }));
 }
 

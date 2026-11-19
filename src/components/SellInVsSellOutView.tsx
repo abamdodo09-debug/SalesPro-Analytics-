@@ -11,39 +11,30 @@ import {
   calculateSellInVsSellOut,
   MONTH_NAMES_LIST,
   exportSellInVsSellOutToExcel,
-  saveBaEvaluationOverride,
-  loadBaEvaluationOverrides,
+  saveMonthlySellInOutOverride,
+  resetMonthlySellInOutOverride,
+  resetAllMonthlyOverridesForScope,
+  saveEntitySellInOutOverride,
+  resetEntitySellInOutOverride,
+  loadEntitySellInOutOverrides,
+  MonthlySellInOutRow,
 } from '../services/sellInSellOutService';
-import {
-  loadSpvConsolidatedConfig,
-  saveSpvMonthConfig,
-  resetSpvMonthConfig,
-  OFFICIAL_SPV_WIDODO,
-} from '../services/spvSellInSellOutService';
-import { saveKaMgSalesOverride } from '../services/masterStoreService';
 import { TARGETS_UPDATED_EVENT } from '../services/targetManagementService';
-import { formatRupiah, formatPercent } from '../utils/analytics';
+import { formatRupiah } from '../utils/analytics';
 import {
   ArrowLeftRight,
-  TrendingUp,
   AlertTriangle,
   CheckCircle2,
-  AlertCircle,
   Search,
-  Filter,
   FileSpreadsheet,
   Printer,
   X,
-  ChevronRight,
   Store,
   Users,
   Building2,
   GraduationCap,
   Sparkles,
   Calendar,
-  Layers,
-  ArrowUpRight,
-  ArrowDownRight,
   Info,
   Edit2,
   Save,
@@ -67,11 +58,10 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
 }) => {
   const sourceRecords = allRecords && allRecords.length > 0 ? allRecords : records;
 
-  // Dimension & Filter states (Default ke OKTOBER 2026 sesuai instruksi user)
-  const [activeDimension, setActiveDimension] = useState<SellInSellOutDimension>('spv');
+  const [activeDimension, setActiveDimension] = useState<SellInSellOutDimension>('sales');
   const [selectedMonth, setSelectedMonth] = useState<string>(() => {
     if (filters.BULAN && filters.BULAN !== 'ALL') return filters.BULAN.toUpperCase();
-    return 'OKTOBER';
+    return 'ALL';
   });
   const [selectedYear, setSelectedYear] = useState<number>(() => {
     if (filters.TAHUN && filters.TAHUN !== 'ALL') {
@@ -87,48 +77,20 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
   const [onlyOver20, setOnlyOver20] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedItemModal, setSelectedItemModal] = useState<SellInSellOutItem | null>(null);
-
-  // Modal Edit SPV, Sell In / Out, KA & DAZZLE ME MG
-  const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
-  const [modalMonth, setModalMonth] = useState<string>('OKTOBER');
   const [refreshVersion, setRefreshVersion] = useState<number>(0);
 
-  // Form edit states (Khusus Sell In SPV WIDODO & Area Riau)
-  const [editRegularSellIn, setEditRegularSellIn] = useState<number>(0);
-  const [editKaSellIn, setEditKaSellIn] = useState<number>(0);
-  const [editDazzleMeMgSellIn, setEditDazzleMeMgSellIn] = useState<number>(0);
-  const [editSellOut, setEditSellOut] = useState<number>(0);
-  const [editTarget, setEditTarget] = useState<number>(850000000);
-  const [editNotes, setEditNotes] = useState<string>('');
+  // Inline edit state untuk Rincian Per Bulan
+  const [editingMonthKey, setEditingMonthKey] = useState<string | null>(null);
+  const [draftMonthSellIn, setDraftMonthSellIn] = useState<string>('0');
+  const [draftMonthSellOut, setDraftMonthSellOut] = useState<string>('0');
+  const [draftMonthNotes, setDraftMonthNotes] = useState<string>('');
+  const [confirmResetAllMonths, setConfirmResetAllMonths] = useState<boolean>(false);
 
-  // Form edit states khusus Evaluasi Beauty Advisor (BA)
-  const [editingBaItem, setEditingBaItem] = useState<SellInSellOutItem | null>(null);
-  const [editBaSellIn, setEditBaSellIn] = useState<number>(0);
-  const [editBaSellOut, setEditBaSellOut] = useState<number>(0);
-  const [editBaTarget, setEditBaTarget] = useState<number>(35000000);
-  const [editBaStore, setEditBaStore] = useState<string>('');
-
-  const openEditBaModal = (item: SellInSellOutItem) => {
-    setEditingBaItem(item);
-    setEditBaSellIn(item.sellInValue);
-    setEditBaSellOut(item.sellOutValue);
-    setEditBaTarget(item.target || 35000000);
-    setEditBaStore(item.storeName || '');
-  };
-
-  const handleSaveBaEdit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingBaItem) return;
-    saveBaEvaluationOverride({
-      baName: editingBaItem.name,
-      storeName: editBaStore,
-      sellIn: editBaSellIn,
-      sellOut: editBaSellOut,
-      target: editBaTarget,
-    });
-    setRefreshVersion((v) => v + 1);
-    setEditingBaItem(null);
-  };
+  // Inline edit state untuk Tabel Evaluasi Entitas
+  const [editingEntityName, setEditingEntityName] = useState<string | null>(null);
+  const [draftEntitySellIn, setDraftEntitySellIn] = useState<string>('0');
+  const [draftEntitySellOut, setDraftEntitySellOut] = useState<string>('0');
+  const [draftEntityTarget, setDraftEntityTarget] = useState<string>('0');
 
   useEffect(() => {
     const onTargetsUpdated = () => setRefreshVersion((v) => v + 1);
@@ -140,7 +102,7 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
     };
   }, []);
 
-  // Sinkronisasi dua arah dengan Global Integrated Filter Bar
+  // Sinkronisasi dua arah dengan Global FilterBar (KECUALI KET)
   useEffect(() => {
     if (filters.BULAN && filters.BULAN !== 'ALL') {
       setSelectedMonth(filters.BULAN.toUpperCase());
@@ -164,9 +126,9 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
     }
   }, [filters.REGION]);
 
-  // Handler perubahan filter yang otomatis menyinkronkan FilterBar atas
   const handleMonthChange = (newMonth: string) => {
     setSelectedMonth(newMonth);
+    setEditingEntityName(null);
     if (onFilterChange) {
       onFilterChange('BULAN', newMonth);
     }
@@ -174,6 +136,8 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
 
   const handleYearChange = (newYear: number) => {
     setSelectedYear(newYear);
+    setEditingMonthKey(null);
+    setEditingEntityName(null);
     if (onFilterChange) {
       onFilterChange('TAHUN', newYear.toString());
     }
@@ -181,12 +145,22 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
 
   const handleAreaChange = (newArea: string) => {
     setSelectedArea(newArea);
+    setEditingMonthKey(null);
+    setEditingEntityName(null);
     if (onFilterChange) {
       onFilterChange('REGION', newArea);
     }
   };
 
-  // Available Areas
+  const availableYears = useMemo(() => {
+    const set = new Set<number>([2025, 2026]);
+    sourceRecords.forEach((r) => {
+      const y = Number(r.TAHUN);
+      if (!isNaN(y) && y > 2000) set.add(y);
+    });
+    return Array.from(set).sort((a, b) => b - a);
+  }, [sourceRecords]);
+
   const availableAreas = useMemo(() => {
     const set = new Set<string>();
     sourceRecords.forEach((r) => {
@@ -196,313 +170,269 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
     return Array.from(set).sort();
   }, [sourceRecords]);
 
-  // Hitung data komparasi terintegrasi (sinkron dengan filter global & SPV)
-  const { items: rawItems, summary: baseSummary } = useMemo(() => {
+  const effectiveSearch = (searchQuery || filters.searchQuery || '').trim().toLowerCase();
+
+  // Gabungkan searchQuery lokal ke filters agar konsisten
+  const effectiveFilters = useMemo<FilterState>(() => {
+    const combinedQuery = searchQuery.trim() || filters.searchQuery || '';
+    return {
+      ...filters,
+      searchQuery: combinedQuery,
+    };
+  }, [filters, searchQuery]);
+
+  // Hitung data 100% dari Google Sheet (tanpa filter KET) + rincian bulanan
+  const { items: rawItems, summary: baseSummary, monthlyRows, monthlyScopeKey } = useMemo(() => {
     return calculateSellInVsSellOut(
       sourceRecords,
       activeDimension,
       selectedMonth,
       selectedYear,
       selectedArea,
-      filters
+      effectiveFilters
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceRecords, activeDimension, selectedMonth, selectedYear, selectedArea, filters, refreshVersion]);
+  }, [sourceRecords, activeDimension, selectedMonth, selectedYear, selectedArea, effectiveFilters, refreshVersion]);
 
-  // Data konsolidasi resmi SPV WIDODO & Area Riau dari Google Sheet
-  const spvConsolidated = useMemo(() => {
-    return loadSpvConsolidatedConfig(sourceRecords, selectedMonth, selectedYear);
-  }, [sourceRecords, selectedMonth, selectedYear, refreshVersion]);
-
-  const effectiveSearch = (searchQuery || filters.searchQuery || '').trim().toLowerCase();
-
-  // Filter items by search query, onlyOver20 toggle, and global filters
   const filteredItems = useMemo(() => {
     return rawItems.filter((item) => {
       if (onlyOver20 && !item.isOver20Percent) return false;
-
-      // Global Sales Filter
-      if (filters.SALES && filters.SALES !== 'ALL') {
-        const targetSales = filters.SALES.toUpperCase();
-        if (activeDimension === 'sales') {
-          if (item.name.toUpperCase() !== targetSales) return false;
-        } else if (item.salesName) {
-          if (item.salesName.toUpperCase() !== targetSales) return false;
-        }
-      }
-
-      // Global SPV Filter
-      if (filters.SPV && filters.SPV !== 'ALL') {
-        const targetSpv = filters.SPV.toUpperCase();
-        if (activeDimension === 'spv') {
-          if (item.name.toUpperCase() !== targetSpv) return false;
-        } else if (item.spvName) {
-          if (item.spvName.toUpperCase() !== targetSpv) return false;
-        }
-      }
-
-      // Global Store Filter
-      if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL') {
-        const targetStore = filters.NAMA_STORE.toUpperCase();
-        if (activeDimension === 'store') {
-          if (item.name.toUpperCase() !== targetStore) return false;
-        } else if (item.storeName) {
-          if (item.storeName.toUpperCase() !== targetStore) return false;
-        }
-      }
-
-      // Free Search
-      if (effectiveSearch) {
-        const match =
-          item.name.toLowerCase().includes(effectiveSearch) ||
-          (item.secondaryInfo && item.secondaryInfo.toLowerCase().includes(effectiveSearch)) ||
-          (item.area && item.area.toLowerCase().includes(effectiveSearch)) ||
-          (item.region && item.region.toLowerCase().includes(effectiveSearch)) ||
-          (item.storeName && item.storeName.toLowerCase().includes(effectiveSearch)) ||
-          (item.salesName && item.salesName.toLowerCase().includes(effectiveSearch)) ||
-          (item.trainerName && item.trainerName.toLowerCase().includes(effectiveSearch)) ||
-          (item.spvName && item.spvName.toLowerCase().includes(effectiveSearch));
-        if (!match) return false;
-      }
-
       return true;
     });
-  }, [rawItems, onlyOver20, effectiveSearch, filters, activeDimension]);
+  }, [rawItems, onlyOver20]);
 
-  // Recalculated summary KPIs from filteredItems
+  // Summary KPI Cards
   const summary: SellInSellOutSummary = useMemo(() => {
-    const hasFilter =
-      (filters.SALES && filters.SALES !== 'ALL') ||
-      (filters.SPV && filters.SPV !== 'ALL') ||
-      (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL') ||
-      (filters.REGION && filters.REGION !== 'ALL') ||
-      Boolean(effectiveSearch) ||
-      onlyOver20;
-
-    if (!hasFilter) return baseSummary;
+    if (!onlyOver20 && !effectiveSearch) return baseSummary;
 
     const totalSellIn = filteredItems.reduce((acc, i) => acc + i.sellInValue, 0);
     const totalSellOut = filteredItems.reduce((acc, i) => acc + i.sellOutValue, 0);
     const totalGapValue = totalSellIn - totalSellOut;
-    const avgGapPercent = totalSellIn > 0 ? (totalGapValue / totalSellIn) * 100 : 0;
-    const overallSellThroughPercent = totalSellIn > 0 ? (totalSellOut / totalSellIn) * 100 : 0;
-    const over20Count = filteredItems.filter((i) => i.isOver20Percent).length;
-    const overstockCount = filteredItems.filter((i) => i.statusType === 'overstock').length;
-    const stockoutRiskCount = filteredItems.filter((i) => i.statusType === 'stockout_risk').length;
-    const healthyCount = filteredItems.filter((i) => i.statusType === 'healthy').length;
+    const baseDenom = totalSellIn > 0 ? totalSellIn : totalSellOut > 0 ? totalSellOut : 0;
+    const avgGapPercent = baseDenom > 0 ? Math.round((totalGapValue / baseDenom) * 1000) / 10 : 0;
+    const overallSellThroughPercent = totalSellIn > 0 ? Math.round((totalSellOut / totalSellIn) * 1000) / 10 : 0;
 
     return {
-      periodMonth: selectedMonth,
-      periodYear: selectedYear,
+      ...baseSummary,
       totalSellIn,
       totalSellOut,
       totalGapValue,
       avgGapPercent,
       overallSellThroughPercent,
       totalEntitiesCount: filteredItems.length,
-      over20Count,
-      overstockCount,
-      stockoutRiskCount,
-      healthyCount,
-      spvTotalSellIn: baseSummary.spvTotalSellIn,
-      spvTotalSellOut: baseSummary.spvTotalSellOut,
-      kaSalesValue: baseSummary.kaSalesValue,
-      dazzleMeMgSalesValue: baseSummary.dazzleMeMgSalesValue,
-      totalPenjualanConsolidated: baseSummary.totalPenjualanConsolidated,
-      isManualOverride: baseSummary.isManualOverride,
+      over20Count: filteredItems.filter((i) => i.isOver20Percent).length,
+      overstockCount: filteredItems.filter((i) => i.statusType === 'overstock').length,
+      stockoutRiskCount: filteredItems.filter((i) => i.statusType === 'stockout_risk').length,
+      healthyCount: filteredItems.filter((i) => i.statusType === 'healthy').length,
     };
-  }, [baseSummary, filteredItems, filters, effectiveSearch, onlyOver20, selectedMonth, selectedYear]);
+  }, [baseSummary, filteredItems, onlyOver20, effectiveSearch]);
 
-  // Muat data bulan tertentu ke modal edit
-  const loadMonthDataIntoModal = (monthToLoad: string) => {
-    const cfg = loadSpvConsolidatedConfig(sourceRecords, monthToLoad, selectedYear);
-    setModalMonth(monthToLoad);
-    setEditRegularSellIn(cfg.spvRegularSellIn);
-    setEditKaSellIn(cfg.kaSellInValue);
-    setEditDazzleMeMgSellIn(cfg.dazzleMeMgSellInValue);
-    setEditSellOut(cfg.totalSellOut);
-    setEditTarget(cfg.target);
-    setEditNotes(cfg.notes || '');
+  // Total 12 bulan untuk Footer Rincian Per Bulan
+  const monthlyTotals = useMemo(() => {
+    const totalSellIn = monthlyRows.reduce((s, r) => s + r.sellInValue, 0);
+    const totalSellOut = monthlyRows.reduce((s, r) => s + r.sellOutValue, 0);
+    const totalSheetSellIn = monthlyRows.reduce((s, r) => s + r.sheetSellIn, 0);
+    const totalSheetSellOut = monthlyRows.reduce((s, r) => s + r.sheetSellOut, 0);
+    const totalGapValue = totalSellIn - totalSellOut;
+    const baseDenom = totalSellIn > 0 ? totalSellIn : totalSellOut > 0 ? totalSellOut : 0;
+    const avgGapPercent = baseDenom > 0 ? Math.round((totalGapValue / baseDenom) * 1000) / 10 : 0;
+    const sellThroughPercent = totalSellIn > 0 ? Math.round((totalSellOut / totalSellIn) * 1000) / 10 : 0;
+    const editedCount = monthlyRows.filter((r) => r.isManualEdit).length;
+
+    return {
+      totalSellIn,
+      totalSellOut,
+      totalSheetSellIn,
+      totalSheetSellOut,
+      totalGapValue,
+      avgGapPercent,
+      sellThroughPercent,
+      editedCount,
+    };
+  }, [monthlyRows]);
+
+  // Handlers Inline Edit Bulanan
+  const startEditMonth = (row: MonthlySellInOutRow) => {
+    setEditingMonthKey(row.month);
+    setDraftMonthSellIn(String(Math.round(row.sellInValue)));
+    setDraftMonthSellOut(String(Math.round(row.sellOutValue)));
+    setDraftMonthNotes(row.notes || '');
   };
 
-  // Buka Modal Edit SPV & Penjualan Sell In
-  const openEditModal = (initialMonth?: string) => {
-    const targetMonth = initialMonth || selectedMonth || 'OKTOBER';
-    loadMonthDataIntoModal(targetMonth);
-    setIsEditModalOpen(true);
+  const cancelEditMonth = () => {
+    setEditingMonthKey(null);
   };
 
-  // Simpan data edit ke localStorage khusus bulan yang dipilih di modal
-  const handleSaveEdit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const liveTotalSellIn = editRegularSellIn + editKaSellIn + editDazzleMeMgSellIn;
-    saveSpvMonthConfig({
-      periodMonth: modalMonth,
-      periodYear: selectedYear,
-      isManual: true,
-      spvName: OFFICIAL_SPV_WIDODO.spvName,
-      region: OFFICIAL_SPV_WIDODO.region,
-      salesTeam: OFFICIAL_SPV_WIDODO.salesTeam,
-      spvRegularSellIn: editRegularSellIn,
-      kaSellInValue: editKaSellIn,
-      dazzleMeMgSellInValue: editDazzleMeMgSellIn,
-      totalSellIn: liveTotalSellIn,
-      totalSellOut: editSellOut,
-      target: editTarget,
-      notes: editNotes.trim(),
+  const saveEditMonth = (month: string) => {
+    const parsedIn = Math.max(0, Number(draftMonthSellIn) || 0);
+    const parsedOut = Math.max(0, Number(draftMonthSellOut) || 0);
+    saveMonthlySellInOutOverride(monthlyScopeKey, month, {
+      sellIn: parsedIn,
+      sellOut: parsedOut,
+      notes: draftMonthNotes.trim(),
     });
-
-    // Simpan juga ke ka_mg_sales_override agar sinkron penuh dengan Analisa Kontribusi Toko
-    saveKaMgSalesOverride({
-      isManual: true,
-      spvSalesValue: liveTotalSellIn,
-      kaSalesValue: editKaSellIn,
-      mgSalesValue: editDazzleMeMgSellIn,
-      dazzleMeMgSalesValue: editDazzleMeMgSellIn,
-      notes: editNotes.trim(),
-    });
-
-    setRefreshVersion((v) => v + 1);
-    setIsEditModalOpen(false);
-  };
-
-  // Reset bulan tertentu ke data awal transaksi
-  const handleResetMonthToAuto = () => {
-    resetSpvMonthConfig(modalMonth, selectedYear);
-    loadMonthDataIntoModal(modalMonth);
+    setEditingMonthKey(null);
     setRefreshVersion((v) => v + 1);
   };
 
-  // Dimension metadata labels
+  const handleResetSingleMonth = (month: string) => {
+    resetMonthlySellInOutOverride(monthlyScopeKey, month);
+    setEditingMonthKey(null);
+    setRefreshVersion((v) => v + 1);
+  };
+
+  const handleResetAllMonths = () => {
+    resetAllMonthlyOverridesForScope(monthlyScopeKey);
+    setConfirmResetAllMonths(false);
+    setEditingMonthKey(null);
+    setRefreshVersion((v) => v + 1);
+  };
+
+  // Handlers Inline Edit Entitas
+  const entityOverridesMap = useMemo(() => {
+    void refreshVersion;
+    return loadEntitySellInOutOverrides();
+  }, [refreshVersion]);
+
+  const hasEntityOverride = (entityName: string) => {
+    const key = `${selectedYear}|${selectedMonth.trim().toUpperCase()}|${activeDimension}|${entityName.trim().toUpperCase()}`;
+    return Boolean(entityOverridesMap[key]);
+  };
+
+  const startEditEntity = (item: SellInSellOutItem) => {
+    setEditingEntityName(item.name);
+    setDraftEntitySellIn(String(Math.round(item.sellInValue)));
+    setDraftEntitySellOut(String(Math.round(item.sellOutValue)));
+    setDraftEntityTarget(String(Math.round(item.target || 0)));
+  };
+
+  const cancelEditEntity = () => {
+    setEditingEntityName(null);
+  };
+
+  const saveEditEntity = (entityName: string) => {
+    saveEntitySellInOutOverride(selectedYear, selectedMonth, activeDimension, entityName, {
+      sellIn: Math.max(0, Number(draftEntitySellIn) || 0),
+      sellOut: Math.max(0, Number(draftEntitySellOut) || 0),
+      target: Math.max(0, Number(draftEntityTarget) || 0),
+    });
+    setEditingEntityName(null);
+    setRefreshVersion((v) => v + 1);
+  };
+
+  const handleResetEntity = (entityName: string) => {
+    resetEntitySellInOutOverride(selectedYear, selectedMonth, activeDimension, entityName);
+    setEditingEntityName(null);
+    setRefreshVersion((v) => v + 1);
+  };
+
   const dimensionMeta: Record<
     SellInSellOutDimension,
-    { label: string; icon: React.ReactNode; color: string; desc: string }
+    { label: string; icon: React.ReactNode; desc: string }
   > = {
-    spv: {
-      label: 'Supervisor (SPV)',
-      icon: <Building2 className="w-4 h-4" />,
-      color: 'indigo',
-      desc: 'SPV Tunggal Area Riau: WIDODO (Membawahi 6 Sales • Seluruh Penjualan KA & DAZZLE ME MG Masuk ke Pencapaian SPV & Area)',
-    },
     sales: {
       label: 'Sales Personil',
       icon: <Users className="w-4 h-4" />,
-      color: 'blue',
-      desc: 'Realisasi taking order (Sell In) vs efektivitas serapan toko binaan 6 Sales',
+      desc: 'Perbandingan Sell In vs Sell Out per Sales berdasarkan data Google Sheet',
     },
     store: {
       label: 'Toko / Outlet',
       icon: <Store className="w-4 h-4" />,
-      color: 'amber',
       desc: 'Perbandingan pemesanan stok toko (Sell In) vs serapan konsumen (Sell Out)',
     },
     ba: {
       label: 'Beauty Advisor (BA)',
       icon: <Sparkles className="w-4 h-4" />,
-      color: 'pink',
-      desc: 'Evaluasi stok masuk counter vs realisasi penjualan harian oleh BA',
+      desc: 'Evaluasi stok masuk counter vs realisasi penjualan oleh BA dari Google Sheet',
     },
     trainer: {
       label: 'Trainer',
       icon: <GraduationCap className="w-4 h-4" />,
-      color: 'purple',
-      desc: 'Stok masuk area training vs hasil penjualan sell out yang dilatih',
+      desc: 'Perbandingan Sell In vs Sell Out berdasarkan wilayah pembinaan Trainer',
+    },
+    spv: {
+      label: 'Supervisor (SPV)',
+      icon: <Building2 className="w-4 h-4" />,
+      desc: 'Ringkasan Sell In vs Sell Out per Supervisor berdasarkan Google Sheet',
     },
   };
 
   const currentMeta = dimensionMeta[activeDimension];
 
-  // Hitung live total di dalam modal edit
-  const modalLiveTotalSellIn =
-    Number(editRegularSellIn || 0) + Number(editKaSellIn || 0) + Number(editDazzleMeMgSellIn || 0);
-  const modalLiveAchievementPercent =
-    editTarget > 0 ? Math.round((modalLiveTotalSellIn / editTarget) * 1000) / 10 : 0;
-  const modalLiveGap = modalLiveTotalSellIn - Number(editSellOut || 0);
-  const modalLiveSellThrough =
-    modalLiveTotalSellIn > 0 ? Math.round((Number(editSellOut || 0) / modalLiveTotalSellIn) * 1000) / 10 : 0;
-
-  // Nilai-nilai konsolidasi SELL IN SPV WIDODO & Area Riau
-  const spvTotalSellIn = summary.totalSellIn;
-  const regularSellInTotal = summary.spvRegularSellIn || 0;
-  const kaSellInTotal = summary.kaSellInValue || 0;
-  const dazzleMeMgSellInTotal = summary.dazzleMeMgSellInValue || 0;
-  const targetAreaSpv = summary.targetSellIn || 850000000;
-  const overallAchPercent =
-    targetAreaSpv > 0 ? Math.round((spvTotalSellIn / targetAreaSpv) * 1000) / 10 : 0;
+  // Ringkasan label filter aktif untuk informasi user
+  const activeFilterSummary = useMemo(() => {
+    const active: string[] = [];
+    if (filters.SPV && filters.SPV !== 'ALL') active.push(`SPV: ${filters.SPV}`);
+    if (filters.SALES && filters.SALES !== 'ALL') active.push(`Sales: ${filters.SALES}`);
+    if (filters.TRAINER && filters.TRAINER !== 'ALL') active.push(`Trainer: ${filters.TRAINER}`);
+    if (filters.BRAND && filters.BRAND !== 'ALL') active.push(`Brand: ${filters.BRAND}`);
+    if (filters.KATEGORI && filters.KATEGORI !== 'ALL') active.push(`Kategori: ${filters.KATEGORI}`);
+    if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL') active.push(`Toko: ${filters.NAMA_STORE}`);
+    if (selectedArea !== 'ALL') active.push(`Area: ${selectedArea}`);
+    if (filters.SKU && filters.SKU !== 'ALL') active.push(`SKU: ${filters.SKU}`);
+    return active;
+  }, [filters, selectedArea]);
 
   return (
     <div className="space-y-6 pb-12 print:p-0">
-      {/* 1. Header Toolbar & Sincronisasi Filter */}
-      <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-xs transition-all">
+      {/* 1. Header & Kontrol Sinkronisasi */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-5">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-600 via-teal-600 to-indigo-600 text-white flex items-center justify-center shadow-md shadow-cyan-500/20">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center shrink-0">
               <ArrowLeftRight className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-xl font-extrabold text-slate-900 tracking-tight">
-                  Perbandingan Sell In vs Sell Out
-                </h1>
-                <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-cyan-50 text-cyan-800 border border-cyan-200">
-                  SPV WIDODO Tunggal • Sell In KA &amp; DAZZLE ME MG Masuk
+              <h1 className="text-xl font-bold text-slate-900 tracking-tight">
+                Perbandingan Sell In vs Sell Out
+              </h1>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500 mt-1">
+                <span>Sumber: Google Sheet Terhubung (Sell In &amp; Sell Out)</span>
+                <span aria-hidden="true">·</span>
+                <span>
+                  Periode: {selectedMonth === 'ALL' ? 'Semua Bulan' : selectedMonth} {selectedYear}
                 </span>
-                {summary.isManualOverride && (
-                  <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded bg-amber-500/20 text-amber-800 border border-amber-300">
-                    Manual Edit ({selectedMonth})
-                  </span>
-                )}
+                <span aria-hidden="true">·</span>
+                <span className={filters.KET && filters.KET !== 'ALL' ? 'text-amber-700 font-semibold' : 'text-slate-500'}>
+                  {filters.KET && filters.KET !== 'ALL'
+                    ? `Filter KET (${filters.KET}) dinonaktifkan otomatis di menu ini`
+                    : 'Filter KET (Sell In / Sell Out) tidak aktif di menu ini'}
+                </span>
               </div>
-              <p className="text-xs text-slate-500 font-medium mt-0.5">
-                SPV Area Riau hanya 1 (WIDODO). Formula Pencapaian Sell In: Sell In Reguler (6 Sales) + Sell In KA + Sell In DAZZLE ME MG.
-              </p>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
-            {/* Tombol Akses Cepat Master Data & Coverage */}
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
             {onNavigateTab && (
               <button
                 onClick={() => onNavigateTab('pengaturan_master')}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-xl border border-emerald-200 shadow-xs transition-all cursor-pointer"
-                title="Buka Menu Master Data Toko, Sales, BA, SPV & Trainer (Satu Tempat)"
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-200 transition-colors cursor-pointer whitespace-nowrap shrink-0"
               >
-                <Store className="w-3.5 h-3.5 text-emerald-600" />
+                <Store className="w-3.5 h-3.5 text-slate-600" />
                 <span>Master Data &amp; Tim Coverage</span>
               </button>
             )}
 
-            {/* Tombol Edit Nilai SPV & Penjualan Sell In Bulan Bebas */}
-            <button
-              onClick={() => openEditModal(selectedMonth)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 rounded-xl shadow-xs transition-all cursor-pointer"
-              title="Edit manual nominal Sell In Reguler, Sell In KA, Sell In DAZZLE ME MG, dan Target untuk bulan apa saja"
-            >
-              <Edit2 className="w-3.5 h-3.5" />
-              <span>Edit Pencapaian Sell In (Pilih Bulan)</span>
-            </button>
-
-            {/* Export Excel */}
             <button
               onClick={() =>
                 exportSellInVsSellOutToExcel(
                   filteredItems,
                   summary,
+                  monthlyRows,
                   currentMeta.label,
                   selectedMonth,
                   selectedYear
                 )
               }
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl border border-slate-200 transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
               <span>Ekspor Excel</span>
             </button>
 
-            {/* Print Button */}
             <button
               onClick={() => window.print()}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl border border-slate-200 transition-colors cursor-pointer print:hidden"
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl border border-slate-200 transition-colors cursor-pointer whitespace-nowrap shrink-0 print:hidden"
             >
               <Printer className="w-3.5 h-3.5 text-slate-600" />
               <span>Cetak PDF</span>
@@ -510,21 +440,23 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
           </div>
         </div>
 
-        {/* Filter Bar Terintegrasi & Sinkron */}
-        <div className="mt-4 pt-4 border-t border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
-          {/* Dimension Selector Tabs */}
-          <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-100/80 rounded-xl border border-slate-200/80">
+        {/* Kontrol Dimensi & Filter */}
+        <div className="mt-4 pt-4 border-t border-slate-100 flex flex-col xl:flex-row xl:items-center justify-between gap-3 text-xs">
+          <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-100 rounded-xl border border-slate-200">
             {(Object.keys(dimensionMeta) as SellInSellOutDimension[]).map((dim) => {
               const meta = dimensionMeta[dim];
               const isActive = activeDimension === dim;
               return (
                 <button
                   key={dim}
-                  onClick={() => setActiveDimension(dim)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  onClick={() => {
+                    setActiveDimension(dim);
+                    setEditingEntityName(null);
+                  }}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                     isActive
-                      ? 'bg-white text-slate-900 shadow-xs border border-slate-200/80'
-                      : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+                      ? 'bg-white text-slate-900 shadow-2xs border border-slate-200'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
                   }`}
                 >
                   <span className={isActive ? 'text-indigo-600' : 'text-slate-400'}>{meta.icon}</span>
@@ -534,12 +466,10 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
             })}
           </div>
 
-          {/* Synchronized Month, Year, Area Selectors */}
           <div className="flex flex-wrap items-center gap-2">
-            {/* Month Filter */}
             <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
               <Calendar className="w-3.5 h-3.5 text-slate-500" />
-              <span className="font-semibold text-slate-600">Bulan:</span>
+              <span className="font-medium text-slate-600">Bulan:</span>
               <select
                 value={selectedMonth}
                 onChange={(e) => handleMonthChange(e.target.value)}
@@ -553,27 +483,28 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
               </select>
             </div>
 
-            {/* Year Filter */}
             <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
-              <span className="font-semibold text-slate-600">Tahun:</span>
+              <span className="font-medium text-slate-600">Tahun:</span>
               <select
                 value={selectedYear}
                 onChange={(e) => handleYearChange(Number(e.target.value))}
                 className="bg-transparent font-bold text-slate-800 outline-none cursor-pointer"
               >
-                <option value={2026}>2026</option>
-                <option value={2025}>2025</option>
+                {availableYears.map((yr) => (
+                  <option key={yr} value={yr}>
+                    {yr}
+                  </option>
+                ))}
               </select>
             </div>
 
-            {/* Area Filter */}
             <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
               <Building2 className="w-3.5 h-3.5 text-slate-500" />
-              <span className="font-semibold text-slate-600">Area:</span>
+              <span className="font-medium text-slate-600">Area:</span>
               <select
                 value={selectedArea}
                 onChange={(e) => handleAreaChange(e.target.value)}
-                className="bg-transparent font-bold text-slate-800 outline-none cursor-pointer max-w-[120px] truncate"
+                className="bg-transparent font-bold text-slate-800 outline-none cursor-pointer max-w-[140px] truncate"
               >
                 <option value="ALL">Semua Area</option>
                 {availableAreas.map((area) => (
@@ -584,12 +515,11 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
               </select>
             </div>
 
-            {/* Threshold Toggle: Only > 20% */}
             <button
               onClick={() => setOnlyOver20(!onlyOver20)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border font-bold transition-all cursor-pointer ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 onlyOver20
-                  ? 'bg-rose-50 border-rose-300 text-rose-800 shadow-2xs'
+                  ? 'bg-rose-50 border-rose-300 text-rose-800'
                   : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
               }`}
             >
@@ -600,76 +530,57 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
         </div>
       </div>
 
-      {/* 2. Executive KPI Cards (Sinkron Total Sell In & Pencapaian SPV WIDODO / Area) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-        {/* Card 1: Total Pencapaian Sell In (Distributor) */}
-        <div className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-xs relative group">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-              Total Sell In (Distributor)
+      {/* 2. Executive KPI Cards (100% Google Sheet + Manual Monthly Override) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white rounded-2xl border border-slate-200 p-4">
+          <div className="flex items-center justify-between text-xs text-slate-500 font-medium">
+            <span>Total Sell In</span>
+            <span className="text-[11px] text-slate-400">
+              {summary.isManualOverride ? 'Terdapat Edit Manual' : 'Google Sheet'}
             </span>
-            <button
-              onClick={() => openEditModal(selectedMonth)}
-              className="text-[10px] text-indigo-600 font-bold hover:underline flex items-center gap-1 cursor-pointer"
-            >
-              <Edit2 className="w-3 h-3" />
-              <span>Edit</span>
-            </button>
           </div>
           <div className="mt-2">
-            <span className="text-xl font-black text-slate-900 font-mono block">
-              {formatRupiah(spvConsolidated.totalSellIn, true)}
+            <span className="text-xl font-bold text-slate-900 font-mono tabular-nums block">
+              {formatRupiah(summary.totalSellIn, true)}
             </span>
-            <span className="text-[10px] text-indigo-700 font-bold mt-0.5 block truncate">
-              Reguler ({formatRupiah(spvConsolidated.spvRegularSellIn, true)}) + KA ({formatRupiah(spvConsolidated.kaSellInValue, true)}) + MG ({formatRupiah(spvConsolidated.dazzleMeMgSellInValue, true)})
-            </span>
-            <span className="text-[10px] text-slate-400 mt-0.5 block">
-              Pencapaian Area &amp; SPV WIDODO dari Google Sheet ({selectedMonth} {selectedYear})
+            <span className="text-xs text-slate-500 mt-1 block font-mono tabular-nums">
+              {formatRupiah(summary.totalSellIn, false)}
             </span>
           </div>
         </div>
 
-        {/* Card 2: TOTAL SELL OUT (KONSUMEN KASIR) */}
-        <div className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-xs relative group">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold text-indigo-900 uppercase tracking-wider block">
-              TOTAL SELL OUT (KONSUMEN)
+        <div className="bg-white rounded-2xl border border-slate-200 p-4">
+          <div className="flex items-center justify-between text-xs text-slate-500 font-medium">
+            <span>Total Sell Out</span>
+            <span className="text-[11px] text-slate-400">
+              {selectedMonth === 'ALL' ? `Jan–Des ${selectedYear}` : `${selectedMonth} ${selectedYear}`}
             </span>
-            <button
-              onClick={() => openEditModal(selectedMonth)}
-              className="text-[10px] text-indigo-600 font-bold hover:underline flex items-center gap-1 cursor-pointer"
-            >
-              <Edit2 className="w-3 h-3" />
-              <span>Edit</span>
-            </button>
           </div>
           <div className="mt-2">
-            <span className="text-xl font-black text-indigo-950 font-mono block">
+            <span className="text-xl font-bold text-indigo-950 font-mono tabular-nums block">
               {formatRupiah(summary.totalSellOut, true)}
             </span>
-            <span className="text-[11px] text-emerald-700 font-bold mt-0.5 block">
-              Realisasi Serapan Kasir Area
+            <span className="text-xs text-slate-500 mt-1 block font-mono tabular-nums">
+              {formatRupiah(summary.totalSellOut, false)}
             </span>
           </div>
         </div>
 
-        {/* Card 3: Selisih Nilai (Gap IDR) */}
-        <div className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-xs">
-          <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-            Selisih Nilai (Value Gap)
-          </span>
+        <div className="bg-white rounded-2xl border border-slate-200 p-4">
+          <div className="flex items-center justify-between text-xs text-slate-500 font-medium">
+            <span>Selisih Nilai (Gap)</span>
+            <span className="text-[11px] text-slate-400">Sell In − Sell Out</span>
+          </div>
           <div className="mt-2">
-            <div className="flex items-baseline gap-1.5">
-              <span
-                className={`text-xl font-black font-mono ${
-                  summary.totalGapValue >= 0 ? 'text-indigo-700' : 'text-rose-600'
-                }`}
-              >
-                {summary.totalGapValue >= 0 ? '+' : ''}
-                {formatRupiah(summary.totalGapValue, true)}
-              </span>
-            </div>
-            <span className="text-[11px] text-slate-500 mt-0.5 block">
+            <span
+              className={`text-xl font-bold font-mono tabular-nums block ${
+                summary.totalGapValue >= 0 ? 'text-indigo-700' : 'text-rose-600'
+              }`}
+            >
+              {summary.totalGapValue >= 0 ? '+' : ''}
+              {formatRupiah(summary.totalGapValue, true)}
+            </span>
+            <span className="text-xs text-slate-500 mt-1 block">
               {summary.totalGapValue >= 0
                 ? 'Surplus stok outlet (Sell In > Sell Out)'
                 : 'Defisit stok (Sell Out > Sell In)'}
@@ -677,183 +588,352 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
           </div>
         </div>
 
-        {/* Card 4: Rasio Serapan (Sell-Through %) */}
-        <div className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-xs">
-          <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-            Rasio Serapan (Sell-Through)
-          </span>
+        <div className="bg-white rounded-2xl border border-slate-200 p-4">
+          <div className="flex items-center justify-between text-xs text-slate-500 font-medium">
+            <span>Rasio Serapan (Sell-Through)</span>
+            <span className="text-[11px] text-slate-400">Ideal 80%–120%</span>
+          </div>
           <div className="mt-2">
             <div className="flex items-baseline gap-2">
               <span
-                className={`text-xl font-black font-mono ${
+                className={`text-xl font-bold font-mono tabular-nums ${
                   summary.overallSellThroughPercent >= 80 && summary.overallSellThroughPercent <= 120
                     ? 'text-emerald-700'
+                    : summary.totalSellIn === 0 && summary.totalSellOut === 0
+                    ? 'text-slate-500'
                     : 'text-amber-700'
                 }`}
               >
                 {summary.overallSellThroughPercent}%
               </span>
-              <span className="text-[10px] text-slate-400 font-mono font-medium">
+              <span className="text-xs text-slate-500 font-mono tabular-nums">
                 (Gap: {summary.avgGapPercent >= 0 ? '+' : ''}
                 {summary.avgGapPercent}%)
               </span>
             </div>
-            <span className="text-[11px] text-slate-500 mt-0.5 block">
-              Ideal serapan sehat: 80% - 120%
-            </span>
-          </div>
-        </div>
-
-        {/* Card 5: Pencapaian Target Sell In SPV WIDODO */}
-        <div className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-xs">
-          <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-            Pencapaian Target Sell In SPV
-          </span>
-          <div className="mt-2">
-            <div className="flex items-baseline gap-2">
-              <span
-                className={`text-xl font-black font-mono ${
-                  overallAchPercent >= 100 ? 'text-emerald-700' : 'text-amber-700'
-                }`}
-              >
-                {overallAchPercent}%
-              </span>
-              <span className="text-[10px] text-slate-400 font-mono">
-                Target: {formatRupiah(targetAreaSpv, true)}
-              </span>
-            </div>
-            <span className="text-[11px] text-slate-500 mt-0.5 block">
-              SPV Tunggal WIDODO (Area Riau)
+            <span className="text-xs text-slate-500 mt-1 block">
+              {summary.over20Count} entitas dengan selisih &gt; 20%
             </span>
           </div>
         </div>
       </div>
 
-      {/* 3. Strip Formula Konsolidasi: SELL IN SPV WIDODO & AREA (Reguler + KA + DAZZLE ME MG) */}
-      <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-2xl p-5 shadow-md border border-slate-800">
-        <div className="flex flex-col md:flex-row md:items-center justify-between pb-3 border-b border-white/10 gap-2">
-          <div className="flex items-center gap-2">
-            <span className="p-1.5 rounded-lg bg-pink-500/20 text-pink-300 border border-pink-500/40">
-              <Sparkles className="w-4 h-4" />
-            </span>
-            <div>
-              <h3 className="text-sm font-extrabold uppercase tracking-wide text-white flex items-center gap-2">
-                <span>Formula Pencapaian Sell In SPV WIDODO &amp; Area Riau ({selectedMonth} {selectedYear})</span>
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                  {overallAchPercent}% Target
-                </span>
-              </h3>
-              <span className="text-[11px] text-slate-300">
-                Formula Resmi: Total Sell In = Sell In Reguler (6 Sales) + Sell In KA + Sell In DAZZLE ME MG
-              </span>
-            </div>
+      {/* 3. Rincian Perbandingan Sell In vs Sell Out Per Bulan (Januari - Desember, Bisa Diedit) */}
+      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <div className="p-4 border-b border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-3 bg-slate-50/70">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">
+              Rincian Per Bulan Sell In vs Sell Out ({selectedYear})
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {activeFilterSummary.length > 0
+                ? `Filter aktif: ${activeFilterSummary.join(' · ')} · Klik Edit pada baris bulan untuk penyesuaian`
+                : 'Menampilkan seluruh bulan Januari s/d Desember langsung dari Google Sheet · Klik Edit pada baris bulan untuk penyesuaian'}
+            </p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={() => openEditModal(selectedMonth)}
-              className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold border border-white/20 transition-all cursor-pointer"
-            >
-              <Edit2 className="w-3.5 h-3.5 text-pink-300" />
-              <span>Edit Pencapaian Sell In ({selectedMonth})</span>
-            </button>
-            {onNavigateTab && (
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {selectedMonth !== 'ALL' && (
               <button
-                onClick={() => onNavigateTab('pengaturan_master')}
-                className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-200 text-xs font-bold border border-emerald-500/40 transition-all cursor-pointer"
+                onClick={() => handleMonthChange('ALL')}
+                className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0"
               >
-                <Store className="w-3.5 h-3.5" />
-                <span>Master Data &amp; Tim Coverage</span>
+                Tampilkan Semua Bulan
               </button>
             )}
-            <span className="text-xs font-black font-mono px-3 py-1 rounded-full bg-pink-500/20 text-pink-300 border border-pink-400/30">
-              Total Sell In: {formatRupiah(spvTotalSellIn, true)}
-            </span>
+
+            {monthlyTotals.editedCount > 0 && !confirmResetAllMonths && (
+              <button
+                onClick={() => setConfirmResetAllMonths(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Reset Edit Manual ({monthlyTotals.editedCount})</span>
+              </button>
+            )}
+
+            {confirmResetAllMonths && (
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={handleResetAllMonths}
+                  className="px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-500 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  Ya, Kembalikan ke Google Sheet
+                </button>
+                <button
+                  onClick={() => setConfirmResetAllMonths(false)}
+                  className="px-2.5 py-1.5 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  Batal
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4 text-xs font-mono">
-          {/* Komponen 1: Sell In Reguler Tim 6 Sales */}
-          <div className="bg-white/5 border border-blue-500/30 rounded-xl p-3 flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-blue-300 font-bold flex items-center gap-1.5">
-                <Building2 className="w-3.5 h-3.5" />
-                1. SELL IN REGULER (6 SALES)
-              </span>
-              <span className="text-[10px] text-blue-400 font-bold">Tim SPV WIDODO</span>
-            </div>
-            <div className="mt-2 flex items-baseline justify-between">
-              <span className="text-base font-black text-white">
-                {formatRupiah(regularSellInTotal, true)}
-              </span>
-              <span className="text-[11px] text-blue-300 font-bold">
-                {spvTotalSellIn > 0 ? Math.round((regularSellInTotal / spvTotalSellIn) * 1000) / 10 : 0}%
-              </span>
-            </div>
-            <span className="text-[10px] text-slate-300 font-sans block mt-1">
-              Albert, Ilhamsyah, Tiwi, Abdul Rahim, Pareto, Luar Kota
-            </span>
-          </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs text-left border-collapse">
+            <thead>
+              <tr className="bg-slate-100/80 text-slate-700 font-semibold border-b border-slate-200">
+                <th className="py-2.5 px-3 text-center w-10">No</th>
+                <th className="py-2.5 px-3">Bulan</th>
+                <th className="py-2.5 px-3 text-right">Sell In (Rp)</th>
+                <th className="py-2.5 px-3 text-right">Sell Out (Rp)</th>
+                <th className="py-2.5 px-3 text-right">Selisih (Gap)</th>
+                <th className="py-2.5 px-3 text-center">% Selisih</th>
+                <th className="py-2.5 px-3 text-center">Sell-Through</th>
+                <th className="py-2.5 px-3">Status Evaluasi</th>
+                <th className="py-2.5 px-3">Catatan</th>
+                <th className="py-2.5 px-3 text-center">Aksi</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {monthlyRows.map((row) => {
+                const isEditing = editingMonthKey === row.month;
+                const isSelectedRow = selectedMonth === row.month;
 
-          {/* Komponen 2: Sell In KA */}
-          <div className="bg-white/5 border border-purple-500/30 rounded-xl p-3 flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-purple-300 font-bold flex items-center gap-1.5">
-                <Store className="w-3.5 h-3.5" />
-                2. SELL IN KA (KEY ACCOUNT)
-              </span>
-              <span className="text-[10px] text-purple-300 font-bold">Modern Trade</span>
-            </div>
-            <div className="mt-2 flex items-baseline justify-between">
-              <span className="text-base font-black text-white">
-                {formatRupiah(kaSellInTotal, true)}
-              </span>
-              <span className="text-[11px] text-purple-300 font-bold">
-                {spvTotalSellIn > 0 ? Math.round((kaSellInTotal / spvTotalSellIn) * 1000) / 10 : 0}%
-              </span>
-            </div>
-            <span className="text-[10px] text-slate-300 font-sans block mt-1">
-              Guardian, Watson, Miss Glam, Swalayan &amp; Mall Modern
-            </span>
-          </div>
+                const liveSellIn = isEditing ? Math.max(0, Number(draftMonthSellIn) || 0) : row.sellInValue;
+                const liveSellOut = isEditing ? Math.max(0, Number(draftMonthSellOut) || 0) : row.sellOutValue;
+                const liveGap = liveSellIn - liveSellOut;
+                const liveDenom = liveSellIn > 0 ? liveSellIn : liveSellOut > 0 ? liveSellOut : 0;
+                const liveGapPct = liveDenom > 0 ? Math.round((liveGap / liveDenom) * 1000) / 10 : 0;
+                const liveStPct = liveSellIn > 0 ? Math.round((liveSellOut / liveSellIn) * 1000) / 10 : 0;
 
-          {/* Komponen 3: SELL IN DAZZLE ME MG */}
-          <div className="bg-white/5 border border-emerald-500/30 rounded-xl p-3 flex flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <span className="text-emerald-300 font-bold flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5" />
-                3. SELL IN DAZZLE ME MG
-              </span>
-              <span className="text-[10px] text-emerald-300 font-bold">Market Group</span>
-            </div>
-            <div className="mt-2 flex items-baseline justify-between">
-              <span className="text-base font-black text-white">
-                {formatRupiah(dazzleMeMgSellInTotal, true)}
-              </span>
-              <span className="text-[11px] text-emerald-300 font-bold">
-                {spvTotalSellIn > 0 ? Math.round((dazzleMeMgSellInTotal / spvTotalSellIn) * 1000) / 10 : 0}%
-              </span>
-            </div>
-            <span className="text-[10px] text-slate-300 font-sans block mt-1">
-              Toko General Trade / Grosir Dazzle Me Riau
-            </span>
-          </div>
+                return (
+                  <tr
+                    key={row.month}
+                    className={`transition-colors ${
+                      isEditing
+                        ? 'bg-indigo-50/50'
+                        : isSelectedRow
+                        ? 'bg-slate-100/90'
+                        : 'hover:bg-slate-50/80'
+                    }`}
+                  >
+                    <td className="py-2.5 px-3 text-center font-mono tabular-nums text-slate-500">
+                      {row.monthNumber}
+                    </td>
+
+                    <td className="py-2.5 px-3">
+                      <button
+                        type="button"
+                        onClick={() => handleMonthChange(isSelectedRow ? 'ALL' : row.month)}
+                        className={`text-left font-semibold cursor-pointer hover:text-indigo-700 transition-colors ${
+                          isSelectedRow ? 'text-indigo-700 underline underline-offset-4' : 'text-slate-900'
+                        }`}
+                        title={isSelectedRow ? 'Klik untuk tampilkan semua bulan' : `Filter detail ke bulan ${row.month}`}
+                      >
+                        {row.month}
+                      </button>
+                      <div className="text-[11px] text-slate-400">
+                        {row.isManualEdit ? 'Edit Manual' : `Sheet (${row.txSellInCount} IN / ${row.txSellOutCount} OUT)`}
+                      </div>
+                    </td>
+
+                    {/* Sell In */}
+                    <td className="py-2.5 px-3 text-right font-mono tabular-nums">
+                      {isEditing ? (
+                        <input
+                          type="number"
+                          min={0}
+                          step="any"
+                          value={draftMonthSellIn}
+                          onChange={(e) => setDraftMonthSellIn(e.target.value)}
+                          className="w-36 px-2 py-1 text-right text-xs font-mono font-semibold border border-indigo-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      ) : (
+                        <div>
+                          <span className="font-semibold text-slate-900 block">
+                            {formatRupiah(row.sellInValue, false)}
+                          </span>
+                          {row.isManualEdit && (
+                            <span className="text-[10px] text-slate-400 block">
+                              Sheet: {formatRupiah(row.sheetSellIn, true)}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </td>
+
+                    {/* Sell Out */}
+                    <td className="py-2.5 px-3 text-right font-mono tabular-nums">
+                      {isEditing ? (
+                        <input
+                          type="number"
+                          min={0}
+                          step="any"
+                          value={draftMonthSellOut}
+                          onChange={(e) => setDraftMonthSellOut(e.target.value)}
+                          className="w-36 px-2 py-1 text-right text-xs font-mono font-semibold border border-indigo-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      ) : (
+                        <div>
+                          <span className="font-semibold text-indigo-950 block">
+                            {formatRupiah(row.sellOutValue, false)}
+                          </span>
+                          {row.isManualEdit && (
+                            <span className="text-[10px] text-slate-400 block">
+                              Sheet: {formatRupiah(row.sheetSellOut, true)}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </td>
+
+                    {/* Gap */}
+                    <td className="py-2.5 px-3 text-right font-mono tabular-nums font-semibold">
+                      <span className={liveGap >= 0 ? 'text-indigo-700' : 'text-rose-600'}>
+                        {liveGap >= 0 ? '+' : ''}
+                        {formatRupiah(liveGap, false)}
+                      </span>
+                    </td>
+
+                    {/* % Selisih */}
+                    <td className="py-2.5 px-3 text-center font-mono tabular-nums">
+                      <span
+                        className={`font-semibold ${
+                          Math.abs(liveGapPct) > 20 && (liveSellIn > 0 || liveSellOut > 0)
+                            ? liveGapPct > 0
+                              ? 'text-amber-700'
+                              : 'text-rose-600'
+                            : 'text-slate-700'
+                        }`}
+                      >
+                        {liveGapPct >= 0 ? '+' : ''}
+                        {liveGapPct}%
+                      </span>
+                    </td>
+
+                    {/* Sell-Through */}
+                    <td className="py-2.5 px-3 text-center font-mono tabular-nums text-slate-700">
+                      {liveStPct}%
+                    </td>
+
+                    {/* Status */}
+                    <td className="py-2.5 px-3">
+                      <span
+                        className={`text-xs font-medium ${
+                          row.statusType === 'empty'
+                            ? 'text-slate-400'
+                            : row.statusType === 'overstock'
+                            ? 'text-amber-700'
+                            : row.statusType === 'stockout_risk'
+                            ? 'text-rose-600'
+                            : 'text-emerald-700'
+                        }`}
+                      >
+                        {row.statusLabel}
+                      </span>
+                    </td>
+
+                    {/* Catatan */}
+                    <td className="py-2.5 px-3 max-w-[180px]">
+                      {isEditing ? (
+                        <input
+                          type="text"
+                          value={draftMonthNotes}
+                          onChange={(e) => setDraftMonthNotes(e.target.value)}
+                          placeholder="Catatan penyesuaian..."
+                          className="w-full px-2 py-1 text-xs border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      ) : (
+                        <span className="text-slate-500 truncate block" title={row.notes || '-'}>
+                          {row.notes || '-'}
+                        </span>
+                      )}
+                    </td>
+
+                    {/* Aksi */}
+                    <td className="py-2.5 px-3 text-center">
+                      {isEditing ? (
+                        <div className="flex items-center justify-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => saveEditMonth(row.month)}
+                            className="px-2.5 py-1 text-[11px] font-semibold bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors cursor-pointer flex items-center gap-1"
+                          >
+                            <Save className="w-3 h-3" />
+                            <span>Simpan</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelEditMonth}
+                            className="px-2 py-1 text-[11px] font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors cursor-pointer"
+                          >
+                            Batal
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => startEditMonth(row)}
+                            className="px-2.5 py-1 text-[11px] font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
+                          >
+                            <Edit2 className="w-3 h-3" />
+                            <span>Edit</span>
+                          </button>
+                          {row.isManualEdit && (
+                            <button
+                              type="button"
+                              onClick={() => handleResetSingleMonth(row.month)}
+                              className="p-1 text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                              title="Kembalikan ke angka Google Sheet"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr className="bg-slate-900 text-white font-semibold">
+                <td className="py-3 px-3 text-center">—</td>
+                <td className="py-3 px-3">Total Akumulasi ({selectedYear})</td>
+                <td className="py-3 px-3 text-right font-mono tabular-nums">
+                  {formatRupiah(monthlyTotals.totalSellIn, false)}
+                </td>
+                <td className="py-3 px-3 text-right font-mono tabular-nums">
+                  {formatRupiah(monthlyTotals.totalSellOut, false)}
+                </td>
+                <td className="py-3 px-3 text-right font-mono tabular-nums">
+                  <span className={monthlyTotals.totalGapValue >= 0 ? 'text-cyan-300' : 'text-rose-300'}>
+                    {monthlyTotals.totalGapValue >= 0 ? '+' : ''}
+                    {formatRupiah(monthlyTotals.totalGapValue, false)}
+                  </span>
+                </td>
+                <td className="py-3 px-3 text-center font-mono tabular-nums">
+                  {monthlyTotals.avgGapPercent >= 0 ? '+' : ''}
+                  {monthlyTotals.avgGapPercent}%
+                </td>
+                <td className="py-3 px-3 text-center font-mono tabular-nums">
+                  {monthlyTotals.sellThroughPercent}%
+                </td>
+                <td className="py-3 px-3 text-xs text-slate-300" colSpan={3}>
+                  {monthlyTotals.editedCount > 0
+                    ? `${monthlyTotals.editedCount} bulan menggunakan penyesuaian manual`
+                    : '100% Realisasi Google Sheet'}
+                </td>
+              </tr>
+            </tfoot>
+          </table>
         </div>
       </div>
 
-      {/* 4. Table Header & Search */}
-      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
-        <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50/60">
+      {/* 4. Daftar Evaluasi Entitas (Bisa Diedit per Baris + Rincian Analisa) */}
+      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <div className="p-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50/70">
           <div>
-            <h3 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
-              <span>Daftar Evaluasi {currentMeta.label} ({selectedMonth} {selectedYear})</span>
-              <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-700">
-                {filteredItems.length} Data
-              </span>
+            <h3 className="text-sm font-bold text-slate-900">
+              Daftar Evaluasi {currentMeta.label} ({selectedMonth === 'ALL' ? 'Semua Bulan' : selectedMonth} {selectedYear}) · {filteredItems.length} Data
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">{currentMeta.desc}</p>
           </div>
 
-          {/* Search bar & quick edit */}
           <div className="flex items-center gap-2">
             <div className="relative min-w-[240px]">
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -862,203 +942,200 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
                 placeholder={`Cari nama ${currentMeta.label.toLowerCase()}...`}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-9 pr-8 py-1.5 text-xs rounded-xl border border-slate-200 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                className="w-full pl-9 pr-8 py-1.5 text-xs rounded-xl border border-slate-200 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
               {searchQuery && (
                 <button
                   onClick={() => setSearchQuery('')}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
               )}
             </div>
-
-            {activeDimension === 'spv' && (
-              <button
-                onClick={() => openEditModal(selectedMonth)}
-                className="px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 rounded-xl transition-all cursor-pointer flex items-center gap-1 shrink-0"
-              >
-                <Edit2 className="w-3 h-3" />
-                <span>Edit SPV WIDODO</span>
-              </button>
-            )}
           </div>
         </div>
 
-        {/* 5. Main Comparison Table */}
         <div className="overflow-x-auto">
           <table className="w-full text-xs text-left border-collapse">
             <thead>
-              <tr className="bg-slate-100/80 text-slate-700 font-bold border-b border-slate-200">
-                <th className="py-3 px-3 text-center w-10">No</th>
-                <th className="py-3 px-3">Nama {currentMeta.label}</th>
-                <th className="py-3 px-3">Keterangan / Wilayah</th>
-                <th className="py-3 px-3 text-right">Value Sell In (Rp)</th>
-                <th className="py-3 px-3 text-right">Value Sell Out (Rp)</th>
-                {activeDimension === 'spv' && (
-                  <>
-                    <th className="py-3 px-3 text-right">Target SPV &amp; Area (Rp)</th>
-                    <th className="py-3 px-3 text-center">% Pencapaian</th>
-                  </>
-                )}
-                <th className="py-3 px-3 text-right">Nilai Selisih (Gap)</th>
-                <th className="py-3 px-3 text-center">Persen Selisih</th>
-                <th className="py-3 px-3 text-center">Sell-Through</th>
-                <th className="py-3 px-3 text-center">Status &amp; Tanda &gt; 20%</th>
-                <th className="py-3 px-3 text-center">Aksi &amp; Rincian</th>
+              <tr className="bg-slate-100/80 text-slate-700 font-semibold border-b border-slate-200">
+                <th className="py-2.5 px-3 text-center w-10">No</th>
+                <th className="py-2.5 px-3">Nama {currentMeta.label}</th>
+                <th className="py-2.5 px-3">Keterangan / Wilayah</th>
+                <th className="py-2.5 px-3 text-right">Sell In (Rp)</th>
+                <th className="py-2.5 px-3 text-right">Sell Out (Rp)</th>
+                <th className="py-2.5 px-3 text-right">Selisih (Gap)</th>
+                <th className="py-2.5 px-3 text-center">% Selisih</th>
+                <th className="py-2.5 px-3 text-center">Sell-Through</th>
+                <th className="py-2.5 px-3">Status Evaluasi</th>
+                <th className="py-2.5 px-3 text-center">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredItems.map((item, idx) => {
-                const isOver20 = item.isOver20Percent;
+                const isEditing = editingEntityName === item.name;
+                const isManual = hasEntityOverride(item.name);
+                const liveSellIn = isEditing ? Math.max(0, Number(draftEntitySellIn) || 0) : item.sellInValue;
+                const liveSellOut = isEditing ? Math.max(0, Number(draftEntitySellOut) || 0) : item.sellOutValue;
+                const liveGap = liveSellIn - liveSellOut;
+                const liveDenom = liveSellIn > 0 ? liveSellIn : liveSellOut > 0 ? liveSellOut : 0;
+                const liveGapPct = liveDenom > 0 ? Math.round((liveGap / liveDenom) * 1000) / 10 : 0;
+                const liveStPct = liveSellIn > 0 ? Math.round((liveSellOut / liveSellIn) * 1000) / 10 : 0;
+                const isOver20 = (liveSellIn > 0 || liveSellOut > 0) && Math.abs(liveGapPct) > 20;
+
                 return (
                   <tr
                     key={item.id}
                     className={`transition-colors ${
-                      isOver20
+                      isEditing
+                        ? 'bg-indigo-50/50'
+                        : isOver20
                         ? item.statusType === 'overstock'
-                          ? 'bg-amber-50/40 hover:bg-amber-50/70'
-                          : 'bg-rose-50/40 hover:bg-rose-50/70'
+                          ? 'bg-amber-50/35 hover:bg-amber-50/60'
+                          : 'bg-rose-50/35 hover:bg-rose-50/60'
                         : 'hover:bg-slate-50/80'
                     }`}
                   >
-                    <td className="py-3 px-3 text-center font-bold text-slate-500">
+                    <td className="py-2.5 px-3 text-center font-mono tabular-nums text-slate-500">
                       {idx + 1}
                     </td>
 
-                    {/* Entity Name */}
-                    <td className="py-3 px-3">
-                      <div className="flex items-center gap-2">
-                        {isOver20 && (
-                          <AlertTriangle
-                            className={`w-4 h-4 shrink-0 ${
-                              item.statusType === 'overstock' ? 'text-amber-600' : 'text-rose-600'
-                            }`}
-                          />
-                        )}
-                        <div>
-                          <span className="font-extrabold text-slate-900 block">
-                            {item.name}
-                          </span>
-                          {item.storeName && activeDimension !== 'store' && (
-                            <span className="text-[10px] text-slate-500 block">
-                              Outlet: {item.storeName}
-                            </span>
-                          )}
-                        </div>
-                      </div>
+                    <td className="py-2.5 px-3">
+                      <span className="font-semibold text-slate-900 block">{item.name}</span>
+                      {item.storeName && activeDimension !== 'store' && (
+                        <span className="text-[11px] text-slate-500 block">
+                          Outlet: {item.storeName}
+                        </span>
+                      )}
                     </td>
 
-                    {/* Secondary Info */}
-                    <td className="py-3 px-3 text-slate-600 font-medium">
-                      {item.secondaryInfo || '-'}
+                    <td className="py-2.5 px-3 text-slate-600">{item.secondaryInfo || '-'}</td>
+
+                    <td className="py-2.5 px-3 text-right font-mono tabular-nums">
+                      {isEditing ? (
+                        <input
+                          type="number"
+                          min={0}
+                          step="any"
+                          value={draftEntitySellIn}
+                          onChange={(e) => setDraftEntitySellIn(e.target.value)}
+                          className="w-32 px-2 py-1 text-right text-xs font-mono font-semibold border border-indigo-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      ) : (
+                        <span className="font-semibold text-slate-900">
+                          {formatRupiah(item.sellInValue, false)}
+                        </span>
+                      )}
                     </td>
 
-                    {/* Sell In */}
-                    <td className="py-3 px-3 text-right font-mono font-bold text-slate-900">
-                      {formatRupiah(item.sellInValue, true)}
+                    <td className="py-2.5 px-3 text-right font-mono tabular-nums">
+                      {isEditing ? (
+                        <input
+                          type="number"
+                          min={0}
+                          step="any"
+                          value={draftEntitySellOut}
+                          onChange={(e) => setDraftEntitySellOut(e.target.value)}
+                          className="w-32 px-2 py-1 text-right text-xs font-mono font-semibold border border-indigo-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      ) : (
+                        <span className="font-semibold text-indigo-950">
+                          {formatRupiah(item.sellOutValue, false)}
+                        </span>
+                      )}
                     </td>
 
-                    {/* Sell Out */}
-                    <td className="py-3 px-3 text-right font-mono font-black text-indigo-900">
-                      {formatRupiah(item.sellOutValue, true)}
-                    </td>
-
-                    {/* Target & Pencapaian SPV */}
-                    {activeDimension === 'spv' && (
-                      <>
-                        <td className="py-3 px-3 text-right font-mono text-slate-700">
-                          {formatRupiah(item.target || 850000000, true)}
-                        </td>
-                        <td className="py-3 px-3 text-center">
-                          <span
-                            className={`px-2 py-0.5 rounded-full font-bold text-[11px] ${
-                              (item.achievementPercent || 0) >= 100
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : (item.achievementPercent || 0) >= 85
-                                ? 'bg-blue-100 text-blue-800'
-                                : 'bg-amber-100 text-amber-800'
-                            }`}
-                          >
-                            {item.achievementPercent || 0}%
-                          </span>
-                        </td>
-                      </>
-                    )}
-
-                    {/* Gap Value */}
-                    <td className="py-3 px-3 text-right font-mono font-bold">
-                      <span className={item.gapValue >= 0 ? 'text-indigo-700' : 'text-rose-600'}>
-                        {item.gapValue >= 0 ? '+' : ''}
-                        {formatRupiah(item.gapValue, true)}
+                    <td className="py-2.5 px-3 text-right font-mono tabular-nums font-semibold">
+                      <span className={liveGap >= 0 ? 'text-indigo-700' : 'text-rose-600'}>
+                        {liveGap >= 0 ? '+' : ''}
+                        {formatRupiah(liveGap, false)}
                       </span>
                     </td>
 
-                    {/* Gap Percent */}
-                    <td className="py-3 px-3 text-center font-mono">
+                    <td className="py-2.5 px-3 text-center font-mono tabular-nums">
                       <span
-                        className={`font-extrabold px-2 py-0.5 rounded text-[11px] ${
+                        className={`font-semibold ${
                           isOver20
-                            ? item.statusType === 'overstock'
-                              ? 'bg-amber-100 text-amber-900'
-                              : 'bg-rose-100 text-rose-900'
-                            : 'bg-slate-100 text-slate-700'
+                            ? liveGapPct > 0
+                              ? 'text-amber-700'
+                              : 'text-rose-600'
+                            : 'text-slate-700'
                         }`}
                       >
-                        {item.gapPercent >= 0 ? '+' : ''}
-                        {item.gapPercent}%
+                        {liveGapPct >= 0 ? '+' : ''}
+                        {liveGapPct}%
                       </span>
                     </td>
 
-                    {/* Sell-Through */}
-                    <td className="py-3 px-3 text-center font-mono text-slate-700">
-                      {item.sellThroughPercent}%
+                    <td className="py-2.5 px-3 text-center font-mono tabular-nums text-slate-700">
+                      {liveStPct}%
                     </td>
 
-                    {/* Status Badge */}
-                    <td className="py-3 px-3 text-center">
+                    <td className="py-2.5 px-3">
                       <span
-                        className={`px-2.5 py-1 rounded-full text-[10px] font-extrabold inline-block ${
-                          isOver20
+                        className={`text-xs font-medium ${
+                          item.sellInValue === 0 && item.sellOutValue === 0
+                            ? 'text-slate-400'
+                            : isOver20
                             ? item.statusType === 'overstock'
-                              ? 'bg-amber-100 text-amber-900 border border-amber-300'
-                              : 'bg-rose-100 text-rose-900 border border-rose-300'
-                            : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                              ? 'text-amber-700'
+                              : 'text-rose-600'
+                            : 'text-emerald-700'
                         }`}
                       >
                         {item.statusLabel}
                       </span>
                     </td>
 
-                    {/* Action */}
-                    <td className="py-3 px-3 text-center">
-                      <div className="flex items-center justify-center gap-1.5">
-                        {activeDimension === 'spv' && (
+                    <td className="py-2.5 px-3 text-center">
+                      {isEditing ? (
+                        <div className="flex items-center justify-center gap-1">
                           <button
-                            onClick={() => openEditModal(selectedMonth)}
-                            className="px-2 py-1 text-[11px] font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg border border-indigo-200 transition-colors cursor-pointer"
+                            type="button"
+                            onClick={() => saveEditEntity(item.name)}
+                            className="px-2.5 py-1 text-[11px] font-semibold bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg cursor-pointer flex items-center gap-1"
                           >
-                            Edit
+                            <Save className="w-3 h-3" />
+                            <span>Simpan</span>
                           </button>
-                        )}
-                        {activeDimension === 'ba' && (
                           <button
-                            onClick={() => openEditBaModal(item)}
-                            className="px-2 py-1 text-[11px] font-bold bg-pink-50 hover:bg-pink-100 text-pink-700 rounded-lg border border-pink-200 transition-colors cursor-pointer flex items-center gap-1"
-                            title="Edit target, Sell In & Sell Out BA"
+                            type="button"
+                            onClick={cancelEditEntity}
+                            className="px-2 py-1 text-[11px] font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg cursor-pointer"
+                          >
+                            Batal
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => startEditEntity(item)}
+                            className="px-2 py-1 text-[11px] font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
                           >
                             <Edit2 className="w-3 h-3" />
-                            <span>Edit BA</span>
+                            <span>Edit</span>
                           </button>
-                        )}
-                        <button
-                          onClick={() => setSelectedItemModal(item)}
-                          className="px-2.5 py-1 text-[11px] font-bold bg-cyan-50 hover:bg-cyan-100 text-cyan-700 rounded-lg border border-cyan-200 transition-colors cursor-pointer"
-                        >
-                          Rincian
-                        </button>
-                      </div>
+                          {isManual && (
+                            <button
+                              type="button"
+                              onClick={() => handleResetEntity(item.name)}
+                              className="p-1 text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                              title="Kembalikan ke angka Google Sheet"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setSelectedItemModal(item)}
+                            className="px-2.5 py-1 text-[11px] font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg transition-colors cursor-pointer"
+                          >
+                            Rincian
+                          </button>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 );
@@ -1066,8 +1143,8 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
 
               {filteredItems.length === 0 && (
                 <tr>
-                  <td colSpan={activeDimension === 'spv' ? 12 : 10} className="py-10 text-center text-slate-400">
-                    Tidak ada data yang cocok dengan kriteria filter.
+                  <td colSpan={10} className="py-10 text-center text-slate-400">
+                    Tidak ada data Google Sheet yang cocok dengan kriteria filter saat ini.
                   </td>
                 </tr>
               )}
@@ -1076,23 +1153,20 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
         </div>
       </div>
 
-      {/* 6. Detail Modal */}
+      {/* 5. Detail Rincian Modal */}
       {selectedItemModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-lg w-full p-6 max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-lg w-full p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-start justify-between pb-4 border-b border-slate-100">
               <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-cyan-50 text-cyan-800 border border-cyan-200">
-                    {currentMeta.label}
-                  </span>
-                  <span className="text-xs text-slate-400">
-                    • Periode: {selectedMonth} {selectedYear}
+                <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <span className="font-semibold text-indigo-700">{currentMeta.label}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>
+                    {selectedMonth === 'ALL' ? 'Semua Bulan' : selectedMonth} {selectedYear}
                   </span>
                 </div>
-                <h3 className="text-lg font-black text-slate-900 mt-1">
-                  {selectedItemModal.name}
-                </h3>
+                <h3 className="text-lg font-bold text-slate-900 mt-1">{selectedItemModal.name}</h3>
                 <p className="text-xs text-slate-500">{selectedItemModal.secondaryInfo}</p>
               </div>
               <button
@@ -1103,459 +1177,66 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
               </button>
             </div>
 
-            {/* Metrics Grid */}
-            <div className="mt-4 grid grid-cols-2 gap-3 p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs">
+            <div className="mt-4 grid grid-cols-2 gap-3 p-3.5 bg-slate-50 rounded-xl border border-slate-200 text-xs">
               <div>
-                <span className="text-slate-400 block text-[10px]">Total Sell In:</span>
-                <span className="font-mono font-black text-slate-900 block mt-0.5">
-                  {formatRupiah(selectedItemModal.sellInValue, true)}
+                <span className="text-slate-500 block text-[11px]">Total Sell In:</span>
+                <span className="font-mono tabular-nums font-bold text-slate-900 block mt-0.5">
+                  {formatRupiah(selectedItemModal.sellInValue, false)}
                 </span>
               </div>
               <div>
-                <span className="text-slate-400 block text-[10px]">Total Sell Out (Pencapaian):</span>
-                <span className="font-mono font-black text-indigo-900 block mt-0.5">
-                  {formatRupiah(selectedItemModal.sellOutValue, true)}
+                <span className="text-slate-500 block text-[11px]">Total Sell Out:</span>
+                <span className="font-mono tabular-nums font-bold text-indigo-900 block mt-0.5">
+                  {formatRupiah(selectedItemModal.sellOutValue, false)}
                 </span>
               </div>
               <div>
-                <span className="text-slate-400 block text-[10px]">Selisih Nilai (Gap):</span>
+                <span className="text-slate-500 block text-[11px]">Selisih Nilai (Gap):</span>
                 <span
-                  className={`font-mono font-bold block mt-0.5 ${
+                  className={`font-mono tabular-nums font-bold block mt-0.5 ${
                     selectedItemModal.gapValue >= 0 ? 'text-indigo-700' : 'text-rose-600'
                   }`}
                 >
                   {selectedItemModal.gapValue >= 0 ? '+' : ''}
-                  {formatRupiah(selectedItemModal.gapValue, true)} ({selectedItemModal.gapPercent}%)
+                  {formatRupiah(selectedItemModal.gapValue, false)} ({selectedItemModal.gapPercent}%)
                 </span>
               </div>
               <div>
-                <span className="text-slate-400 block text-[10px]">Sell-Through Rate:</span>
-                <span className="font-mono font-bold text-slate-800 block mt-0.5">
+                <span className="text-slate-500 block text-[11px]">Sell-Through Rate:</span>
+                <span className="font-mono tabular-nums font-bold text-slate-800 block mt-0.5">
                   {selectedItemModal.sellThroughPercent}%
                 </span>
               </div>
             </div>
 
-            {/* Root Cause Analysis */}
-            <div className="mt-4 p-3 rounded-xl border border-slate-200 text-xs space-y-1">
-              <span className="font-bold text-slate-700 block flex items-center gap-1.5">
-                <Info className="w-4 h-4 text-cyan-600" />
-                Diagnosa &amp; Analisis Aliran Barang:
+            <div className="mt-4 p-3.5 rounded-xl border border-slate-200 text-xs space-y-1">
+              <span className="font-bold text-slate-800 flex items-center gap-1.5">
+                <Info className="w-4 h-4 text-slate-600" />
+                Diagnosa &amp; Analisis Aliran Barang
               </span>
               <p className="text-slate-600 leading-relaxed">
                 {selectedItemModal.rootCauseAnalysis}
               </p>
             </div>
 
-            {/* Action Plan */}
-            <div className="mt-4 p-3.5 bg-cyan-50/60 rounded-xl border border-cyan-200 text-xs text-cyan-950 space-y-1">
-              <span className="font-extrabold flex items-center gap-1.5 text-cyan-900">
-                <CheckCircle2 className="w-4 h-4 text-cyan-600" />
-                Rekomendasi Rencana Tindak Lanjut:
+            <div className="mt-3 p-3.5 bg-slate-50 rounded-xl border border-slate-200 text-xs text-slate-800 space-y-1">
+              <span className="font-bold flex items-center gap-1.5 text-slate-900">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                Rekomendasi Tindak Lanjut
               </span>
-              <p className="leading-relaxed font-medium whitespace-pre-line">
+              <p className="leading-relaxed whitespace-pre-line text-slate-600">
                 {selectedItemModal.recommendedAction}
               </p>
             </div>
 
-            <div className="mt-6 flex justify-end">
+            <div className="mt-5 flex justify-end">
               <button
                 onClick={() => setSelectedItemModal(null)}
-                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer"
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
               >
                 Tutup Rincian
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* 7. Modal Edit Nilai SPV WIDODO, KA & DAZZLE ME MG (Dukungan Filter Bulan Bebas) */}
-      {isEditModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150 my-6 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div>
-                <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
-                  <Edit2 className="w-4 h-4 text-indigo-600" />
-                  Edit Pencapaian SPV WIDODO, KA &amp; DAZZLE ME MG
-                </h3>
-                <span className="text-xs text-slate-500">
-                  SPV Tunggal: WIDODO • Penjualan KA &amp; DAZZLE ME MG masuk penuh ke Pencapaian SPV &amp; Area
-                </span>
-              </div>
-              <button
-                onClick={() => setIsEditModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleSaveEdit} className="space-y-4 mt-4 text-xs">
-              {/* Filter Bulan di Modal untuk Edit Bulan Berapa Aja */}
-              <div className="p-3.5 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl border border-indigo-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <Calendar className="w-4 h-4 text-indigo-700" />
-                  <div>
-                    <span className="font-extrabold text-slate-900 text-xs block">
-                      Pilih Bulan yang Ingin Diedit:
-                    </span>
-                    <span className="text-[10px] text-slate-500">
-                      Anda dapat mengubah dan menyimpan pencapaian untuk bulan apa saja secara fleksibel
-                    </span>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <select
-                    value={modalMonth}
-                    onChange={(e) => loadMonthDataIntoModal(e.target.value)}
-                    className="font-bold text-indigo-900 bg-white border border-indigo-300 rounded-lg px-3 py-1.5 shadow-2xs cursor-pointer text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  >
-                    {MONTH_NAMES_LIST.map((m) => (
-                      <option key={m} value={m}>
-                        {m === 'ALL' ? 'Semua Bulan (ALL)' : m}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              {/* Form Input 1: Sell In Reguler Tim Sales */}
-              <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="font-extrabold text-slate-900 text-xs flex items-center gap-1.5">
-                    <Building2 className="w-3.5 h-3.5 text-blue-600" />
-                    1. Sell In Reguler Tim Sales Binaan SPV WIDODO (6 Sales):
-                  </span>
-                  <span className="text-[10px] text-slate-500 font-mono">Format IDR</span>
-                </div>
-                <div className="relative">
-                  <span className="absolute left-3 top-2 text-slate-400 font-bold text-xs">Rp</span>
-                  <input
-                    type="number"
-                    min={0}
-                    step="any"
-                    value={editRegularSellIn}
-                    onChange={(e) => setEditRegularSellIn(Number(e.target.value))}
-                    className="w-full pl-9 pr-3 py-1.5 rounded-lg border border-slate-200 bg-white font-mono font-bold text-xs focus:border-blue-500 focus:outline-none"
-                    required
-                  />
-                </div>
-                <span className="text-[10px] text-slate-500 font-mono block">
-                  {formatRupiah(editRegularSellIn)} (Membawahi: ALBERT FERNANDO, ILHAMSYAH, TIWI, ABDUL RAHIM, PARETO, LUAR KOTA)
-                </span>
-              </div>
-
-              {/* Form Input 2 & 3: Sell In KA & Sell In DAZZLE ME MG */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {/* Sell In KA */}
-                <div className="p-3 bg-purple-50/60 rounded-xl border border-purple-200 space-y-1.5">
-                  <label className="text-[11px] font-bold text-purple-900 block flex items-center justify-between">
-                    <span>2. Sell In KA (Key Account):</span>
-                    <span className="text-[10px] text-purple-600 font-mono">IDR</span>
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-2.5 top-2 text-purple-400 font-bold text-xs">Rp</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step="any"
-                      value={editKaSellIn}
-                      onChange={(e) => setEditKaSellIn(Number(e.target.value))}
-                      className="w-full pl-8 pr-2.5 py-1.5 rounded-lg border border-purple-200 bg-white font-mono font-bold text-xs focus:border-purple-500 focus:outline-none"
-                      required
-                    />
-                  </div>
-                  <span className="text-[10px] text-purple-700 font-mono block">
-                    {formatRupiah(editKaSellIn)}
-                  </span>
-                  <span className="text-[9px] text-purple-600 block">
-                    * Otomatis dihitung masuk ke Pencapaian SELL IN SPV WIDODO &amp; Area
-                  </span>
-                </div>
-
-                {/* Sell In DAZZLE ME MG */}
-                <div className="p-3 bg-emerald-50/60 rounded-xl border border-emerald-200 space-y-1.5">
-                  <label className="text-[11px] font-bold text-emerald-900 block flex items-center justify-between">
-                    <span className="font-extrabold">3. Sell In DAZZLE ME MG:</span>
-                    <span className="text-[10px] text-emerald-600 font-mono">IDR</span>
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-2.5 top-2 text-emerald-400 font-bold text-xs">Rp</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step="any"
-                      value={editDazzleMeMgSellIn}
-                      onChange={(e) => setEditDazzleMeMgSellIn(Number(e.target.value))}
-                      className="w-full pl-8 pr-2.5 py-1.5 rounded-lg border border-emerald-200 bg-white font-mono font-bold text-xs focus:border-emerald-500 focus:outline-none"
-                      required
-                    />
-                  </div>
-                  <span className="text-[10px] text-emerald-700 font-mono block">
-                    {formatRupiah(editDazzleMeMgSellIn)}
-                  </span>
-                  <span className="text-[9px] text-emerald-600 block">
-                    * Otomatis dihitung masuk ke Pencapaian SELL IN SPV WIDODO &amp; Area
-                  </span>
-                </div>
-              </div>
-
-              {/* Form Input 4 & 5: Sell Out Konsumen & Target Area */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                <div>
-                  <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                    4. Total Sell Out (Konsumen Kasir Area):
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-2.5 top-2 text-slate-400 font-bold text-xs">Rp</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step="any"
-                      value={editSellOut}
-                      onChange={(e) => setEditSellOut(Number(e.target.value))}
-                      className="w-full pl-8 pr-2.5 py-1.5 rounded-lg border border-slate-200 bg-white font-mono font-bold text-xs focus:border-indigo-500 focus:outline-none"
-                      required
-                    />
-                  </div>
-                  <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
-                    {formatRupiah(editSellOut)}
-                  </span>
-                </div>
-
-                <div>
-                  <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                    5. Target Sell In SPV WIDODO &amp; Area Riau:
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-2.5 top-2 text-slate-400 font-bold text-xs">Rp</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step="any"
-                      value={editTarget}
-                      onChange={(e) => setEditTarget(Number(e.target.value))}
-                      className="w-full pl-8 pr-2.5 py-1.5 rounded-lg border border-slate-200 bg-white font-mono font-bold text-xs focus:border-indigo-500 focus:outline-none"
-                      required
-                    />
-                  </div>
-                  <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
-                    {formatRupiah(editTarget)}
-                  </span>
-                </div>
-              </div>
-
-              {/* Live Preview Strip: Formula Total Pencapaian Sell In */}
-              <div className="p-3.5 bg-slate-900 text-white rounded-xl space-y-2 font-mono">
-                <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                  <span className="text-[10px] text-slate-400 uppercase tracking-wider block">
-                    Formula Total Pencapaian Sell In ({modalMonth}):
-                  </span>
-                  <span className="text-xs text-amber-300 font-bold">
-                    Sell In Reguler (6 Sales) + Sell In KA + Sell In DAZZLE ME MG
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-xs">
-                  <div>
-                    <span className="text-[10px] text-slate-400 block">Total Sell In (Distributor):</span>
-                    <span className="font-bold text-cyan-300 block">
-                      {formatRupiah(modalLiveTotalSellIn, true)}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-[10px] text-slate-400 block">Target Sell In:</span>
-                    <span className="font-bold text-slate-200 block">
-                      {formatRupiah(editTarget, true)}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-[10px] text-slate-400 block">% Pencapaian:</span>
-                    <span className="font-bold text-emerald-400 block">
-                      {modalLiveAchievementPercent}%
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-[10px] text-slate-400 block">Selisih (Gap):</span>
-                    <span
-                      className={`font-bold block ${
-                        modalLiveGap >= 0 ? 'text-cyan-300' : 'text-rose-400'
-                      }`}
-                    >
-                      {modalLiveGap >= 0 ? '+' : ''}
-                      {formatRupiah(modalLiveGap, true)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Notes */}
-              <div>
-                <label className="text-[11px] text-slate-600 block mb-0.5">Catatan Penyesuaian:</label>
-                <input
-                  type="text"
-                  value={editNotes}
-                  onChange={(e) => setEditNotes(e.target.value)}
-                  placeholder="Keterangan perubahan..."
-                  className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs"
-                />
-              </div>
-
-              {/* Buttons */}
-              <div className="flex items-center justify-between pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={handleResetMonthToAuto}
-                  className="px-3 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg cursor-pointer flex items-center gap-1"
-                >
-                  <RotateCcw className="w-3 h-3" />
-                  <span>Reset Bulan Ini ({modalMonth})</span>
-                </button>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setIsEditModalOpen(false)}
-                    className="px-3 py-1.5 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"
-                  >
-                    Batal
-                  </button>
-                  <button
-                    type="submit"
-                    className="px-4 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg shadow-xs cursor-pointer flex items-center gap-1.5"
-                  >
-                    <Save className="w-3.5 h-3.5" />
-                    <span>Simpan Pencapaian {modalMonth}</span>
-                  </button>
-                </div>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* 8. Modal Edit Evaluasi Beauty Advisor (BA) */}
-      {editingBaItem && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="bg-white rounded-2xl shadow-2xl border border-pink-200 max-w-md w-full p-6 animate-in zoom-in-95 duration-150">
-            <div className="flex items-start justify-between pb-3 border-b border-pink-100">
-              <div className="flex items-center gap-2">
-                <div className="p-2 bg-pink-100 text-pink-700 rounded-xl">
-                  <Sparkles className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-extrabold text-slate-900">
-                    Edit Evaluasi BA: {editingBaItem.name}
-                  </h3>
-                  <p className="text-[11px] text-slate-500 font-medium">
-                    {editingBaItem.storeName ? `Outlet: ${editingBaItem.storeName}` : 'Pencapaian BA Toko'} • {selectedMonth} {selectedYear}
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => setEditingBaItem(null)}
-                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleSaveBaEdit} className="space-y-4 mt-4 text-xs">
-              {/* Toko */}
-              <div>
-                <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                  Nama Toko / Outlet Counter:
-                </label>
-                <input
-                  type="text"
-                  value={editBaStore}
-                  onChange={(e) => setEditBaStore(e.target.value)}
-                  placeholder="Contoh: TOKO ALANA BEAUTY"
-                  className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 font-bold text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-pink-500"
-                />
-              </div>
-
-              {/* Target Sell Out BA */}
-              <div>
-                <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                  Target Sell Out BA (Rp):
-                </label>
-                <input
-                  type="number"
-                  step="any"
-                  value={editBaTarget || ''}
-                  onChange={(e) => setEditBaTarget(Number(e.target.value) || 0)}
-                  placeholder="35000000"
-                  className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white font-mono font-bold text-xs focus:outline-none focus:ring-2 focus:ring-pink-500"
-                />
-              </div>
-
-              {/* Value Sell Out (Konsumen) */}
-              <div>
-                <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                  Realisasi Sell Out (Konsumen) (Rp):
-                </label>
-                <input
-                  type="number"
-                  step="any"
-                  value={editBaSellOut || ''}
-                  onChange={(e) => setEditBaSellOut(Number(e.target.value) || 0)}
-                  placeholder="0"
-                  className="w-full px-3 py-2 rounded-xl border border-pink-200 bg-pink-50/50 font-mono font-bold text-xs text-pink-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-pink-500"
-                />
-              </div>
-
-              {/* Value Sell In (Distributor) */}
-              <div>
-                <label className="text-[11px] font-bold text-slate-700 block mb-1">
-                  Pasokan Stok Masuk / Sell In Counter (Rp):
-                </label>
-                <input
-                  type="number"
-                  step="any"
-                  value={editBaSellIn || ''}
-                  onChange={(e) => setEditBaSellIn(Number(e.target.value) || 0)}
-                  placeholder="0"
-                  className="w-full px-3 py-2 rounded-xl border border-blue-200 bg-blue-50/50 font-mono font-bold text-xs text-blue-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-
-              {/* Summary Live Preview */}
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] space-y-1">
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Pencapaian Target:</span>
-                  <span className="font-bold text-slate-900 font-mono">
-                    {editBaTarget > 0 ? Math.round((editBaSellOut / editBaTarget) * 1000) / 10 : 0}%
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Selisih Stok (Sell In - Sell Out):</span>
-                  <span className="font-bold font-mono text-indigo-700">
-                    {formatRupiah(editBaSellIn - editBaSellOut)}
-                  </span>
-                </div>
-              </div>
-
-              {/* Buttons */}
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setEditingBaItem(null)}
-                  className="px-3 py-1.5 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"
-                >
-                  Batal
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 text-xs font-bold text-white bg-pink-600 hover:bg-pink-500 rounded-lg shadow-xs cursor-pointer flex items-center gap-1.5"
-                >
-                  <Save className="w-3.5 h-3.5" />
-                  <span>Simpan Data BA</span>
-                </button>
-              </div>
-            </form>
           </div>
         </div>
       )}

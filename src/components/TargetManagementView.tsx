@@ -573,7 +573,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
         'Target Sell In (IDR)': sl.targetSellIn,
         'Realisasi Sell In (IDR)': sl.actualSellIn,
         '% Pencapaian': `${sl.achievementPct.toFixed(1)}%`,
-        'Skema Insentif': `${sl.incentivePercent}% (≥100%: 4% | 80-99%: 0.2%)`,
+        'Skema Insentif': `${sl.incentivePercent}% (≥100%: 0.4% | 80-99%: 0.2%)`,
         'Estimasi Insentif (IDR)': sl.incentiveNominal,
         Status: sl.status === 'achieved' ? 'Tercapai (≥100%)' : sl.status === 'on_track' ? 'On Track (80-99%)' : 'Belum Capai (<80%)',
       }));
@@ -732,7 +732,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
             </div>
             <p className="text-xs sm:text-sm text-slate-300 mt-2 max-w-2xl leading-relaxed">
               Modul terintegrasi untuk menetapkan target omzet berjenjang, mengontrol pencapaian tim, dan menyinkronkan
-              otomatis ke perhitungan <strong>Gaji Sales (Insentif 4% saat capai ≥100%)</strong>, <strong>Cost Area</strong>, serta <strong>Produk Fokus BA</strong>.
+              otomatis ke perhitungan <strong>Gaji Sales (Insentif 0,4% saat capai ≥100%)</strong>, <strong>Cost Area</strong>, serta <strong>Produk Fokus BA</strong>.
             </p>
           </div>
 
@@ -1068,7 +1068,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
             }`}
           >
             <Users className="w-4 h-4" />
-            <span>3. Target Sales &amp; Insentif 4% ({matrixData.sales.length})</span>
+            <span>3. Target Sales &amp; Insentif 0,4% ({matrixData.sales.length})</span>
           </button>
 
           <button
@@ -1395,7 +1395,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
       )}
 
       {/* ========================================================================================= */}
-      {/* SUBTAB 3: TARGET SALES (SELL IN & SELL OUT + INSENTIF 4%) */}
+      {/* SUBTAB 3: TARGET SALES (SELL IN & SELL OUT + INSENTIF 0,4%) */}
       {/* ========================================================================================= */}
       {subTab === 'sales' && (
         <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-6 shadow-xs space-y-4">
@@ -1526,7 +1526,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                         {item.achievementPct >= 100 ? (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
                             <Sparkles className="w-3 h-3 text-emerald-600" />
-                            Dapat 4%
+                            Dapat 0,4%
                           </span>
                         ) : item.achievementPct >= 80 ? (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">
@@ -2425,10 +2425,10 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 </span>
               </div>
 
-              {/* Simulation card of 4% incentive */}
+              {/* Simulation card of 0.4% incentive */}
               {(() => {
                 const projPct = (editingSales.actualSellIn / (salesTargetInput || 1)) * 100;
-                const incPct = projPct >= 100 ? 4.0 : projPct >= 80 ? 0.2 : 0;
+                const incPct = projPct >= 100 ? 0.4 : projPct >= 80 ? 0.2 : 0;
                 const estInc = Math.round((incPct / 100) * editingSales.actualSellIn);
 
                 return (
@@ -2436,7 +2436,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                     <div className="flex justify-between items-center">
                       <span className="font-bold text-indigo-900">Proyeksi Capai Sell In:</span>
                       <span className="font-mono font-black text-sm text-indigo-950">
-                        {projPct.toFixed(1)}% ({projPct >= 100 ? 'Memenuhi 4%' : projPct >= 80 ? '0,2%' : '0%'})
+                        {projPct.toFixed(1)}% ({projPct >= 100 ? 'Memenuhi 0,4%' : projPct >= 80 ? '0,2%' : '0%'})
                       </span>
                     </div>
                     <div className="flex justify-between items-center text-xs">

@@ -68,6 +68,22 @@ export const BrandAnalysis: React.FC<BrandAnalysisProps> = ({ records }) => {
     },
   };
 
+  const getBrandTheme = (brandName: string) => {
+    const key = brandName.trim();
+    if (brandThemes[key]) return brandThemes[key];
+    const matchedKey = Object.keys(brandThemes).find((k) => k.toUpperCase() === key.toUpperCase());
+    if (matchedKey) return brandThemes[matchedKey];
+    return {
+      cardBg: 'bg-white',
+      text: 'text-slate-900',
+      barGradient: 'bg-slate-600',
+      badgeGradient: 'bg-slate-700 text-white',
+      borderTop: 'border-t-slate-500',
+      borderColor: 'border-slate-200',
+      tagline: 'Brand Kosmetik',
+    };
+  };
+
   // Find top SKU per brand
   const topSkuPerBrand: Record<string, { sku: string; value: number }> = {};
   records.forEach((r) => {
@@ -90,58 +106,58 @@ export const BrandAnalysis: React.FC<BrandAnalysisProps> = ({ records }) => {
             </h2>
           </div>
           <p className="text-xs text-slate-500 mt-0.5 font-medium">
-            Evaluasi bauran portofolio brand kosmetik: barenbliss, Y.O.U, DAZZLE ME, GLAMFIX, lavojoy
+            {brandData.length > 0
+              ? `Evaluasi bauran portofolio Google Sheet: ${brandData.map((b) => b.name).join(', ')}`
+              : 'Tidak ada data brand pada filter aktif saat ini'}
           </p>
         </div>
-        <div className="text-xs font-mono font-bold text-slate-700 bg-gradient-to-r from-slate-100 to-pink-50 px-3 py-1.5 rounded-lg border border-slate-200 shadow-2xs">
+        <div className="text-xs font-mono font-bold text-slate-700 bg-gradient-to-r from-slate-100 to-pink-50 px-3 py-1.5 rounded-lg border border-slate-200 shadow-2xs tabular-nums">
           {brandData.length} Brand Kosmetik Aktif
         </div>
       </div>
 
-      {/* Visual Brand Market Share Segment Bar */}
-      <div className="my-6 p-4 rounded-xl bg-slate-50 border border-slate-200">
-        <div className="flex justify-between items-center text-xs mb-2">
-          <span className="font-extrabold text-slate-800 flex items-center gap-1.5">
-            <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
-            Komposisi Pangsa Pasar (Market Share Portofolio)
-          </span>
-          <span className="text-slate-500 font-mono font-bold">100% Total Kontribusi</span>
+      {brandData.length === 0 ? (
+        <div className="py-12 text-center text-xs text-slate-400 font-medium">
+          Tidak ada data brand dari Google Sheet untuk kombinasi filter terintegrasi saat ini.
         </div>
-        <div className="h-7 w-full rounded-xl overflow-hidden flex shadow-inner bg-slate-200 p-0.5 gap-0.5">
-          {brandData.map((brand) => {
-            const theme = brandThemes[brand.name] || { barGradient: 'bg-slate-500' };
-            const pct = brand.contributionPercent;
-            if (pct < 1) return null;
-            return (
-              <div
-                key={brand.name}
-                style={{ width: `${pct}%` }}
-                className={`${theme.barGradient} h-full rounded-lg transition-all duration-300 relative group flex items-center justify-center shadow-xs cursor-pointer hover:brightness-110`}
-                title={`${brand.name}: ${formatPercent(pct, false)} (${formatRupiah(brand.totalValue)})`}
-              >
-                {pct >= 8 && (
-                  <span className="text-[11px] font-extrabold text-white tracking-wide truncate px-1 drop-shadow-xs">
-                    {brand.name} ({pct.toFixed(0)}%)
-                  </span>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
+      ) : (
+        <>
+          {/* Visual Brand Market Share Segment Bar */}
+          <div className="my-6 p-4 rounded-xl bg-slate-50 border border-slate-200">
+            <div className="flex justify-between items-center text-xs mb-2">
+              <span className="font-extrabold text-slate-800 flex items-center gap-1.5">
+                <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
+                Komposisi Pangsa Pasar (Market Share Portofolio)
+              </span>
+              <span className="text-slate-500 font-mono font-bold">100% Total Kontribusi</span>
+            </div>
+            <div className="h-7 w-full rounded-xl overflow-hidden flex shadow-inner bg-slate-200 p-0.5 gap-0.5">
+              {brandData.map((brand) => {
+                const theme = getBrandTheme(brand.name);
+                const pct = brand.contributionPercent;
+                if (pct < 1) return null;
+                return (
+                  <div
+                    key={brand.name}
+                    style={{ width: `${pct}%` }}
+                    className={`${theme.barGradient} h-full rounded-lg transition-all duration-300 relative group flex items-center justify-center shadow-xs cursor-pointer hover:brightness-110`}
+                    title={`${brand.name}: ${formatPercent(pct, false)} (${formatRupiah(brand.totalValue)})`}
+                  >
+                    {pct >= 8 && (
+                      <span className="text-[11px] font-extrabold text-white tracking-wide truncate px-1 drop-shadow-xs">
+                        {brand.name} ({pct.toFixed(0)}%)
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
 
-      {/* Brand Cards Grid with Full Vibrant Identities */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 mb-6">
-        {brandData.map((brand) => {
-          const theme = brandThemes[brand.name] || {
-            cardBg: 'bg-white',
-            text: 'text-slate-900',
-            barGradient: 'bg-slate-600',
-            badgeGradient: 'bg-slate-700 text-white',
-            borderTop: 'border-t-slate-500',
-            borderColor: 'border-slate-200',
-            tagline: 'Brand Kosmetik',
-          };
+          {/* Brand Cards Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 mb-6">
+            {brandData.map((brand) => {
+              const theme = getBrandTheme(brand.name);
           const topSku = topSkuPerBrand[brand.name]?.sku || '-';
           const avgPrice = brand.totalQty > 0 ? brand.totalValue / brand.totalQty : 0;
 
@@ -206,7 +222,9 @@ export const BrandAnalysis: React.FC<BrandAnalysisProps> = ({ records }) => {
             </div>
           );
         })}
-      </div>
+          </div>
+        </>
+      )}
     </div>
   );
 };

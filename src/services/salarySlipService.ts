@@ -223,11 +223,18 @@ export function buildDefaultSlipFromSales(
   ];
 
   if (item.baProductivityBonus > 0) {
+    const avgNote =
+      item.coveredBaCount > 0
+        ? ` (${formatRupiahPlain(item.coveredBaTotalSellOut || 0)} ÷ ${item.coveredBaCount} BA = ${formatRupiahPlain(item.baProductivityAverage || 0)}/BA)`
+        : '';
     earnings.push({
       id: 'bonus-ba-prod',
-      label: 'Bonus Produktivitas BA Dicover',
+      label: 'Bonus Produktivitas BA untuk Sales',
       amount: item.baProductivityBonus,
-      note: `Reward toko BA mencapai target produktivitas`,
+      note:
+        item.baProductivityBonus >= 1000000
+          ? `Produktivitas BA ≥ Rp 55 Jt${avgNote}`
+          : `Produktivitas BA Rp 45–54 Jt${avgNote}`,
     });
   }
 

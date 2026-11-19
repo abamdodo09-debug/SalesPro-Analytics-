@@ -11,8 +11,16 @@ import {
   calculateQuarterlySummary,
   QUARTER_MONTHS,
   exportQuarterlyToExcel,
+  saveQuarterlyTargetOverride,
+  saveBulkQuarterlyTargetOverrides,
+  clearQuarterlyTargetOverride,
+  saveQuarterlyActualSellInOverride,
+  saveBulkQuarterlyActualSellInOverrides,
+  clearQuarterlyActualSellInOverride,
+  QuarterlyTargetRole,
 } from '../services/quarterlySummaryService';
 import { TARGETS_UPDATED_EVENT } from '../services/targetManagementService';
+import { SALES_MASTER_6_CONFIG } from '../services/kpiSalesData';
 import { formatRupiah, formatPercent } from '../utils/analytics';
 import {
   Award,
@@ -20,26 +28,22 @@ import {
   Users,
   Sparkles,
   Search,
-  Download,
   Printer,
   ChevronRight,
-  ShieldCheck,
-  AlertTriangle,
   GraduationCap,
   Calendar,
-  CheckCircle2,
-  XCircle,
-  HelpCircle,
   X,
-  Target,
   FileSpreadsheet,
   Medal,
   Crown,
   Building2,
-  Store,
-  DollarSign,
   ArrowUpRight,
   ArrowDownRight,
+  Pencil,
+  RotateCcw,
+  Sliders,
+  Check,
+  Filter,
 } from 'lucide-react';
 
 interface QuarterlySummaryViewProps {
@@ -58,17 +62,51 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
   // Use full records if available to ensure historical quarter months (e.g. Q3: Jul-Sep) are present
   const sourceRecords = allRecords && allRecords.length > 0 ? allRecords : records;
 
-  // State for Quarter, Year, Sub-tab, Search, and Detail Modal
-  const [selectedQuarter, setSelectedQuarter] = useState<QuarterPeriodKey>('Q3');
+  // State for Quarter, Year, Sub-tab, Search, and Modals
+  const [selectedQuarter, setSelectedQuarter] = useState<QuarterPeriodKey>('Q4');
   const [selectedYear, setSelectedYear] = useState<number>(2026);
   const [selectedArea, setSelectedArea] = useState<string>('ALL');
   const [selectedSpv, setSelectedSpv] = useState<string>('ALL');
   const [activeSubTab, setActiveSubTab] = useState<SubTabKey>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [hallOfFameTab, setHallOfFameTab] = useState<'sales' | 'ba' | 'trainer'>('sales');
   const [modalPerson, setModalPerson] = useState<{
     type: 'sales' | 'ba' | 'trainer';
     data: SalesQuarterlySummaryItem | BaQuarterlySummaryItem | TrainerQuarterlySummaryItem;
   } | null>(null);
+
+  // Quick single-row edit target modal state
+  const [editTargetItem, setEditTargetItem] = useState<{
+    role: QuarterlyTargetRole;
+    entityName: string;
+    subtitle: string;
+    targetSellIn: string;
+    targetSellOut: string;
+    isCustom: boolean;
+  } | null>(null);
+
+  // Quick single-row edit Realisasi Sell In modal state
+  const [editActualSellInItem, setEditActualSellInItem] = useState<{
+    role: QuarterlyTargetRole;
+    entityName: string;
+    subtitle: string;
+    targetSellIn: number;
+    totalSellIn: string;
+    monthNames: [string, string, string];
+    monthlySellIn: [string, string, string];
+    editMode: 'total' | 'monthly';
+    isCustom: boolean;
+  } | null>(null);
+
+  // Bulk Target & Realisasi Sell In Kuartal settings modal state
+  const [isTargetModalOpen, setIsTargetModalOpen] = useState<boolean>(false);
+  const [bulkModalMode, setBulkModalMode] = useState<'targets' | 'actualSellIn'>('targets');
+  const [targetModalRole, setTargetModalRole] = useState<QuarterlyTargetRole>('sales');
+  const [targetModalQuarter, setTargetModalQuarter] = useState<QuarterPeriodKey>('Q4');
+  const [targetModalYear, setTargetModalYear] = useState<number>(2026);
+  const [targetDrafts, setTargetDrafts] = useState<Record<string, { sellIn: string; sellOut: string }>>({});
+  const [actualSellInDrafts, setActualSellInDrafts] = useState<Record<string, string>>({});
+  const [initialActualSellInDrafts, setInitialActualSellInDrafts] = useState<Record<string, string>>({});
 
   // Sync automatically with global Filter Terintegrasi
   useEffect(() => {
@@ -132,16 +170,28 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
     };
   }, []);
 
-  // Compute quarterly calculations
+  const activeKet = (filters.KET || 'ALL').toUpperCase().trim();
+  const isKetSellIn = activeKet === 'SELL IN';
+  const isKetSellOut = activeKet === 'SELL OUT';
+  const activeKetDisplayLabel = isKetSellIn
+    ? 'SELL IN (Pencapaian Sell In)'
+    : isKetSellOut
+    ? 'SELL OUT (Pencapaian Sell Out)'
+    : activeKet === 'ALL'
+    ? 'SEMUA KET (Sell In & Sell Out)'
+    : activeKet;
+
+  // Compute quarterly calculations reactive to integrated KET filter
   const rawSummaryData = useMemo(() => {
     return calculateQuarterlySummary(
       sourceRecords,
       selectedQuarter,
       selectedYear,
       selectedArea,
-      selectedSpv
+      selectedSpv,
+      activeKet
     );
-  }, [sourceRecords, selectedQuarter, selectedYear, selectedArea, selectedSpv, targetSyncVersion]);
+  }, [sourceRecords, selectedQuarter, selectedYear, selectedArea, selectedSpv, activeKet, targetSyncVersion]);
 
   const { overall: baseOverall, salesList, baList, trainerList } = rawSummaryData;
 
@@ -150,7 +200,15 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
 
   const filteredSales = useMemo(() => {
     return salesList.filter((s) => {
-      if (filters.SALES && filters.SALES !== 'ALL' && s.salesName.toUpperCase() !== filters.SALES.toUpperCase()) return false;
+      if (filters.SALES && filters.SALES !== 'ALL') {
+        const fSales = filters.SALES.trim().toUpperCase();
+        const canonicalFilter = fSales === 'ALBERT' ? 'ALBERT FERNANDO' : fSales;
+        if (s.salesName.toUpperCase() !== canonicalFilter) return false;
+      }
+      if (filters.TRAINER && filters.TRAINER !== 'ALL') {
+        const cfg = SALES_MASTER_6_CONFIG[s.salesName];
+        if (cfg && !cfg.trainerCovered.toUpperCase().includes(filters.TRAINER.toUpperCase())) return false;
+      }
       if (filters.SPV && filters.SPV !== 'ALL' && s.spvName.toUpperCase() !== filters.SPV.toUpperCase()) return false;
       if (filters.REGION && filters.REGION !== 'ALL' && (s.region || '').toUpperCase() !== filters.REGION.toUpperCase() && (s.coverArea || '').toUpperCase() !== filters.REGION.toUpperCase()) return false;
       if (!effectiveSearch) return true;
@@ -161,7 +219,7 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
         (s.region && s.region.toLowerCase().includes(effectiveSearch))
       );
     });
-  }, [salesList, effectiveSearch, filters.SALES, filters.SPV, filters.REGION]);
+  }, [salesList, effectiveSearch, filters.SALES, filters.TRAINER, filters.SPV, filters.REGION]);
 
   const filteredBa = useMemo(() => {
     return baList.filter((b) => {
@@ -181,6 +239,7 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
 
   const filteredTrainer = useMemo(() => {
     return trainerList.filter((t) => {
+      if (filters.TRAINER && filters.TRAINER !== 'ALL' && t.trainerName.toUpperCase() !== filters.TRAINER.toUpperCase()) return false;
       if (filters.REGION && filters.REGION !== 'ALL' && (t.areaCovered || '').toUpperCase() !== filters.REGION.toUpperCase() && (t.region || '').toUpperCase() !== filters.REGION.toUpperCase()) return false;
       if (!effectiveSearch) return true;
       return (
@@ -188,13 +247,13 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
         t.areaCovered.toLowerCase().includes(effectiveSearch)
       );
     });
-  }, [trainerList, effectiveSearch, filters.REGION]);
+  }, [trainerList, effectiveSearch, filters.TRAINER, filters.REGION]);
 
   // Dynamically recalculated overall KPI summary cards for the filtered subset
   const overall = useMemo(() => {
-    // If no sales or BA filter is active, return base overall
     const hasActivePersonnelFilter =
       (filters.SALES && filters.SALES !== 'ALL') ||
+      (filters.TRAINER && filters.TRAINER !== 'ALL') ||
       (filters.SPV && filters.SPV !== 'ALL') ||
       (filters.REGION && filters.REGION !== 'ALL') ||
       (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL') ||
@@ -203,24 +262,258 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
     if (!hasActivePersonnelFilter) return baseOverall;
 
     const totalTargetArea = filteredSales.reduce((acc, s) => acc + s.quarterTarget, 0);
+    const totalTargetSellIn = filteredSales.reduce((acc, s) => acc + s.quarterTargetSellIn, 0);
+    const totalTargetSellOut = filteredSales.reduce((acc, s) => acc + s.quarterTargetSellOut, 0);
     const totalActualArea = filteredSales.reduce((acc, s) => acc + s.quarterActual, 0);
+    const totalActualSellIn = filteredSales.reduce((acc, s) => acc + s.quarterActualSellIn, 0);
+    const totalActualSellOut = filteredSales.reduce((acc, s) => acc + s.quarterActualSellOut, 0);
     const areaAchievementPercent = totalTargetArea > 0 ? (totalActualArea / totalTargetArea) * 100 : 0;
 
-    const avgSalesScore = filteredSales.length > 0 ? filteredSales.reduce((acc, s) => acc + s.avgKpiScore, 0) / filteredSales.length : 0;
-    const avgTrainerScore = filteredTrainer.length > 0 ? filteredTrainer.reduce((acc, t) => acc + t.avgKpiScore, 0) / filteredTrainer.length : 0;
+    const avgSalesScore =
+      filteredSales.length > 0
+        ? Math.round(filteredSales.reduce((acc, s) => acc + s.avgKpiScore, 0) / filteredSales.length)
+        : 0;
+    const avgTrainerScore =
+      filteredTrainer.length > 0
+        ? Math.round(filteredTrainer.reduce((acc, t) => acc + t.avgKpiScore, 0) / filteredTrainer.length)
+        : 0;
 
     return {
       ...baseOverall,
       totalTargetArea,
+      totalTargetSellIn,
+      totalTargetSellOut,
       totalActualArea,
+      totalActualSellIn,
+      totalActualSellOut,
       areaAchievementPercent,
       totalSalesCount: filteredSales.length,
       totalBaCount: filteredBa.length,
       totalTrainerCount: filteredTrainer.length,
       avgSalesKpiScore: avgSalesScore,
       avgTrainerKpiScore: avgTrainerScore,
+      topSales: filteredSales[0]
+        ? {
+            name: filteredSales[0].salesName,
+            actual: filteredSales[0].quarterActual,
+            target: filteredSales[0].quarterTarget,
+            percent: filteredSales[0].quarterAchievementPercent,
+          }
+        : null,
+      topBa: filteredBa[0]
+        ? {
+            name: filteredBa[0].baName,
+            store: filteredBa[0].storeName,
+            actual: filteredBa[0].quarterActual,
+            target: filteredBa[0].quarterTarget,
+            percent: filteredBa[0].quarterAchievementPercent,
+          }
+        : null,
+      topTrainer: filteredTrainer[0]
+        ? {
+            name: filteredTrainer[0].trainerName,
+            actual: filteredTrainer[0].quarterActual,
+            target: filteredTrainer[0].quarterTarget,
+            percent: filteredTrainer[0].quarterAchievementPercent,
+            score: filteredTrainer[0].avgKpiScore,
+          }
+        : null,
     };
   }, [baseOverall, filteredSales, filteredBa, filteredTrainer, filters, effectiveSearch]);
+
+  // Modal computation for bulk quarter target settings (independent quarter/year switcher inside modal)
+  const modalSummaryData = useMemo(() => {
+    if (!isTargetModalOpen) return null;
+    return calculateQuarterlySummary(
+      sourceRecords,
+      targetModalQuarter,
+      targetModalYear,
+      selectedArea,
+      selectedSpv,
+      activeKet
+    );
+  }, [isTargetModalOpen, sourceRecords, targetModalQuarter, targetModalYear, selectedArea, selectedSpv, activeKet, targetSyncVersion]);
+
+  const populateModalDrafts = (role: QuarterlyTargetRole, q: QuarterPeriodKey, yr: number) => {
+    const calc = calculateQuarterlySummary(sourceRecords, q, yr, selectedArea, selectedSpv, activeKet);
+    const nextTargetDrafts: Record<string, { sellIn: string; sellOut: string }> = {};
+    const nextActualDrafts: Record<string, string> = {};
+
+    if (role === 'sales') {
+      calc.salesList.forEach((s) => {
+        nextTargetDrafts[s.salesName] = {
+          sellIn: String(Math.round(s.quarterTargetSellIn)),
+          sellOut: String(Math.round(s.quarterTargetSellOut)),
+        };
+        nextActualDrafts[s.salesName] = String(Math.round(s.quarterActualSellIn));
+      });
+    } else if (role === 'ba') {
+      calc.baList.forEach((b) => {
+        nextTargetDrafts[b.baName] = {
+          sellIn: String(Math.round(b.quarterTargetSellIn)),
+          sellOut: String(Math.round(b.quarterTargetSellOut)),
+        };
+        nextActualDrafts[b.baName] = String(Math.round(b.quarterActualSellIn));
+      });
+    } else {
+      calc.trainerList.forEach((t) => {
+        nextTargetDrafts[t.trainerName] = {
+          sellIn: String(Math.round(t.quarterTargetSellIn)),
+          sellOut: String(Math.round(t.quarterTargetSellOut)),
+        };
+        nextActualDrafts[t.trainerName] = String(Math.round(t.quarterActualSellIn));
+      });
+    }
+    setTargetDrafts(nextTargetDrafts);
+    setActualSellInDrafts(nextActualDrafts);
+    setInitialActualSellInDrafts({ ...nextActualDrafts });
+  };
+
+  const openBulkTargetModal = (
+    role: QuarterlyTargetRole,
+    mode: 'targets' | 'actualSellIn' = 'targets'
+  ) => {
+    setBulkModalMode(mode);
+    setTargetModalRole(role);
+    setTargetModalQuarter(selectedQuarter);
+    setTargetModalYear(selectedYear);
+    populateModalDrafts(role, selectedQuarter, selectedYear);
+    setIsTargetModalOpen(true);
+  };
+
+  const openEditActualSellIn = (
+    role: QuarterlyTargetRole,
+    item: SalesQuarterlySummaryItem | BaQuarterlySummaryItem | TrainerQuarterlySummaryItem,
+    initialMode: 'total' | 'monthly' = 'total'
+  ) => {
+    const entityName =
+      role === 'sales'
+        ? (item as SalesQuarterlySummaryItem).salesName
+        : role === 'ba'
+        ? (item as BaQuarterlySummaryItem).baName
+        : (item as TrainerQuarterlySummaryItem).trainerName;
+    const subtitleArea =
+      role === 'sales'
+        ? (item as SalesQuarterlySummaryItem).coverArea
+        : role === 'ba'
+        ? (item as BaQuarterlySummaryItem).storeName
+        : (item as TrainerQuarterlySummaryItem).areaCovered;
+
+    const qMonths = QUARTER_MONTHS[selectedQuarter].monthNames;
+    const mb = item.monthlyBreakdown || [];
+    const mNames: [string, string, string] = [
+      mb[0]?.monthName || qMonths[0] || 'Bulan 1',
+      mb[1]?.monthName || qMonths[1] || 'Bulan 2',
+      mb[2]?.monthName || qMonths[2] || 'Bulan 3',
+    ];
+    const mVals: [string, string, string] = [
+      String(Math.round(mb[0]?.actualSellIn ?? 0)),
+      String(Math.round(mb[1]?.actualSellIn ?? 0)),
+      String(Math.round(mb[2]?.actualSellIn ?? 0)),
+    ];
+
+    setEditActualSellInItem({
+      role,
+      entityName,
+      subtitle: `${subtitleArea} • ${overall.quarterLabel}`,
+      targetSellIn: item.quarterTargetSellIn,
+      totalSellIn: String(Math.round(item.quarterActualSellIn)),
+      monthNames: mNames,
+      monthlySellIn: mVals,
+      editMode: initialMode,
+      isCustom: Boolean(item.isCustomActualSellIn),
+    });
+  };
+
+  const handleSaveBulkTargets = () => {
+    const entries = Object.entries(targetDrafts).map(([entityName, vals]) => ({
+      entityName,
+      targetSellIn: Number(vals.sellIn) || 0,
+      targetSellOut: Number(vals.sellOut) || 0,
+    }));
+    saveBulkQuarterlyTargetOverrides(targetModalYear, targetModalQuarter, targetModalRole, entries);
+    setIsTargetModalOpen(false);
+  };
+
+  const handleSaveBulkActualSellIn = () => {
+    if (!modalSummaryData) return;
+    const list =
+      targetModalRole === 'sales'
+        ? modalSummaryData.salesList.map((s) => ({
+            name: s.salesName,
+            isCustom: Boolean(s.isCustomActualSellIn),
+          }))
+        : targetModalRole === 'ba'
+        ? modalSummaryData.baList.map((b) => ({
+            name: b.baName,
+            isCustom: Boolean(b.isCustomActualSellIn),
+          }))
+        : modalSummaryData.trainerList.map((t) => ({
+            name: t.trainerName,
+            isCustom: Boolean(t.isCustomActualSellIn),
+          }));
+
+    const entriesToSave = list
+      .filter((row) => {
+        const currentVal = String(Math.max(0, Math.round(Number(actualSellInDrafts[row.name]) || 0)));
+        const initialVal = String(Math.max(0, Math.round(Number(initialActualSellInDrafts[row.name]) || 0)));
+        return row.isCustom || currentVal !== initialVal;
+      })
+      .map((row) => ({
+        entityName: row.name,
+        actualSellIn: Math.max(0, Math.round(Number(actualSellInDrafts[row.name]) || 0)),
+      }));
+
+    if (entriesToSave.length > 0) {
+      saveBulkQuarterlyActualSellInOverrides(
+        targetModalYear,
+        targetModalQuarter,
+        targetModalRole,
+        entriesToSave
+      );
+    }
+    setIsTargetModalOpen(false);
+  };
+
+  const handleSaveSingleTarget = () => {
+    if (!editTargetItem) return;
+    saveQuarterlyTargetOverride(
+      selectedYear,
+      selectedQuarter,
+      editTargetItem.role,
+      editTargetItem.entityName,
+      {
+        targetSellIn: Number(editTargetItem.targetSellIn) || 0,
+        targetSellOut: Number(editTargetItem.targetSellOut) || 0,
+      }
+    );
+    setEditTargetItem(null);
+  };
+
+  const handleSaveSingleActualSellIn = () => {
+    if (!editActualSellInItem) return;
+    if (editActualSellInItem.editMode === 'monthly') {
+      const m0 = Math.max(0, Math.round(Number(editActualSellInItem.monthlySellIn[0]) || 0));
+      const m1 = Math.max(0, Math.round(Number(editActualSellInItem.monthlySellIn[1]) || 0));
+      const m2 = Math.max(0, Math.round(Number(editActualSellInItem.monthlySellIn[2]) || 0));
+      saveQuarterlyActualSellInOverride(
+        selectedYear,
+        selectedQuarter,
+        editActualSellInItem.role,
+        editActualSellInItem.entityName,
+        { monthlySellIn: [m0, m1, m2] }
+      );
+    } else {
+      saveQuarterlyActualSellInOverride(
+        selectedYear,
+        selectedQuarter,
+        editActualSellInItem.role,
+        editActualSellInItem.entityName,
+        { actualSellIn: Math.max(0, Math.round(Number(editActualSellInItem.totalSellIn) || 0)) }
+      );
+    }
+    setEditActualSellInItem(null);
+  };
 
   const summaryData = useMemo(() => {
     return {
@@ -230,6 +523,20 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
       trainerList: filteredTrainer,
     };
   }, [overall, filteredSales, filteredBa, filteredTrainer]);
+
+  const activeModalPersonData = useMemo(() => {
+    if (!modalPerson) return null;
+    if (modalPerson.type === 'sales') {
+      const targetName = (modalPerson.data as SalesQuarterlySummaryItem).salesName;
+      return summaryData.salesList.find((s) => s.salesName === targetName) || modalPerson.data;
+    }
+    if (modalPerson.type === 'ba') {
+      const targetName = (modalPerson.data as BaQuarterlySummaryItem).baName;
+      return summaryData.baList.find((b) => b.baName === targetName) || modalPerson.data;
+    }
+    const targetName = (modalPerson.data as TrainerQuarterlySummaryItem).trainerName;
+    return summaryData.trainerList.find((t) => t.trainerName === targetName) || modalPerson.data;
+  }, [modalPerson, summaryData]);
 
   // Handle Excel export
   const handleExport = () => {
@@ -267,8 +574,26 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
             </div>
           </div>
 
-          {/* Action buttons: Excel & Print */}
+          {/* Action buttons: Edit Target Kuartal, Edit Realisasi Sell In, Excel & Print */}
           <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => openBulkTargetModal(activeSubTab === 'ba' ? 'ba' : activeSubTab === 'trainer' ? 'trainer' : 'sales', 'targets')}
+              className="flex items-center gap-2 px-3.5 py-2 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm transition-all cursor-pointer"
+              title="Edit Target Kuartal Sell In & Sell Out per Kuartal (Q1-Q4)"
+            >
+              <Sliders className="w-4 h-4" />
+              <span>Edit Target Kuartal</span>
+            </button>
+            {(isKetSellIn || !isKetSellOut) && (
+              <button
+                onClick={() => openBulkTargetModal(activeSubTab === 'ba' ? 'ba' : activeSubTab === 'trainer' ? 'trainer' : 'sales', 'actualSellIn')}
+                className="flex items-center gap-2 px-3.5 py-2 text-xs font-bold rounded-xl bg-sky-600 hover:bg-sky-700 text-white shadow-sm transition-all cursor-pointer"
+                title="Edit Realisasi Sell In per Kuartal (Q1-Q4)"
+              >
+                <Pencil className="w-4 h-4" />
+                <span>Edit Realisasi Sell In</span>
+              </button>
+            )}
             <button
               onClick={handleExport}
               className="flex items-center gap-2 px-3.5 py-2 text-xs font-bold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-all cursor-pointer"
@@ -365,6 +690,21 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                 ))}
               </select>
             </div>
+
+            {/* Active Integrated KET Mode Indicator */}
+            <div
+              className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 border font-bold ${
+                isKetSellIn
+                  ? 'bg-blue-50 border-blue-200 text-blue-800'
+                  : isKetSellOut
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-indigo-50 border-indigo-200 text-indigo-800'
+              }`}
+              title="Mengikuti Filter Terintegrasi (KET: Sell In / Sell Out)"
+            >
+              <Filter className="w-3.5 h-3.5" />
+              <span>Mode KET: {activeKetDisplayLabel}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -374,9 +714,18 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
         {/* Card 1: Total Omset Area Kuartal */}
         <div className="bg-gradient-to-br from-white via-indigo-50/20 to-purple-50/20 rounded-2xl border border-indigo-200/80 p-5 shadow-xs relative overflow-hidden">
           <div className="flex items-center justify-between pb-3 border-b border-indigo-100">
-            <span className="text-xs font-bold text-indigo-900 uppercase tracking-wider">
-              Total Omset Kuartal
-            </span>
+            <div>
+              <span className="text-xs font-bold text-indigo-900 uppercase tracking-wider block">
+                {isKetSellIn
+                  ? 'Realisasi Kuartal (Sell In)'
+                  : isKetSellOut
+                  ? 'Realisasi Kuartal (Sell Out)'
+                  : 'Total Omset Kuartal'}
+              </span>
+              <span className="text-[10px] font-semibold text-indigo-600">
+                {isKetSellIn ? 'Pencapaian Sell In' : isKetSellOut ? 'Pencapaian Sell Out' : 'Gabungan Sell In & Sell Out'}
+              </span>
+            </div>
             <div className="p-2 rounded-xl bg-gradient-to-tr from-indigo-600 to-purple-600 text-white shadow-xs">
               <TrendingUp className="w-4 h-4" />
             </div>
@@ -407,6 +756,12 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                 Gap: {formatRupiah(overall.totalActualArea - overall.totalTargetArea, true)}
               </span>
             </div>
+            {!isKetSellIn && !isKetSellOut && (
+              <div className="mt-1 text-[10px] text-slate-500 flex justify-between">
+                <span>Sell In: {formatRupiah(overall.totalActualSellIn, true)}</span>
+                <span>Sell Out: {formatRupiah(overall.totalActualSellOut, true)}</span>
+              </div>
+            )}
             {/* Progress bar */}
             <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden mt-3 border border-slate-200/60">
               <div
@@ -449,8 +804,8 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
               </div>
               <div className="flex justify-between">
                 <span>Top Performer:</span>
-                <span className="font-bold text-slate-900 truncate max-w-[120px]">
-                  {overall.topSales?.name || '-'} ({overall.topSales?.percent || 0}%)
+                <span className="font-bold text-slate-900 truncate max-w-[140px]">
+                  {overall.topSales?.name || '-'} ({formatPercent(overall.topSales?.percent || 0)})
                 </span>
               </div>
             </div>
@@ -485,8 +840,8 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
               </div>
               <div className="flex justify-between">
                 <span>Top BA Star:</span>
-                <span className="font-bold text-pink-700 truncate max-w-[130px]">
-                  {overall.topBa?.name || '-'} ({overall.topBa?.percent || 0}%)
+                <span className="font-bold text-pink-700 truncate max-w-[150px]">
+                  {overall.topBa?.name || '-'} ({formatPercent(overall.topBa?.percent || 0)})
                 </span>
               </div>
             </div>
@@ -530,23 +885,36 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
         </div>
       </div>
 
-      {/* 3. Hall of Fame / Podium Top 3 Performer Kuartal */}
+      {/* 3. Hall of Fame / Podium Top Performer Kuartal & Rincian KET Filter */}
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-2xl p-6 shadow-md border border-slate-800">
-        <div className="flex items-center justify-between pb-4 border-b border-slate-800/80">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800/80">
           <div className="flex items-center gap-2.5">
-            <Crown className="w-5 h-5 text-amber-400" />
+            <Crown className="w-5 h-5 text-amber-400 shrink-0" />
             <div>
               <h3 className="text-sm font-extrabold text-white tracking-wide uppercase">
                 Hall of Fame • Juara Terhebat {overall.quarterLabel}
               </h3>
               <p className="text-[11px] text-slate-400">
-                Apresiasi personil berkinerja tertinggi pada omset, kepatuhan, dan pencapaian KPI
+                Peringkat diurutkan dari pencapaian persentase (%) tertinggi • Mengikuti Filter Terintegrasi ({activeKetDisplayLabel})
               </p>
             </div>
           </div>
-          <span className="text-xs font-semibold px-3 py-1 rounded-full bg-amber-400/10 text-amber-300 border border-amber-400/30">
-            {overall.dateRangeLabel}
-          </span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span
+              className={`text-xs font-extrabold px-3 py-1 rounded-full border ${
+                isKetSellIn
+                  ? 'bg-blue-500/20 text-blue-200 border-blue-400/40'
+                  : isKetSellOut
+                  ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40'
+                  : 'bg-indigo-500/20 text-indigo-200 border-indigo-400/40'
+              }`}
+            >
+              Filter KET: {activeKetDisplayLabel}
+            </span>
+            <span className="text-xs font-semibold px-3 py-1 rounded-full bg-amber-400/10 text-amber-300 border border-amber-400/30">
+              {overall.dateRangeLabel}
+            </span>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-5">
@@ -566,10 +934,13 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                 {overall.topSales?.name || 'Tidak ada data'}
               </h4>
               <p className="text-xs text-slate-300 mt-0.5">
-                Omset Kuartal: <span className="font-bold text-amber-300 font-mono">{formatRupiah(overall.topSales?.actual || 0, true)}</span>
+                {isKetSellIn ? 'Realisasi Sell In:' : isKetSellOut ? 'Realisasi Sell Out:' : 'Omset Kuartal:'}{' '}
+                <span className="font-bold text-amber-300 font-mono">{formatRupiah(overall.topSales?.actual || 0, true)}</span>
               </p>
               <div className="mt-2 flex items-center justify-between text-xs">
-                <span className="text-slate-400">Pencapaian:</span>
+                <span className="text-slate-400">
+                  Target: {formatRupiah(overall.topSales?.target || 0, true)}
+                </span>
                 <span className="font-black text-emerald-400">
                   {formatPercent(overall.topSales?.percent || 0)}
                 </span>
@@ -595,8 +966,14 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
               <p className="text-xs text-slate-300 mt-0.5 truncate">
                 Outlet: <span className="font-bold text-pink-300">{overall.topBa?.store || '-'}</span>
               </p>
-              <div className="mt-2 flex items-center justify-between text-xs">
-                <span className="text-slate-400">Pencapaian:</span>
+              <p className="text-xs text-slate-300 mt-0.5">
+                {isKetSellIn ? 'Realisasi Sell In:' : isKetSellOut ? 'Realisasi Sell Out:' : 'Omset Kuartal:'}{' '}
+                <span className="font-bold text-amber-300 font-mono">{formatRupiah(overall.topBa?.actual || 0, true)}</span>
+              </p>
+              <div className="mt-1.5 flex items-center justify-between text-xs">
+                <span className="text-slate-400">
+                  Target: {formatRupiah(overall.topBa?.target || 0, true)}
+                </span>
                 <span className="font-black text-emerald-400">
                   {formatPercent(overall.topBa?.percent || 0)}
                 </span>
@@ -620,15 +997,271 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                 {overall.topTrainer?.name || 'Tidak ada data'}
               </h4>
               <p className="text-xs text-slate-300 mt-0.5">
-                Evaluasi KPI Scorecard: <span className="font-bold text-purple-300">{overall.topTrainer?.score || 0} Poin</span>
+                {isKetSellIn ? 'Realisasi Sell In:' : isKetSellOut ? 'Realisasi Sell Out:' : 'Realisasi Area:'}{' '}
+                <span className="font-bold text-purple-300 font-mono">
+                  {formatRupiah(overall.topTrainer?.actual || 0, true)}
+                </span>
               </p>
               <div className="mt-2 flex items-center justify-between text-xs">
-                <span className="text-slate-400">Status Insentif:</span>
+                <span className="text-slate-400">KPI: {overall.topTrainer?.score || 0} Poin</span>
                 <span className="font-black text-emerald-400">
-                  Tier Maksimal
+                  {formatPercent(overall.topTrainer?.percent || 0)}
                 </span>
               </div>
             </div>
+          </div>
+        </div>
+
+        {/* Rincian Pencapaian Hall of Fame Mengikuti Filter Terintegrasi (Sell In / Sell Out) */}
+        <div className="mt-5 pt-4 border-t border-slate-800/90">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+            <div>
+              <h4 className="text-xs font-extrabold text-amber-300 uppercase tracking-wider">
+                Rincian Pencapaian {overall.quarterLabel} —{' '}
+                {isKetSellIn
+                  ? 'Semua Pencapaian SELL IN'
+                  : isKetSellOut
+                  ? 'Semua Pencapaian SELL OUT'
+                  : 'Semua Pencapaian SELL IN & SELL OUT'}
+              </h4>
+              <p className="text-[11px] text-slate-400">
+                Urutan peringkat berdasarkan persentase pencapaian (%) tertinggi • Filter KET ({activeKetDisplayLabel})
+              </p>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {(isKetSellIn || !isKetSellOut) && (
+                <button
+                  type="button"
+                  onClick={() => openBulkTargetModal(hallOfFameTab, 'actualSellIn')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-400/40 transition-colors cursor-pointer"
+                  title="Edit massal Realisasi Sell In pada Rincian Pencapaian Kuartal"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  <span>Edit Realisasi Sell In</span>
+                </button>
+              )}
+              <div className="flex items-center gap-1 p-1 bg-white/10 rounded-xl border border-white/10">
+                {([
+                  { id: 'sales', label: `Sales (${filteredSales.length})` },
+                  { id: 'ba', label: `BA (${filteredBa.length})` },
+                  { id: 'trainer', label: `Trainer (${filteredTrainer.length})` },
+                ] as const).map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setHallOfFameTab(tab.id)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                      hallOfFameTab === tab.id
+                        ? 'bg-amber-400 text-slate-950 shadow-xs'
+                        : 'text-slate-300 hover:bg-white/10'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-slate-950/50 border border-white/10 rounded-xl overflow-x-auto max-h-96 overflow-y-auto">
+            <table className="w-full text-xs text-left border-collapse">
+              <thead className="sticky top-0 z-10 bg-slate-900">
+                <tr className="border-b border-white/10 text-slate-300 font-bold">
+                  <th className="py-2.5 px-3 w-12 text-center">Rank</th>
+                  <th className="py-2.5 px-3">
+                    {hallOfFameTab === 'sales'
+                      ? 'Personil Sales'
+                      : hallOfFameTab === 'ba'
+                      ? 'Nama BA & Toko'
+                      : 'Nama Trainer'}
+                  </th>
+                  <th className="py-2.5 px-3">Area</th>
+                  {(isKetSellIn || !isKetSellOut) && (
+                    <>
+                      <th className="py-2.5 px-3 text-right">Target Sell In</th>
+                      <th className="py-2.5 px-3 text-right">Realisasi Sell In (Edit)</th>
+                      <th className="py-2.5 px-3 text-center">% Sell In</th>
+                    </>
+                  )}
+                  {(isKetSellOut || !isKetSellIn) && (
+                    <>
+                      <th className="py-2.5 px-3 text-right">Target Sell Out</th>
+                      <th className="py-2.5 px-3 text-right">Realisasi Sell Out</th>
+                      <th className="py-2.5 px-3 text-center">% Sell Out</th>
+                    </>
+                  )}
+                  {!isKetSellIn && !isKetSellOut && (
+                    <th className="py-2.5 px-3 text-center">% Peringkat</th>
+                  )}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {hallOfFameTab === 'sales' &&
+                  filteredSales.map((s, idx) => (
+                    <tr key={s.salesName} className="hover:bg-white/5 transition-colors">
+                      <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
+                      <td className="py-2 px-3 font-bold text-white">{s.salesName}</td>
+                      <td className="py-2 px-3 text-slate-400">{s.coverArea}</td>
+                      {(isKetSellIn || !isKetSellOut) && (
+                        <>
+                          <td className="py-2 px-3 text-right font-mono text-slate-300">
+                            {formatRupiah(s.quarterTargetSellIn, true)}
+                          </td>
+                          <td className="py-2 px-3 text-right font-mono font-bold text-sky-300">
+                            <div className="inline-flex items-center justify-end gap-1.5">
+                              {s.isCustomActualSellIn && (
+                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-sky-500/25 text-sky-200 border border-sky-400/40 font-sans font-bold">
+                                  Manual
+                                </span>
+                              )}
+                              <span>{formatRupiah(s.quarterActualSellIn, true)}</span>
+                              <button
+                                type="button"
+                                onClick={() => openEditActualSellIn('sales', s)}
+                                title="Edit Realisasi Sell In"
+                                className="p-1 rounded-md text-sky-300/80 hover:text-white hover:bg-sky-500/30 transition-colors cursor-pointer"
+                              >
+                                <Pencil className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </td>
+                          <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                            {formatPercent(s.quarterAchievementSellInPercent, false)}
+                          </td>
+                        </>
+                      )}
+                      {(isKetSellOut || !isKetSellIn) && (
+                        <>
+                          <td className="py-2 px-3 text-right font-mono text-slate-300">
+                            {formatRupiah(s.quarterTargetSellOut, true)}
+                          </td>
+                          <td className="py-2 px-3 text-right font-mono font-bold text-emerald-300">
+                            {formatRupiah(s.quarterActualSellOut, true)}
+                          </td>
+                          <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                            {formatPercent(s.quarterAchievementSellOutPercent, false)}
+                          </td>
+                        </>
+                      )}
+                      {!isKetSellIn && !isKetSellOut && (
+                        <td className="py-2 px-3 text-center font-extrabold text-amber-300">
+                          {formatPercent(s.quarterAchievementPercent, false)}
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                {hallOfFameTab === 'ba' &&
+                  filteredBa.map((b, idx) => (
+                    <tr key={b.baName} className="hover:bg-white/5 transition-colors">
+                      <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
+                      <td className="py-2 px-3">
+                        <span className="font-bold text-white block">{b.baName}</span>
+                        <span className="text-[10px] text-slate-400">{b.storeName}</span>
+                      </td>
+                      <td className="py-2 px-3 text-slate-400">{b.coverArea}</td>
+                      {(isKetSellIn || !isKetSellOut) && (
+                        <>
+                          <td className="py-2 px-3 text-right font-mono text-slate-300">
+                            {formatRupiah(b.quarterTargetSellIn, true)}
+                          </td>
+                          <td className="py-2 px-3 text-right font-mono font-bold text-sky-300">
+                            <div className="inline-flex items-center justify-end gap-1.5">
+                              {b.isCustomActualSellIn && (
+                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-sky-500/25 text-sky-200 border border-sky-400/40 font-sans font-bold">
+                                  Manual
+                                </span>
+                              )}
+                              <span>{formatRupiah(b.quarterActualSellIn, true)}</span>
+                              <button
+                                type="button"
+                                onClick={() => openEditActualSellIn('ba', b)}
+                                title="Edit Realisasi Sell In"
+                                className="p-1 rounded-md text-sky-300/80 hover:text-white hover:bg-sky-500/30 transition-colors cursor-pointer"
+                              >
+                                <Pencil className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </td>
+                          <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                            {formatPercent(b.quarterAchievementSellInPercent, false)}
+                          </td>
+                        </>
+                      )}
+                      {(isKetSellOut || !isKetSellIn) && (
+                        <>
+                          <td className="py-2 px-3 text-right font-mono text-slate-300">
+                            {formatRupiah(b.quarterTargetSellOut, true)}
+                          </td>
+                          <td className="py-2 px-3 text-right font-mono font-bold text-emerald-300">
+                            {formatRupiah(b.quarterActualSellOut, true)}
+                          </td>
+                          <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                            {formatPercent(b.quarterAchievementSellOutPercent, false)}
+                          </td>
+                        </>
+                      )}
+                      {!isKetSellIn && !isKetSellOut && (
+                        <td className="py-2 px-3 text-center font-extrabold text-amber-300">
+                          {formatPercent(b.quarterAchievementPercent, false)}
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                {hallOfFameTab === 'trainer' &&
+                  filteredTrainer.map((t, idx) => (
+                    <tr key={t.trainerName} className="hover:bg-white/5 transition-colors">
+                      <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
+                      <td className="py-2 px-3 font-bold text-white">{t.trainerName}</td>
+                      <td className="py-2 px-3 text-slate-400">{t.areaCovered}</td>
+                      {(isKetSellIn || !isKetSellOut) && (
+                        <>
+                          <td className="py-2 px-3 text-right font-mono text-slate-300">
+                            {formatRupiah(t.quarterTargetSellIn, true)}
+                          </td>
+                          <td className="py-2 px-3 text-right font-mono font-bold text-sky-300">
+                            <div className="inline-flex items-center justify-end gap-1.5">
+                              {t.isCustomActualSellIn && (
+                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-sky-500/25 text-sky-200 border border-sky-400/40 font-sans font-bold">
+                                  Manual
+                                </span>
+                              )}
+                              <span>{formatRupiah(t.quarterActualSellIn, true)}</span>
+                              <button
+                                type="button"
+                                onClick={() => openEditActualSellIn('trainer', t)}
+                                title="Edit Realisasi Sell In"
+                                className="p-1 rounded-md text-sky-300/80 hover:text-white hover:bg-sky-500/30 transition-colors cursor-pointer"
+                              >
+                                <Pencil className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </td>
+                          <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                            {formatPercent(t.quarterAchievementSellInPercent, false)}
+                          </td>
+                        </>
+                      )}
+                      {(isKetSellOut || !isKetSellIn) && (
+                        <>
+                          <td className="py-2 px-3 text-right font-mono text-slate-300">
+                            {formatRupiah(t.quarterTargetSellOut, true)}
+                          </td>
+                          <td className="py-2 px-3 text-right font-mono font-bold text-emerald-300">
+                            {formatRupiah(t.quarterActualSellOut, true)}
+                          </td>
+                          <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                            {formatPercent(t.quarterAchievementSellOutPercent, false)}
+                          </td>
+                        </>
+                      )}
+                      {!isKetSellIn && !isKetSellOut && (
+                        <td className="py-2 px-3 text-center font-extrabold text-amber-300">
+                          {formatPercent(t.quarterAchievementPercent, false)}
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -859,19 +1492,24 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
             {/* Top Sales Preview */}
             <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-xs">
               <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
-                  <Users className="w-4 h-4 text-blue-600" />
-                  Top Pencapaian Sales Kuartal
-                </h4>
+                <div>
+                  <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                    <Users className="w-4 h-4 text-blue-600" />
+                    Top Pencapaian Sales Kuartal
+                  </h4>
+                  <span className="text-[10px] text-slate-400">
+                    Peringkat berdasarkan % pencapaian tertinggi
+                  </span>
+                </div>
                 <button
                   onClick={() => setActiveSubTab('sales')}
                   className="text-xs font-bold text-blue-600 hover:underline cursor-pointer"
                 >
-                  Lihat Semua ({salesList.length})
+                  Lihat Semua ({filteredSales.length})
                 </button>
               </div>
               <div className="mt-3 divide-y divide-slate-100">
-                {salesList.slice(0, 5).map((s, idx) => (
+                {filteredSales.slice(0, 5).map((s, idx) => (
                   <div key={s.salesName} className="py-2.5 flex items-center justify-between text-xs">
                     <div className="flex items-center gap-2">
                       <span className="w-5 h-5 rounded-full bg-slate-100 text-slate-700 font-extrabold flex items-center justify-center text-[10px]">
@@ -904,23 +1542,28 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
             {/* Top BA Preview */}
             <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-xs">
               <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-pink-600" />
-                  Top Pencapaian BA Kuartal
-                </h4>
+                <div>
+                  <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-pink-600" />
+                    Top Pencapaian BA Kuartal
+                  </h4>
+                  <span className="text-[10px] text-slate-400">
+                    Peringkat berdasarkan % pencapaian tertinggi
+                  </span>
+                </div>
                 <button
                   onClick={() => setActiveSubTab('ba')}
                   className="text-xs font-bold text-pink-600 hover:underline cursor-pointer"
                 >
-                  Lihat Semua ({baList.length})
+                  Lihat Semua ({filteredBa.length})
                 </button>
               </div>
               <div className="mt-3 divide-y divide-slate-100">
-                {baList.slice(0, 5).map((b) => (
+                {filteredBa.slice(0, 5).map((b, idx) => (
                   <div key={b.baName} className="py-2.5 flex items-center justify-between text-xs">
                     <div className="flex items-center gap-2">
                       <span className="w-5 h-5 rounded-full bg-slate-100 text-slate-700 font-extrabold flex items-center justify-center text-[10px]">
-                        {b.rank}
+                        {idx + 1}
                       </span>
                       <div>
                         <span className="font-bold text-slate-900">{b.baName}</span>
@@ -954,18 +1597,36 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
       {/* === SUB-TAB 2: SALES (RANGKUMAN SALES) === */}
       {activeSubTab === 'sales' && (
         <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
-          <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
+          <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50/60">
             <div>
               <h3 className="text-sm font-extrabold text-slate-900">
-                Daftar Rangkuman Kuartal Personil Sales
+                Daftar Rangkuman Kuartal Personil Sales ({overall.quarterLabel})
               </h3>
               <p className="text-xs text-slate-500">
-                Pencapaian omset, komisi, dan evaluasi 4 pilar KPI Scorecard selama 3 bulan
+                Hanya menampilkan 6 Sales terdaftar • Target Kuartal (Sell In &amp; Sell Out) dapat diedit per kuartal • Realisasi mengikuti filter {activeKetDisplayLabel}
               </p>
             </div>
-            <span className="text-xs font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-800">
-              {filteredSales.length} Personil
-            </span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={() => openBulkTargetModal('sales', 'targets')}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-2xs transition-colors cursor-pointer"
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>Setting Target Kuartal Sales</span>
+              </button>
+              {(isKetSellIn || !isKetSellOut) && (
+                <button
+                  onClick={() => openBulkTargetModal('sales', 'actualSellIn')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl bg-sky-600 hover:bg-sky-700 text-white shadow-2xs transition-colors cursor-pointer"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  <span>Edit Realisasi Sell In</span>
+                </button>
+              )}
+              <span className="text-xs font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-800">
+                {filteredSales.length} Personil
+              </span>
+            </div>
           </div>
 
           <div className="overflow-x-auto">
@@ -974,8 +1635,12 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                 <tr className="bg-slate-100/80 text-slate-700 font-bold border-b border-slate-200">
                   <th className="py-3 px-3">Nama Sales</th>
                   <th className="py-3 px-3">Area</th>
-                  <th className="py-3 px-3 text-right">Target Kuartal</th>
-                  <th className="py-3 px-3 text-right">Realisasi Kuartal</th>
+                  <th className="py-3 px-3 text-right">
+                    {isKetSellIn ? 'Target Sell In (Q)' : isKetSellOut ? 'Target Sell Out (Q)' : 'Target Kuartal (In / Out)'}
+                  </th>
+                  <th className="py-3 px-3 text-right">
+                    {isKetSellIn ? 'Realisasi Sell In (Q)' : isKetSellOut ? 'Realisasi Sell Out (Q)' : 'Realisasi Kuartal'}
+                  </th>
                   <th className="py-3 px-3 text-center">% Ach</th>
                   <th className="py-3 px-3 text-center">Avg KPI</th>
                   <th className="py-3 px-3 text-center">Grade KPI</th>
@@ -987,13 +1652,70 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
               <tbody className="divide-y divide-slate-100">
                 {filteredSales.map((s) => (
                   <tr key={s.salesName} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="py-3 px-3 font-bold text-slate-900">{s.salesName}</td>
+                    <td className="py-3 px-3 font-bold text-slate-900">
+                      <div className="flex items-center gap-1.5">
+                        <span>{s.salesName}</span>
+                        {s.isCustomQuarterTarget && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 font-bold">
+                            Custom Q
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="py-3 px-3 text-slate-600 font-medium">{s.coverArea}</td>
                     <td className="py-3 px-3 text-right font-mono text-slate-700">
-                      {formatRupiah(s.quarterTarget, true)}
+                      <div className="flex items-center justify-end gap-1.5">
+                        <div>
+                          <span className="font-bold text-slate-900 block">
+                            {formatRupiah(s.quarterTarget, true)}
+                          </span>
+                          <span className="text-[10px] text-slate-400 block">
+                            In: {formatRupiah(s.quarterTargetSellIn, true)} • Out: {formatRupiah(s.quarterTargetSellOut, true)}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditTargetItem({
+                              role: 'sales',
+                              entityName: s.salesName,
+                              subtitle: `${s.coverArea} • ${overall.quarterLabel}`,
+                              targetSellIn: String(Math.round(s.quarterTargetSellIn)),
+                              targetSellOut: String(Math.round(s.quarterTargetSellOut)),
+                              isCustom: Boolean(s.isCustomQuarterTarget),
+                            })
+                          }
+                          title="Edit Target Kuartal Sell In & Sell Out"
+                          className="p-1 rounded-md text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors cursor-pointer"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </td>
                     <td className="py-3 px-3 text-right font-mono font-bold text-slate-900">
-                      {formatRupiah(s.quarterActual, true)}
+                      <div className="flex items-center justify-end gap-1.5">
+                        <div>
+                          <span className="block">{formatRupiah(s.quarterActual, true)}</span>
+                          <span className="text-[10px] font-normal text-slate-500 block">
+                            In: {formatRupiah(s.quarterActualSellIn, true)} • Out: {formatRupiah(s.quarterActualSellOut, true)}
+                          </span>
+                          {s.isCustomActualSellIn && (
+                            <span className="inline-block mt-0.5 text-[9px] px-1.5 py-0.2 rounded bg-sky-100 text-sky-700 font-sans font-bold">
+                              Sell In Manual
+                            </span>
+                          )}
+                        </div>
+                        {(isKetSellIn || !isKetSellOut) && (
+                          <button
+                            type="button"
+                            onClick={() => openEditActualSellIn('sales', s)}
+                            title="Edit Realisasi Sell In"
+                            className="p-1 rounded-md text-slate-400 hover:text-sky-600 hover:bg-sky-50 transition-colors cursor-pointer"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </td>
                     <td className="py-3 px-3 text-center">
                       <span
@@ -1069,13 +1791,29 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
           <div className="p-4 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-2 bg-slate-50/60">
             <div>
               <h3 className="text-sm font-extrabold text-slate-900">
-                Daftar Rangkuman Kuartal Beauty Advisor (BA)
+                Daftar Rangkuman Kuartal Beauty Advisor (BA) — {overall.quarterLabel}
               </h3>
               <p className="text-xs text-slate-500">
-                Pencapaian sell out, target produk fokus, kepatuhan absensi (hari off resmi bebas denda), dan THP
+                Target Kuartal Sell In &amp; Sell Out bisa diedit per kuartal • Realisasi mengikuti {activeKetDisplayLabel}
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={() => openBulkTargetModal('ba', 'targets')}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl bg-pink-600 hover:bg-pink-700 text-white shadow-2xs transition-colors cursor-pointer"
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>Setting Target Kuartal BA</span>
+              </button>
+              {(isKetSellIn || !isKetSellOut) && (
+                <button
+                  onClick={() => openBulkTargetModal('ba', 'actualSellIn')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl bg-sky-600 hover:bg-sky-700 text-white shadow-2xs transition-colors cursor-pointer"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  <span>Edit Realisasi Sell In</span>
+                </button>
+              )}
               <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800">
                 Hari Off = Bebas Denda
               </span>
@@ -1092,8 +1830,12 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                   <th className="py-3 px-3 text-center">Rank</th>
                   <th className="py-3 px-3">Nama BA &amp; Toko</th>
                   <th className="py-3 px-3">Area / SPV</th>
-                  <th className="py-3 px-3 text-right">Target Kuartal</th>
-                  <th className="py-3 px-3 text-right">Realisasi Kuartal</th>
+                  <th className="py-3 px-3 text-right">
+                    {isKetSellIn ? 'Target Sell In (Q)' : isKetSellOut ? 'Target Sell Out (Q)' : 'Target Kuartal'}
+                  </th>
+                  <th className="py-3 px-3 text-right">
+                    {isKetSellIn ? 'Realisasi Sell In (Q)' : isKetSellOut ? 'Realisasi Sell Out (Q)' : 'Realisasi Kuartal'}
+                  </th>
                   <th className="py-3 px-3 text-center">% Ach</th>
                   <th className="py-3 px-3 text-center">Fokus (Target/Real)</th>
                   <th className="py-3 px-3 text-center">% Fokus</th>
@@ -1112,7 +1854,14 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                       </span>
                     </td>
                     <td className="py-3 px-3">
-                      <span className="font-bold text-slate-900 block">{b.baName}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-bold text-slate-900">{b.baName}</span>
+                        {b.isCustomQuarterTarget && (
+                          <span className="text-[9px] px-1.5 py-0.2 rounded bg-pink-100 text-pink-700 font-bold">
+                            Custom Q
+                          </span>
+                        )}
+                      </div>
                       <span className="text-[10px] text-slate-500 truncate max-w-[170px] block">
                         {b.storeName}
                       </span>
@@ -1122,10 +1871,58 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                       <span className="text-[10px] text-slate-400 block">SPV: {b.spvName}</span>
                     </td>
                     <td className="py-3 px-3 text-right font-mono text-slate-700">
-                      {formatRupiah(b.quarterTarget, true)}
+                      <div className="flex items-center justify-end gap-1.5">
+                        <div>
+                          <span className="font-bold text-slate-900 block">
+                            {formatRupiah(b.quarterTarget, true)}
+                          </span>
+                          <span className="text-[10px] text-slate-400 block">
+                            In: {formatRupiah(b.quarterTargetSellIn, true)} • Out: {formatRupiah(b.quarterTargetSellOut, true)}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditTargetItem({
+                              role: 'ba',
+                              entityName: b.baName,
+                              subtitle: `${b.storeName} • ${overall.quarterLabel}`,
+                              targetSellIn: String(Math.round(b.quarterTargetSellIn)),
+                              targetSellOut: String(Math.round(b.quarterTargetSellOut)),
+                              isCustom: Boolean(b.isCustomQuarterTarget),
+                            })
+                          }
+                          title="Edit Target Kuartal Sell In & Sell Out"
+                          className="p-1 rounded-md text-slate-400 hover:text-pink-600 hover:bg-pink-50 transition-colors cursor-pointer"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </td>
                     <td className="py-3 px-3 text-right font-mono font-bold text-slate-900">
-                      {formatRupiah(b.quarterActual, true)}
+                      <div className="flex items-center justify-end gap-1.5">
+                        <div>
+                          <span className="block">{formatRupiah(b.quarterActual, true)}</span>
+                          <span className="text-[10px] font-normal text-slate-500 block">
+                            In: {formatRupiah(b.quarterActualSellIn, true)} • Out: {formatRupiah(b.quarterActualSellOut, true)}
+                          </span>
+                          {b.isCustomActualSellIn && (
+                            <span className="inline-block mt-0.5 text-[9px] px-1.5 py-0.2 rounded bg-sky-100 text-sky-700 font-sans font-bold">
+                              Sell In Manual
+                            </span>
+                          )}
+                        </div>
+                        {(isKetSellIn || !isKetSellOut) && (
+                          <button
+                            type="button"
+                            onClick={() => openEditActualSellIn('ba', b)}
+                            title="Edit Realisasi Sell In"
+                            className="p-1 rounded-md text-slate-400 hover:text-sky-600 hover:bg-sky-50 transition-colors cursor-pointer"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </td>
                     <td className="py-3 px-3 text-center">
                       <span
@@ -1199,13 +1996,29 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
           <div className="p-4 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-2 bg-slate-50/60">
             <div>
               <h3 className="text-sm font-extrabold text-slate-900">
-                Daftar Rangkuman Kuartal Trainer (Pencapaian Area &amp; Insentif KPI)
+                Daftar Rangkuman Kuartal Trainer — {overall.quarterLabel}
               </h3>
               <p className="text-xs text-slate-500">
-                Pencapaian sell out area, produk fokus area, skor Balanced Scorecard 100 Poin, serta insentif/denda SP1
+                Target Kuartal Sell In &amp; Sell Out bisa diedit per kuartal • Realisasi mengikuti {activeKetDisplayLabel}
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={() => openBulkTargetModal('trainer', 'targets')}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl bg-purple-600 hover:bg-purple-700 text-white shadow-2xs transition-colors cursor-pointer"
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>Setting Target Kuartal Trainer</span>
+              </button>
+              {(isKetSellIn || !isKetSellOut) && (
+                <button
+                  onClick={() => openBulkTargetModal('trainer', 'actualSellIn')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl bg-sky-600 hover:bg-sky-700 text-white shadow-2xs transition-colors cursor-pointer"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  <span>Edit Realisasi Sell In</span>
+                </button>
+              )}
               <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-purple-100 text-purple-800">
                 {filteredTrainer.length} Trainer
               </span>
@@ -1239,8 +2052,12 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                 <tr className="bg-slate-100/80 text-slate-700 font-bold border-b border-slate-200">
                   <th className="py-3 px-3">Nama Trainer</th>
                   <th className="py-3 px-3">Area Covered</th>
-                  <th className="py-3 px-3 text-right">Target Area (Q)</th>
-                  <th className="py-3 px-3 text-right">Realisasi Area (Q)</th>
+                  <th className="py-3 px-3 text-right">
+                    {isKetSellIn ? 'Target Sell In (Q)' : isKetSellOut ? 'Target Sell Out (Q)' : 'Target Area (Q)'}
+                  </th>
+                  <th className="py-3 px-3 text-right">
+                    {isKetSellIn ? 'Realisasi Sell In (Q)' : isKetSellOut ? 'Realisasi Sell Out (Q)' : 'Realisasi Area (Q)'}
+                  </th>
                   <th className="py-3 px-3 text-center">% Ach Area</th>
                   <th className="py-3 px-3 text-center">Fokus Area (Pcs)</th>
                   <th className="py-3 px-3 text-center">Avg Skor KPI</th>
@@ -1254,13 +2071,70 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
               <tbody className="divide-y divide-slate-100">
                 {filteredTrainer.map((t) => (
                   <tr key={t.trainerName} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="py-3 px-3 font-bold text-slate-900">{t.trainerName}</td>
+                    <td className="py-3 px-3 font-bold text-slate-900">
+                      <div className="flex items-center gap-1.5">
+                        <span>{t.trainerName}</span>
+                        {t.isCustomQuarterTarget && (
+                          <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-100 text-purple-700 font-bold">
+                            Custom Q
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="py-3 px-3 text-slate-600 font-medium">{t.areaCovered}</td>
                     <td className="py-3 px-3 text-right font-mono text-slate-700">
-                      {formatRupiah(t.quarterTarget, true)}
+                      <div className="flex items-center justify-end gap-1.5">
+                        <div>
+                          <span className="font-bold text-slate-900 block">
+                            {formatRupiah(t.quarterTarget, true)}
+                          </span>
+                          <span className="text-[10px] text-slate-400 block">
+                            In: {formatRupiah(t.quarterTargetSellIn, true)} • Out: {formatRupiah(t.quarterTargetSellOut, true)}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditTargetItem({
+                              role: 'trainer',
+                              entityName: t.trainerName,
+                              subtitle: `${t.areaCovered} • ${overall.quarterLabel}`,
+                              targetSellIn: String(Math.round(t.quarterTargetSellIn)),
+                              targetSellOut: String(Math.round(t.quarterTargetSellOut)),
+                              isCustom: Boolean(t.isCustomQuarterTarget),
+                            })
+                          }
+                          title="Edit Target Kuartal Sell In & Sell Out"
+                          className="p-1 rounded-md text-slate-400 hover:text-purple-600 hover:bg-purple-50 transition-colors cursor-pointer"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </td>
                     <td className="py-3 px-3 text-right font-mono font-bold text-slate-900">
-                      {formatRupiah(t.quarterActual, true)}
+                      <div className="flex items-center justify-end gap-1.5">
+                        <div>
+                          <span className="block">{formatRupiah(t.quarterActual, true)}</span>
+                          <span className="text-[10px] font-normal text-slate-500 block">
+                            In: {formatRupiah(t.quarterActualSellIn, true)} • Out: {formatRupiah(t.quarterActualSellOut, true)}
+                          </span>
+                          {t.isCustomActualSellIn && (
+                            <span className="inline-block mt-0.5 text-[9px] px-1.5 py-0.2 rounded bg-sky-100 text-sky-700 font-sans font-bold">
+                              Sell In Manual
+                            </span>
+                          )}
+                        </div>
+                        {(isKetSellIn || !isKetSellOut) && (
+                          <button
+                            type="button"
+                            onClick={() => openEditActualSellIn('trainer', t)}
+                            title="Edit Realisasi Sell In"
+                            className="p-1 rounded-md text-slate-400 hover:text-sky-600 hover:bg-sky-50 transition-colors cursor-pointer"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </td>
                     <td className="py-3 px-3 text-center">
                       <span
@@ -1327,7 +2201,7 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
       )}
 
       {/* 6. Modal Detail 3 Bulan (Bulan 1, 2, 3 Breakdown) */}
-      {modalPerson && (
+      {modalPerson && activeModalPersonData && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
           <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-2xl w-full p-6 max-h-[90vh] overflow-y-auto">
             {/* Modal Header */}
@@ -1342,20 +2216,25 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                       : 'Trainer Evaluation'}
                   </span>
                   <span className="text-xs text-slate-400">• {overall.quarterLabel}</span>
+                  {activeModalPersonData.isCustomActualSellIn && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-sky-100 text-sky-700">
+                      Sell In Manual
+                    </span>
+                  )}
                 </div>
                 <h3 className="text-lg font-black text-slate-900 mt-1">
                   {modalPerson.type === 'sales'
-                    ? (modalPerson.data as SalesQuarterlySummaryItem).salesName
+                    ? (activeModalPersonData as SalesQuarterlySummaryItem).salesName
                     : modalPerson.type === 'ba'
-                    ? (modalPerson.data as BaQuarterlySummaryItem).baName
-                    : (modalPerson.data as TrainerQuarterlySummaryItem).trainerName}
+                    ? (activeModalPersonData as BaQuarterlySummaryItem).baName
+                    : (activeModalPersonData as TrainerQuarterlySummaryItem).trainerName}
                 </h3>
                 <p className="text-xs text-slate-500">
                   {modalPerson.type === 'sales'
-                    ? `Area: ${(modalPerson.data as SalesQuarterlySummaryItem).coverArea}`
+                    ? `Area: ${(activeModalPersonData as SalesQuarterlySummaryItem).coverArea}`
                     : modalPerson.type === 'ba'
-                    ? `Toko: ${(modalPerson.data as BaQuarterlySummaryItem).storeName} • Area: ${(modalPerson.data as BaQuarterlySummaryItem).coverArea}`
-                    : `Area: ${(modalPerson.data as TrainerQuarterlySummaryItem).areaCovered}`}
+                    ? `Toko: ${(activeModalPersonData as BaQuarterlySummaryItem).storeName} • Area: ${(activeModalPersonData as BaQuarterlySummaryItem).coverArea}`
+                    : `Area: ${(activeModalPersonData as TrainerQuarterlySummaryItem).areaCovered}`}
                 </p>
               </div>
               <button
@@ -1368,16 +2247,38 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
 
             {/* Monthly Breakdown Table */}
             <div className="mt-5">
-              <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
-                Rincian Performa Tiap Bulan ({overall.quarterLabel})
-              </h4>
-              <div className="border border-slate-200 rounded-xl overflow-hidden">
+              <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  Rincian Performa Tiap Bulan ({overall.quarterLabel}) • {activeKetDisplayLabel}
+                </h4>
+                {(isKetSellIn || !isKetSellOut) && (
+                  <button
+                    type="button"
+                    onClick={() => openEditActualSellIn(modalPerson.type, activeModalPersonData, 'monthly')}
+                    className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-bold rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 transition-colors cursor-pointer"
+                  >
+                    <Pencil className="w-3 h-3" />
+                    <span>Edit Realisasi Sell In (3 Bulan)</span>
+                  </button>
+                )}
+              </div>
+              <div className="border border-slate-200 rounded-xl overflow-x-auto">
                 <table className="w-full text-xs text-left">
                   <thead>
                     <tr className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200">
                       <th className="py-2.5 px-3">Bulan</th>
-                      <th className="py-2.5 px-3 text-right">Target (IDR)</th>
-                      <th className="py-2.5 px-3 text-right">Realisasi (IDR)</th>
+                      {(isKetSellIn || !isKetSellOut) && (
+                        <>
+                          <th className="py-2.5 px-3 text-right">Target Sell In</th>
+                          <th className="py-2.5 px-3 text-right">Realisasi Sell In</th>
+                        </>
+                      )}
+                      {(isKetSellOut || !isKetSellIn) && (
+                        <>
+                          <th className="py-2.5 px-3 text-right">Target Sell Out</th>
+                          <th className="py-2.5 px-3 text-right">Realisasi Sell Out</th>
+                        </>
+                      )}
                       <th className="py-2.5 px-3 text-center">% Pencapaian</th>
                       {modalPerson.type === 'ba' && (
                         <>
@@ -1394,15 +2295,29 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {modalPerson.data.monthlyBreakdown.map((m, idx) => (
+                    {activeModalPersonData.monthlyBreakdown.map((m, idx) => (
                       <tr key={idx} className="hover:bg-slate-50/60">
                         <td className="py-2.5 px-3 font-bold text-slate-900">{m.monthName}</td>
-                        <td className="py-2.5 px-3 text-right font-mono text-slate-600">
-                          {formatRupiah(m.target ?? m.targetSellOut ?? 0, true)}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-900">
-                          {formatRupiah(m.actual ?? m.actualSellOut ?? 0, true)}
-                        </td>
+                        {(isKetSellIn || !isKetSellOut) && (
+                          <>
+                            <td className="py-2.5 px-3 text-right font-mono text-slate-600">
+                              {formatRupiah(m.targetSellIn ?? 0, true)}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-mono font-bold text-blue-800">
+                              {formatRupiah(m.actualSellIn ?? 0, true)}
+                            </td>
+                          </>
+                        )}
+                        {(isKetSellOut || !isKetSellIn) && (
+                          <>
+                            <td className="py-2.5 px-3 text-right font-mono text-slate-600">
+                              {formatRupiah(m.targetSellOut ?? 0, true)}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-800">
+                              {formatRupiah(m.actualSellOut ?? 0, true)}
+                            </td>
+                          </>
+                        )}
                         <td className="py-2.5 px-3 text-center">
                           <span
                             className={`px-2 py-0.5 rounded-full font-bold text-[10px] ${
@@ -1443,14 +2358,24 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
             </div>
 
             {/* Total Consolidation Footer */}
-            <div className="mt-5 p-3.5 bg-slate-50 rounded-xl border border-slate-200/80 flex items-center justify-between text-xs">
-              <span className="font-semibold text-slate-600">Total Pencapaian Kuartal:</span>
+            <div className="mt-5 p-3.5 bg-slate-50 rounded-xl border border-slate-200/80 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div>
+                <span className="font-semibold text-slate-600 block">
+                  Total Pencapaian Kuartal ({activeKetDisplayLabel}):
+                </span>
+                {!isKetSellIn && !isKetSellOut && (
+                  <span className="text-[11px] text-slate-500">
+                    Sell In: {formatRupiah(activeModalPersonData.quarterActualSellIn, true)} • Sell Out:{' '}
+                    {formatRupiah(activeModalPersonData.quarterActualSellOut, true)}
+                  </span>
+                )}
+              </div>
               <div className="text-right">
                 <span className="font-mono font-black text-sm text-slate-900">
-                  {formatRupiah(modalPerson.data.quarterActual, true)}
+                  {formatRupiah(activeModalPersonData.quarterActual, true)}
                 </span>
                 <span className="text-slate-500 ml-2 font-bold">
-                  ({formatPercent(modalPerson.data.quarterAchievementPercent)})
+                  ({formatPercent(activeModalPersonData.quarterAchievementPercent)})
                 </span>
               </div>
             </div>
@@ -1463,6 +2388,650 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
               >
                 Tutup Rincian
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 7. Quick Single-Entity Target Kuartal Edit Modal */}
+      {editTargetItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 space-y-4">
+            <div className="flex items-start justify-between pb-3 border-b border-slate-100">
+              <div>
+                <span className="text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded bg-indigo-50 text-indigo-700">
+                  Edit Target Kuartal ({selectedQuarter} {selectedYear})
+                </span>
+                <h3 className="text-base font-black text-slate-900 mt-1">
+                  {editTargetItem.entityName}
+                </h3>
+                <p className="text-xs text-slate-500">{editTargetItem.subtitle}</p>
+              </div>
+              <button
+                onClick={() => setEditTargetItem(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Target Kuartal SELL IN (Rp)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  step={500000}
+                  value={editTargetItem.targetSellIn}
+                  onChange={(e) =>
+                    setEditTargetItem({ ...editTargetItem, targetSellIn: e.target.value })
+                  }
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <span className="text-[11px] text-slate-500 mt-1 block">
+                  Preview: {formatRupiah(Number(editTargetItem.targetSellIn) || 0)}
+                </span>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Target Kuartal SELL OUT (Rp)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  step={500000}
+                  value={editTargetItem.targetSellOut}
+                  onChange={(e) =>
+                    setEditTargetItem({ ...editTargetItem, targetSellOut: e.target.value })
+                  }
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                <span className="text-[11px] text-slate-500 mt-1 block">
+                  Preview: {formatRupiah(Number(editTargetItem.targetSellOut) || 0)}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+              {editTargetItem.isCustom ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearQuarterlyTargetOverride(
+                      selectedYear,
+                      selectedQuarter,
+                      editTargetItem.role,
+                      editTargetItem.entityName
+                    );
+                    setEditTargetItem(null);
+                  }}
+                  className="flex items-center gap-1 px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-xl cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reset Default</span>
+                </button>
+              ) : (
+                <span />
+              )}
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditTargetItem(null)}
+                  className="px-3.5 py-2 text-xs font-bold rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveSingleTarget}
+                  className="flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Simpan Target</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 7b. Quick Single-Entity Realisasi Sell In Edit Modal */}
+      {editActualSellInItem && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 space-y-4">
+            <div className="flex items-start justify-between pb-3 border-b border-slate-100">
+              <div>
+                <span className="text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded bg-sky-50 text-sky-700">
+                  Edit Realisasi Sell In ({selectedQuarter} {selectedYear})
+                </span>
+                <h3 className="text-base font-black text-slate-900 mt-1">
+                  {editActualSellInItem.entityName}
+                </h3>
+                <p className="text-xs text-slate-500">{editActualSellInItem.subtitle}</p>
+              </div>
+              <button
+                onClick={() => setEditActualSellInItem(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Mode Toggle: Total Kuartal vs Per Bulan */}
+            <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl text-xs">
+              <button
+                type="button"
+                onClick={() => setEditActualSellInItem({ ...editActualSellInItem, editMode: 'total' })}
+                className={`flex-1 py-1.5 rounded-lg font-bold transition-all cursor-pointer ${
+                  editActualSellInItem.editMode === 'total'
+                    ? 'bg-white text-sky-700 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Total Kuartal
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditActualSellInItem({ ...editActualSellInItem, editMode: 'monthly' })}
+                className={`flex-1 py-1.5 rounded-lg font-bold transition-all cursor-pointer ${
+                  editActualSellInItem.editMode === 'monthly'
+                    ? 'bg-white text-sky-700 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Rincian 3 Bulan
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              {editActualSellInItem.editMode === 'total' ? (
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Total Realisasi SELL IN {selectedQuarter} (Rp)
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    step={100000}
+                    value={editActualSellInItem.totalSellIn}
+                    onChange={(e) =>
+                      setEditActualSellInItem({ ...editActualSellInItem, totalSellIn: e.target.value })
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                  <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-500">
+                    <span>Preview: {formatRupiah(Number(editActualSellInItem.totalSellIn) || 0)}</span>
+                    <span className="font-bold text-emerald-700">
+                      % Sell In:{' '}
+                      {formatPercent(
+                        editActualSellInItem.targetSellIn > 0
+                          ? ((Number(editActualSellInItem.totalSellIn) || 0) /
+                              editActualSellInItem.targetSellIn) *
+                              100
+                          : 0,
+                        false
+                      )}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    * Target Sell In: {formatRupiah(editActualSellInItem.targetSellIn, true)}. Nilai kuartal dibagi proporsional ke 3 bulan.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {[0, 1, 2].map((idx) => (
+                    <div key={idx}>
+                      <label className="block font-bold text-slate-700 mb-1">
+                        Realisasi Sell In — {editActualSellInItem.monthNames[idx]} (Rp)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        step={100000}
+                        value={editActualSellInItem.monthlySellIn[idx]}
+                        onChange={(e) => {
+                          const nextMonthly: [string, string, string] = [
+                            ...editActualSellInItem.monthlySellIn,
+                          ] as [string, string, string];
+                          nextMonthly[idx] = e.target.value;
+                          const sum =
+                            (Number(nextMonthly[0]) || 0) +
+                            (Number(nextMonthly[1]) || 0) +
+                            (Number(nextMonthly[2]) || 0);
+                          setEditActualSellInItem({
+                            ...editActualSellInItem,
+                            monthlySellIn: nextMonthly,
+                            totalSellIn: String(Math.round(sum)),
+                          });
+                        }}
+                        className="w-full px-3 py-1.5 rounded-xl border border-slate-300 font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                      />
+                    </div>
+                  ))}
+                  {(() => {
+                    const monthlyTotal =
+                      (Number(editActualSellInItem.monthlySellIn[0]) || 0) +
+                      (Number(editActualSellInItem.monthlySellIn[1]) || 0) +
+                      (Number(editActualSellInItem.monthlySellIn[2]) || 0);
+                    const pct =
+                      editActualSellInItem.targetSellIn > 0
+                        ? (monthlyTotal / editActualSellInItem.targetSellIn) * 100
+                        : 0;
+                    return (
+                      <div className="p-2.5 rounded-xl bg-sky-50 border border-sky-200 flex items-center justify-between text-[11px]">
+                        <span className="font-bold text-sky-900">
+                          Total 3 Bulan: {formatRupiah(monthlyTotal, true)}
+                        </span>
+                        <span className="font-extrabold text-emerald-700">
+                          % Sell In: {formatPercent(pct, false)}
+                        </span>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+              {editActualSellInItem.isCustom ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearQuarterlyActualSellInOverride(
+                      selectedYear,
+                      selectedQuarter,
+                      editActualSellInItem.role,
+                      editActualSellInItem.entityName
+                    );
+                    setEditActualSellInItem(null);
+                  }}
+                  className="flex items-center gap-1 px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-xl cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reset Data Transaksi</span>
+                </button>
+              ) : (
+                <span />
+              )}
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditActualSellInItem(null)}
+                  className="px-3.5 py-2 text-xs font-bold rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveSingleActualSellIn}
+                  className="flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-xl bg-sky-600 hover:bg-sky-700 text-white cursor-pointer"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Simpan Realisasi</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 8. Bulk Target & Realisasi Sell In Kuartal (Q1-Q4) Modal */}
+      {isTargetModalOpen && modalSummaryData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-4xl w-full p-6 max-h-[90vh] flex flex-col">
+            <div className="flex items-start justify-between pb-4 border-b border-slate-100 shrink-0 gap-3 flex-wrap">
+              <div>
+                <h3 className="text-base font-black text-slate-900 flex items-center gap-2">
+                  {bulkModalMode === 'targets' ? (
+                    <Sliders className="w-4 h-4 text-indigo-600" />
+                  ) : (
+                    <Pencil className="w-4 h-4 text-sky-600" />
+                  )}
+                  <span>
+                    {bulkModalMode === 'targets'
+                      ? 'Pengaturan Target Kuartal (Sell In & Sell Out)'
+                      : 'Edit Realisasi Sell In Kuartal'}
+                  </span>
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {bulkModalMode === 'targets'
+                    ? 'Atur target berbeda untuk setiap Kuartal (Q1, Q2, Q3, Q4) pada Sales, BA, dan Trainer.'
+                    : 'Sesuaikan nilai Realisasi Sell In per Kuartal (Q1-Q4); peringkat & % pencapaian otomatis terhitung ulang.'}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setBulkModalMode('targets')}
+                    className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer ${
+                      bulkModalMode === 'targets'
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Target Kuartal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBulkModalMode('actualSellIn')}
+                    className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer ${
+                      bulkModalMode === 'actualSellIn'
+                        ? 'bg-sky-600 text-white shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Realisasi Sell In
+                  </button>
+                </div>
+                <button
+                  onClick={() => setIsTargetModalOpen(false)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Quarter, Year & Role Selectors */}
+            <div className="py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3 shrink-0">
+              <div className="flex items-center gap-1.5 p-1 bg-slate-100 rounded-xl">
+                {(['Q1', 'Q2', 'Q3', 'Q4'] as QuarterPeriodKey[]).map((qKey) => (
+                  <button
+                    key={qKey}
+                    onClick={() => {
+                      setTargetModalQuarter(qKey);
+                      populateModalDrafts(targetModalRole, qKey, targetModalYear);
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer ${
+                      targetModalQuarter === qKey
+                        ? 'bg-white text-indigo-700 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {qKey}
+                  </button>
+                ))}
+                <select
+                  value={targetModalYear}
+                  onChange={(e) => {
+                    const yr = Number(e.target.value);
+                    setTargetModalYear(yr);
+                    populateModalDrafts(targetModalRole, targetModalQuarter, yr);
+                  }}
+                  className="ml-1 px-2 py-1 text-xs font-bold bg-white border border-slate-200 rounded-lg text-slate-800 outline-none"
+                >
+                  <option value={2026}>2026</option>
+                  <option value={2025}>2025</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1.5 p-1 bg-slate-100 rounded-xl">
+                {([
+                  { id: 'sales' as QuarterlyTargetRole, label: 'Sales (6 Personil)' },
+                  { id: 'ba' as QuarterlyTargetRole, label: 'Beauty Advisor (BA)' },
+                  { id: 'trainer' as QuarterlyTargetRole, label: 'Trainer (ARA & RATIH)' },
+                ]).map((rTab) => (
+                  <button
+                    key={rTab.id}
+                    onClick={() => {
+                      setTargetModalRole(rTab.id);
+                      populateModalDrafts(rTab.id, targetModalQuarter, targetModalYear);
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer ${
+                      targetModalRole === rTab.id
+                        ? 'bg-slate-900 text-white shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {rTab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Editable Table */}
+            <div className="overflow-y-auto grow my-3 border border-slate-200 rounded-xl">
+              {bulkModalMode === 'targets' ? (
+                <table className="w-full text-xs text-left border-collapse">
+                  <thead className="sticky top-0 bg-slate-100 text-slate-700 font-bold border-b border-slate-200 z-10">
+                    <tr>
+                      <th className="py-2.5 px-3">Nama Personil</th>
+                      <th className="py-2.5 px-3">Area / Toko</th>
+                      <th className="py-2.5 px-3">Target Kuartal Sell In (Rp)</th>
+                      <th className="py-2.5 px-3">Target Kuartal Sell Out (Rp)</th>
+                      <th className="py-2.5 px-3 text-center">Reset</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {(targetModalRole === 'sales'
+                      ? modalSummaryData.salesList.map((s) => ({
+                          name: s.salesName,
+                          sub: s.coverArea,
+                          isCustom: Boolean(s.isCustomQuarterTarget),
+                        }))
+                      : targetModalRole === 'ba'
+                      ? modalSummaryData.baList.map((b) => ({
+                          name: b.baName,
+                          sub: b.storeName,
+                          isCustom: Boolean(b.isCustomQuarterTarget),
+                        }))
+                      : modalSummaryData.trainerList.map((t) => ({
+                          name: t.trainerName,
+                          sub: t.areaCovered,
+                          isCustom: Boolean(t.isCustomQuarterTarget),
+                        }))
+                    ).map((row) => {
+                      const draft = targetDrafts[row.name] || { sellIn: '0', sellOut: '0' };
+                      return (
+                        <tr key={row.name} className="hover:bg-slate-50/70">
+                          <td className="py-2.5 px-3 font-bold text-slate-900">
+                            <span>{row.name}</span>
+                            {row.isCustom && (
+                              <span className="ml-1.5 text-[9px] px-1.5 py-0.2 rounded bg-indigo-100 text-indigo-700 font-bold">
+                                Custom
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-500 max-w-[180px] truncate">
+                            {row.sub}
+                          </td>
+                          <td className="py-2 px-3">
+                            <input
+                              type="number"
+                              min={0}
+                              step={500000}
+                              value={draft.sellIn}
+                              onChange={(e) =>
+                                setTargetDrafts((prev) => ({
+                                  ...prev,
+                                  [row.name]: { ...draft, sellIn: e.target.value },
+                                }))
+                              }
+                              className="w-40 px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            />
+                          </td>
+                          <td className="py-2 px-3">
+                            <input
+                              type="number"
+                              min={0}
+                              step={500000}
+                              value={draft.sellOut}
+                              onChange={(e) =>
+                                setTargetDrafts((prev) => ({
+                                  ...prev,
+                                  [row.name]: { ...draft, sellOut: e.target.value },
+                                }))
+                              }
+                              className="w-40 px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </td>
+                          <td className="py-2 px-3 text-center">
+                            {row.isCustom && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  clearQuarterlyTargetOverride(
+                                    targetModalYear,
+                                    targetModalQuarter,
+                                    targetModalRole,
+                                    row.name
+                                  );
+                                  populateModalDrafts(targetModalRole, targetModalQuarter, targetModalYear);
+                                }}
+                                title="Kembalikan ke target default"
+                                className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-50 cursor-pointer"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              ) : (
+                <table className="w-full text-xs text-left border-collapse">
+                  <thead className="sticky top-0 bg-slate-100 text-slate-700 font-bold border-b border-slate-200 z-10">
+                    <tr>
+                      <th className="py-2.5 px-3">Nama Personil</th>
+                      <th className="py-2.5 px-3">Area / Toko</th>
+                      <th className="py-2.5 px-3 text-right">Target Sell In</th>
+                      <th className="py-2.5 px-3">Realisasi Sell In (Rp)</th>
+                      <th className="py-2.5 px-3 text-center">% Sell In</th>
+                      <th className="py-2.5 px-3 text-center">Reset</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {(targetModalRole === 'sales'
+                      ? modalSummaryData.salesList.map((s) => ({
+                          name: s.salesName,
+                          sub: s.coverArea,
+                          targetSellIn: s.quarterTargetSellIn,
+                          isCustom: Boolean(s.isCustomActualSellIn),
+                        }))
+                      : targetModalRole === 'ba'
+                      ? modalSummaryData.baList.map((b) => ({
+                          name: b.baName,
+                          sub: b.storeName,
+                          targetSellIn: b.quarterTargetSellIn,
+                          isCustom: Boolean(b.isCustomActualSellIn),
+                        }))
+                      : modalSummaryData.trainerList.map((t) => ({
+                          name: t.trainerName,
+                          sub: t.areaCovered,
+                          targetSellIn: t.quarterTargetSellIn,
+                          isCustom: Boolean(t.isCustomActualSellIn),
+                        }))
+                    ).map((row) => {
+                      const valStr = actualSellInDrafts[row.name] ?? '0';
+                      const numVal = Math.max(0, Number(valStr) || 0);
+                      const pct = row.targetSellIn > 0 ? (numVal / row.targetSellIn) * 100 : 0;
+                      return (
+                        <tr key={row.name} className="hover:bg-slate-50/70">
+                          <td className="py-2.5 px-3 font-bold text-slate-900">
+                            <span>{row.name}</span>
+                            {row.isCustom && (
+                              <span className="ml-1.5 text-[9px] px-1.5 py-0.2 rounded bg-sky-100 text-sky-700 font-bold">
+                                Manual
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-500 max-w-[160px] truncate">
+                            {row.sub}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-mono text-slate-600">
+                            {formatRupiah(row.targetSellIn, true)}
+                          </td>
+                          <td className="py-2 px-3">
+                            <input
+                              type="number"
+                              min={0}
+                              step={100000}
+                              value={valStr}
+                              onChange={(e) =>
+                                setActualSellInDrafts((prev) => ({
+                                  ...prev,
+                                  [row.name]: e.target.value,
+                                }))
+                              }
+                              className="w-44 px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                            />
+                          </td>
+                          <td className="py-2.5 px-3 text-center">
+                            <span
+                              className={`px-2 py-0.5 rounded-full font-bold text-[11px] ${
+                                pct >= 100
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : pct >= 80
+                                  ? 'bg-blue-100 text-blue-800'
+                                  : 'bg-amber-100 text-amber-800'
+                              }`}
+                            >
+                              {formatPercent(pct, false)}
+                            </span>
+                          </td>
+                          <td className="py-2 px-3 text-center">
+                            {row.isCustom && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  clearQuarterlyActualSellInOverride(
+                                    targetModalYear,
+                                    targetModalQuarter,
+                                    targetModalRole,
+                                    row.name
+                                  );
+                                  populateModalDrafts(targetModalRole, targetModalQuarter, targetModalYear);
+                                }}
+                                title="Kembalikan ke data transaksi"
+                                className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-50 cursor-pointer"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsTargetModalOpen(false)}
+                className="px-4 py-2 text-xs font-bold rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                Batal
+              </button>
+              {bulkModalMode === 'targets' ? (
+                <button
+                  type="button"
+                  onClick={handleSaveBulkTargets}
+                  className="flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Simpan Target {targetModalQuarter} {targetModalYear}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleSaveBulkActualSellIn}
+                  className="flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-xl bg-sky-600 hover:bg-sky-700 text-white cursor-pointer"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Simpan Realisasi Sell In {targetModalQuarter} {targetModalYear}</span>
+                </button>
+              )}
             </div>
           </div>
         </div>

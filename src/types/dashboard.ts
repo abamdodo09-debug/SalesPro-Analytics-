@@ -260,10 +260,24 @@ export interface SalesSalaryItem {
   coveredStores: string[];
   coveredBaCount: number;
   coveredBaList: SalesCoveredBaItem[];
-  baProductivityBonus: number;     // +Rp 500k (45-54M), +Rp 1M (>=55M)
-  baProductivityPenalty: number;   // -Rp 300k (<35M)
-  baProductivitySpCount: number;   // Jumlah SP1 yang diterima
-  totalSalary: number;             // baseSalary + incentiveNominal + baProductivityBonus - baProductivityPenalty
+  coveredBaTotalSellOut: number;         // Total semua Sell Out BA yang dicover Sales
+  systemCoveredBaTotalSellOut?: number;  // Total Sell Out asli dari data transaksi sistem
+  systemCoveredBaCount?: number;         // Jumlah BA asli dari data sistem
+  baProductivityAverage: number;         // Produktivitas rata-rata = coveredBaTotalSellOut / coveredBaCount
+  isProductivityEdited?: boolean;        // True jika Total Sell Out / Jumlah BA / Bonus diedit manual
+  baProductivityBonus: number;           // Bonus Produktivitas BA untuk Sales (+500rb jika rata2 45-54Jt, +1Jt jika >=55Jt)
+  baProductivityPenalty: number;         // -Rp 300k (<35M)
+  baProductivitySpCount: number;         // Jumlah SP1 yang diterima
+  totalSalary: number;                   // baseSalary + incentiveNominal + baProductivityBonus - baProductivityPenalty
+}
+
+export interface BaCoveredStoreDetail {
+  storeName: string;
+  coverArea: string;
+  region: string;
+  salesName: string;
+  sellOutNonLavojoy: number;
+  sellOutLavojoy: number;
 }
 
 export interface BaSalaryItem {
@@ -274,6 +288,7 @@ export interface BaSalaryItem {
   region: string;
   salesName: string;
   spv?: string;
+  storeDetails?: BaCoveredStoreDetail[];
 
   // Non-Lavojoy Brands (Y.O.U, barenbliss, DAZZLE ME, GLAMFIX, HUED, FORMULOGIC)
   sellOutNonLavojoy: number;
@@ -925,6 +940,8 @@ export interface ProfitAreaSummary {
   salaryCost: number;
   totalSalesSalary: number;
   totalBaSalary: number;
+  totalTrainerSalary?: number;
+  costBreakdown?: AreaCostSummary;
   totalExpense: number;
   remainingProfitValue: number;
   remainingProfitPercentSellIn: number;
@@ -946,7 +963,9 @@ export type QuarterPeriodKey = 'Q1' | 'Q2' | 'Q3' | 'Q4';
 export interface QuarterlyMonthDetail {
   monthName: string;
   monthIndex: number; // 0-11
+  targetSellIn?: number;
   targetSellOut: number;
+  actualSellIn?: number;
   actualSellOut: number;
   target?: number;
   actual?: number;
@@ -964,8 +983,16 @@ export interface SalesQuarterlySummaryItem {
   region: string;
   spvName: string;
   quarterTarget: number;
+  quarterTargetSellIn: number;
+  quarterTargetSellOut: number;
   quarterActual: number;
+  quarterActualSellIn: number;
+  quarterActualSellOut: number;
   quarterAchievementPercent: number;
+  quarterAchievementSellInPercent: number;
+  quarterAchievementSellOutPercent: number;
+  isCustomQuarterTarget?: boolean;
+  isCustomActualSellIn?: boolean;
   avgKpiScore: number;
   kpiGrade: 'Grade A' | 'Grade B' | 'Grade C' | 'Grade D';
   totalCommission: number;
@@ -981,8 +1008,16 @@ export interface BaQuarterlySummaryItem {
   region: string;
   spvName: string;
   quarterTarget: number;
+  quarterTargetSellIn: number;
+  quarterTargetSellOut: number;
   quarterActual: number;
+  quarterActualSellIn: number;
+  quarterActualSellOut: number;
   quarterAchievementPercent: number;
+  quarterAchievementSellInPercent: number;
+  quarterAchievementSellOutPercent: number;
+  isCustomQuarterTarget?: boolean;
+  isCustomActualSellIn?: boolean;
   focusTargetPcs: number;
   focusActualPcs: number;
   focusAchievementPercent: number;
@@ -1000,8 +1035,16 @@ export interface TrainerQuarterlySummaryItem {
   areaCovered: string;
   region: string;
   quarterTarget: number;
+  quarterTargetSellIn: number;
+  quarterTargetSellOut: number;
   quarterActual: number;
+  quarterActualSellIn: number;
+  quarterActualSellOut: number;
   quarterAchievementPercent: number;
+  quarterAchievementSellInPercent: number;
+  quarterAchievementSellOutPercent: number;
+  isCustomQuarterTarget?: boolean;
+  isCustomActualSellIn?: boolean;
   focusTargetPcs: number;
   focusActualPcs: number;
   focusAchievementPercent: number;
@@ -1020,8 +1063,13 @@ export interface QuarterlyOverallSummary {
   year: number;
   quarterLabel: string;
   dateRangeLabel: string;
+  activeKetFilter: string;
   totalTargetArea: number;
+  totalTargetSellIn: number;
+  totalTargetSellOut: number;
   totalActualArea: number;
+  totalActualSellIn: number;
+  totalActualSellOut: number;
   areaAchievementPercent: number;
   totalSalesCount: number;
   totalBaCount: number;
@@ -1031,9 +1079,9 @@ export interface QuarterlyOverallSummary {
   totalTrainerIncentive: number;
   avgSalesKpiScore: number;
   avgTrainerKpiScore: number;
-  topSales: { name: string; actual: number; percent: number } | null;
-  topBa: { name: string; store: string; actual: number; percent: number } | null;
-  topTrainer: { name: string; score: number } | null;
+  topSales: { name: string; actual: number; target?: number; percent: number } | null;
+  topBa: { name: string; store: string; actual: number; target?: number; percent: number } | null;
+  topTrainer: { name: string; actual?: number; target?: number; percent?: number; score: number } | null;
 }
 
 export type SellInSellOutDimension = 'store' | 'ba' | 'sales' | 'trainer' | 'spv';

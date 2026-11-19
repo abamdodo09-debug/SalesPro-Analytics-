@@ -450,3 +450,187 @@ export function resetAllSpvConfigs(): void {
     localStorage.removeItem(SPV_CONSOLIDATED_STORAGE_KEY);
   } catch {}
 }
+
+// ============================================================================
+// 100% MANUAL STORAGE FOR "Kelola & Riwayat Sell In KA & DAZZLE ME MG"
+// Tidak mengambil angka default hardcoded maupun kalkulasi otomatis sheet.
+// Semua bulan dimulai dari 0 (Belum Diisi) sampai user input manual.
+// ============================================================================
+export const MANUAL_KA_MG_STORAGE_KEY = 'salespro_manual_ka_mg_monthly_v1';
+
+export interface ManualKaMgMonthData {
+  periodMonth: string;
+  periodYear: number;
+  spvRegularSellIn: number;
+  kaSellInValue: number;
+  dazzleMeMgSellInValue: number;
+  totalSellIn: number;
+  isCustomTotal?: boolean;
+  growthPercent: number;
+  isCustomGrowth?: boolean;
+  totalSellOut: number;
+  target: number;
+  achievementPercent: number;
+  notes: string;
+  isFilled: boolean;
+  updatedAt?: string;
+}
+
+export function loadAllManualKaMgRecords(): Record<string, ManualKaMgMonthData> {
+  try {
+    const raw = localStorage.getItem(MANUAL_KA_MG_STORAGE_KEY);
+    if (raw) {
+      return JSON.parse(raw);
+    }
+  } catch (e) {
+    console.warn('Gagal membaca data manual KA & MG dari localStorage', e);
+  }
+  return {};
+}
+
+export function saveAllManualKaMgRecords(map: Record<string, ManualKaMgMonthData>): void {
+  try {
+    localStorage.setItem(MANUAL_KA_MG_STORAGE_KEY, JSON.stringify(map));
+  } catch (e) {
+    console.warn('Gagal menyimpan data manual KA & MG ke localStorage', e);
+  }
+}
+
+export function loadManualKaMgMonthData(month: string, year: number): ManualKaMgMonthData {
+  const normMonth = (month || 'JANUARI').toUpperCase().trim();
+  const normYear = year || 2026;
+  const key = getMonthStorageKey(normMonth, normYear);
+  const all = loadAllManualKaMgRecords();
+  const saved = all[key];
+
+  if (!saved) {
+    return {
+      periodMonth: normMonth,
+      periodYear: normYear,
+      spvRegularSellIn: 0,
+      kaSellInValue: 0,
+      dazzleMeMgSellInValue: 0,
+      totalSellIn: 0,
+      isCustomTotal: false,
+      growthPercent: 0,
+      isCustomGrowth: false,
+      totalSellOut: 0,
+      target: 0,
+      achievementPercent: 0,
+      notes: '',
+      isFilled: false,
+    };
+  }
+
+  const ka = Number(saved.kaSellInValue) || 0;
+  const mg = Number(saved.dazzleMeMgSellInValue) || 0;
+  const hasCustomTotal = Boolean(saved.isCustomTotal);
+  const totalSellIn = hasCustomTotal
+    ? Math.max(0, Number(saved.totalSellIn) || 0)
+    : saved.totalSellIn !== undefined && saved.totalSellIn !== ka + mg && saved.isCustomTotal !== false
+    ? Math.max(0, Number(saved.totalSellIn) || 0)
+    : ka + mg;
+  const growthPercent = Number(saved.growthPercent) || 0;
+
+  return {
+    periodMonth: normMonth,
+    periodYear: normYear,
+    spvRegularSellIn: 0,
+    kaSellInValue: ka,
+    dazzleMeMgSellInValue: mg,
+    totalSellIn,
+    isCustomTotal: hasCustomTotal || totalSellIn !== ka + mg,
+    growthPercent,
+    isCustomGrowth: Boolean(saved.isCustomGrowth),
+    totalSellOut: Number(saved.totalSellOut) || 0,
+    target: Number(saved.target) || 0,
+    achievementPercent: 0,
+    notes: saved.notes || '',
+    isFilled: true,
+    updatedAt: saved.updatedAt,
+  };
+}
+
+export function saveManualKaMgMonthData(data: {
+  periodMonth: string;
+  periodYear: number;
+  spvRegularSellIn?: number;
+  kaSellInValue: number;
+  dazzleMeMgSellInValue: number;
+  totalSellIn?: number;
+  isCustomTotal?: boolean;
+  growthPercent?: number;
+  isCustomGrowth?: boolean;
+  totalSellOut?: number;
+  target?: number;
+  notes?: string;
+}): ManualKaMgMonthData {
+  const normMonth = (data.periodMonth || 'JANUARI').toUpperCase().trim();
+  const normYear = data.periodYear || 2026;
+  const key = getMonthStorageKey(normMonth, normYear);
+
+  const ka = Math.max(0, Number(data.kaSellInValue) || 0);
+  const mg = Math.max(0, Number(data.dazzleMeMgSellInValue) || 0);
+  const computedSum = ka + mg;
+  const totalSellIn =
+    data.totalSellIn !== undefined && !isNaN(Number(data.totalSellIn))
+      ? Math.max(0, Number(data.totalSellIn))
+      : computedSum;
+  const isCustomTotal =
+    data.isCustomTotal !== undefined
+      ? Boolean(data.isCustomTotal)
+      : Math.round(totalSellIn) !== Math.round(computedSum);
+  const growthPercent =
+    data.growthPercent !== undefined && !isNaN(Number(data.growthPercent))
+      ? Math.round(Number(data.growthPercent) * 10) / 10
+      : 0;
+  const isCustomGrowth =
+    data.isCustomGrowth !== undefined ? Boolean(data.isCustomGrowth) : data.growthPercent !== undefined;
+
+  const entry: ManualKaMgMonthData = {
+    periodMonth: normMonth,
+    periodYear: normYear,
+    spvRegularSellIn: 0,
+    kaSellInValue: ka,
+    dazzleMeMgSellInValue: mg,
+    totalSellIn,
+    isCustomTotal,
+    growthPercent,
+    isCustomGrowth,
+    totalSellOut: Math.max(0, Number(data.totalSellOut) || 0),
+    target: Math.max(0, Number(data.target) || 0),
+    achievementPercent: 0,
+    notes: (data.notes || '').trim(),
+    isFilled: true,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const all = loadAllManualKaMgRecords();
+  all[key] = entry;
+  saveAllManualKaMgRecords(all);
+  notifyTargetsUpdated({ monthKey: normMonth, category: 'manual_ka_mg' });
+  return entry;
+}
+
+export function resetManualKaMgMonthData(month: string, year: number): void {
+  const normMonth = (month || 'JANUARI').toUpperCase().trim();
+  const normYear = year || 2026;
+  const key = getMonthStorageKey(normMonth, normYear);
+  const all = loadAllManualKaMgRecords();
+  delete all[key];
+  saveAllManualKaMgRecords(all);
+  notifyTargetsUpdated({ monthKey: normMonth, category: 'manual_ka_mg' });
+}
+
+export function resetAllManualKaMgYearData(year: number): void {
+  const normYear = year || 2026;
+  const all = loadAllManualKaMgRecords();
+  Object.keys(all).forEach((k) => {
+    if (k.endsWith(`_${normYear}`)) {
+      delete all[k];
+    }
+  });
+  saveAllManualKaMgRecords(all);
+  notifyTargetsUpdated({ category: 'manual_ka_mg' });
+}
+

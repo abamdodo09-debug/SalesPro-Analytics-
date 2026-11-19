@@ -1,5 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import type { User } from 'firebase/auth';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   ActiveTab,
   DashboardFilters,
@@ -26,7 +25,9 @@ import {
   calculateComparisonGrowth,
   diagnoseSalesGap,
   aggregateCategoryDetails,
+  aggregateByDimension,
   formatRupiah,
+  formatNumber,
   formatPercent,
 } from './utils/analytics';
 import { Header } from './components/Header';
@@ -64,21 +65,7 @@ import { TrainerVisitView } from './components/TrainerVisitView';
 import { OnlinePromoReportView } from './components/OnlinePromoReportView';
 import { MissGlamMarketShareView } from './components/MissGlamMarketShareView';
 import { exportToExcel, exportToPdf } from './utils/exportUtils';
-import { loadSpvConsolidatedConfig } from './services/spvSellInSellOutService';
 import { aggregateTargetMatrix, TARGETS_UPDATED_EVENT } from './services/targetManagementService';
-import {
-  subscribeToAuth,
-  signInWithGoogle,
-  signOutFirebase,
-  ensureUserDocuments,
-  subscribeToUserCloudData,
-  syncLocalConfigsToFirestore,
-  saveSingleTransactionToFirestore,
-  syncTransactionDatasetToFirestore,
-  clearCloudTransactions,
-  FIREBASE_CLOUD_HYDRATED_EVENT,
-  getIsApplyingCloudSnapshot,
-} from './services/firebaseSyncService';
 import {
   TrendingUp,
   FileSpreadsheet,
@@ -133,105 +120,16 @@ export default function App() {
   const [targetSyncVersion, setTargetSyncVersion] = useState<number>(0);
   const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState<boolean>(false);
 
-  // Firebase Auth & Cloud Firestore Sync state
-  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
-  const [isAuthReady, setIsAuthReady] = useState<boolean>(false);
-  const [isCloudSyncing, setIsCloudSyncing] = useState<boolean>(false);
-  const [lastCloudSyncedAt, setLastCloudSyncedAt] = useState<string | null>(null);
-  const [fatalFirestoreError, setFatalFirestoreError] = useState<Error | null>(null);
-  const latestRecordsRef = useRef<TransactionRecord[]>(records);
-  latestRecordsRef.current = records;
-
-  if (fatalFirestoreError) {
-    throw fatalFirestoreError;
-  }
-
   useEffect(() => {
     const onTargetsUpdated = () => setTargetSyncVersion((v) => v + 1);
     const onMapsQuotaExceeded = () => setMapsQuotaExceeded(true);
-    const onCloudHydrated = () => {
-      setGasConfig(loadGasConfig());
-      setTargetSyncVersion((v) => v + 1);
-    };
     window.addEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
     window.addEventListener('storage', onTargetsUpdated);
     window.addEventListener('gmp-quota-exceeded', onMapsQuotaExceeded);
-    window.addEventListener(FIREBASE_CLOUD_HYDRATED_EVENT, onCloudHydrated);
     return () => {
       window.removeEventListener(TARGETS_UPDATED_EVENT, onTargetsUpdated);
       window.removeEventListener('storage', onTargetsUpdated);
       window.removeEventListener('gmp-quota-exceeded', onMapsQuotaExceeded);
-      window.removeEventListener(FIREBASE_CLOUD_HYDRATED_EVENT, onCloudHydrated);
-    };
-  }, []);
-
-  // Auth listener & real-time Firestore subscription (attached only when authenticated)
-  useEffect(() => {
-    let unsubCloud: (() => void) | null = null;
-    let configIntervalId: ReturnType<typeof setInterval> | null = null;
-
-    const unsubAuth = subscribeToAuth(async (user) => {
-      if (unsubCloud) {
-        unsubCloud();
-        unsubCloud = null;
-      }
-      if (configIntervalId) {
-        clearInterval(configIntervalId);
-        configIntervalId = null;
-      }
-
-      setFirebaseUser(user);
-      setIsAuthReady(true);
-
-      if (!user || !user.emailVerified) {
-        return;
-      }
-
-      try {
-        setIsCloudSyncing(true);
-        await ensureUserDocuments(user);
-
-        unsubCloud = subscribeToUserCloudData(user, {
-          onCloudTransactionsLoaded: (cloudRecords) => {
-            if (cloudRecords.length > 0) {
-              setRecords(cloudRecords);
-            }
-          },
-          onCloudConfigsApplied: () => {
-            setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID'));
-          },
-        });
-
-        // Push any local configs not yet stored on cloud
-        const pushed = await syncLocalConfigsToFirestore(user.uid, false);
-        if (pushed > 0) {
-          setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID'));
-        }
-
-        // Background diff check every 4 seconds to persist any manual edits automatically
-        configIntervalId = setInterval(() => {
-          if (getIsApplyingCloudSnapshot()) return;
-          syncLocalConfigsToFirestore(user.uid, false)
-            .then((count) => {
-              if (count > 0) {
-                setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID'));
-              }
-            })
-            .catch((err) => {
-              setFatalFirestoreError(err instanceof Error ? err : new Error(String(err)));
-            });
-        }, 4000);
-      } catch (err) {
-        setFatalFirestoreError(err instanceof Error ? err : new Error(String(err)));
-      } finally {
-        setIsCloudSyncing(false);
-      }
-    });
-
-    return () => {
-      unsubAuth();
-      if (unsubCloud) unsubCloud();
-      if (configIntervalId) clearInterval(configIntervalId);
     };
   }, []);
 
@@ -290,13 +188,6 @@ export default function App() {
     return calculateSummary(filteredRecords);
   }, [filteredRecords]);
 
-  const activeYear = filters.TAHUN !== 'ALL' ? Number(filters.TAHUN) : 2026;
-
-  // SPV Month Config for current selected filter month (incorporates Sell In KA & DAZZLE ME MG)
-  const currentSpvMonthData = useMemo(() => {
-    return loadSpvConsolidatedConfig(records, filters.BULAN || 'OKTOBER', activeYear);
-  }, [records, filters.BULAN, activeYear, targetSyncVersion]);
-
   // Dynamic Target & Achievement calculation for executive KpiCards
   const kpiTargetMetrics = useMemo(() => {
     const matrix = aggregateTargetMatrix(filteredRecords, filters.BULAN);
@@ -320,26 +211,10 @@ export default function App() {
     return { targetTotal, achievementPercent };
   }, [filteredRecords, filters.BULAN, filters.KET, filters.SALES, filters.REGION, filters.SPV, filters.NAMA_STORE, summary.totalRevenue, targetSyncVersion]);
 
-  // Timeframe trend data
+  // Timeframe trend data (100% mengikuti Google Sheet & Filter Terintegrasi)
   const trendData = useMemo(() => {
-    if (timeframeMode === 'bulanan') {
-      // Untuk mode bulanan, gunakan data multi-bulan dalam tahun aktif agar chart & growth indicator MoM dinamis
-      const monthlyBaseRecords = filterRecords(records, { ...filters, BULAN: 'ALL' });
-      const rawTrend = aggregateTimeframe(monthlyBaseRecords, 'bulanan');
-      return rawTrend.map((item) => {
-        const spvCfg = loadSpvConsolidatedConfig(records, item.subLabel, activeYear);
-        const kaVal = spvCfg.kaSellInValue || 0;
-        const mgVal = spvCfg.dazzleMeMgSellInValue || 0;
-        return {
-          ...item,
-          value: item.value + kaVal + mgVal,
-          kaSellIn: kaVal,
-          dazzleMeMgSellIn: mgVal,
-        };
-      });
-    }
     return aggregateTimeframe(filteredRecords, timeframeMode);
-  }, [filteredRecords, records, filters, timeframeMode, activeYear, targetSyncVersion]);
+  }, [filteredRecords, timeframeMode]);
 
   // Overall growth comparison (uses full records so previous period data like September can be retrieved)
   const growthComparison = useMemo(() => {
@@ -351,9 +226,17 @@ export default function App() {
     return diagnoseSalesGap(records, filteredRecords, filters);
   }, [records, filteredRecords, filters, targetSyncVersion]);
 
-  // Top Category details for dynamic category share cards
+  // Top Category, Brand & Store details strictly from filteredRecords (Google Sheet + Filter Terintegrasi)
   const topCategories = useMemo(() => {
     return aggregateCategoryDetails(filteredRecords);
+  }, [filteredRecords]);
+
+  const topBrands = useMemo(() => {
+    return aggregateByDimension(filteredRecords, 'BRAND');
+  }, [filteredRecords]);
+
+  const topStores = useMemo(() => {
+    return aggregateByDimension(filteredRecords, 'NAMA_STORE');
   }, [filteredRecords]);
 
   // Live Sync with Google Apps Script
@@ -375,14 +258,6 @@ export default function App() {
         dataSourceType: 'google_sheet',
       };
       setGasConfig(updatedConfig);
-      if (firebaseUser?.emailVerified) {
-        setIsCloudSyncing(true);
-        syncTransactionDatasetToFirestore(firebaseUser.uid, result.data, true)
-          .then(() => syncLocalConfigsToFirestore(firebaseUser.uid, false))
-          .then(() => setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID')))
-          .catch((err) => setFatalFirestoreError(err instanceof Error ? err : new Error(String(err))))
-          .finally(() => setIsCloudSyncing(false));
-      }
       showToast(`Berhasil sinkronisasi! Memuat ${result.data.length} baris data dari Google Sheet.`);
     } else {
       showToast(result.message || 'Gagal sinkronisasi dari Google Apps Script', 'error');
@@ -394,11 +269,6 @@ export default function App() {
   // Add new transaction record
   const handleAddRecord = (newRecord: TransactionRecord) => {
     setRecords((prev) => [newRecord, ...prev]);
-    if (firebaseUser?.emailVerified) {
-      saveSingleTransactionToFirestore(firebaseUser.uid, newRecord)
-        .then(() => setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID')))
-        .catch((err) => setFatalFirestoreError(err instanceof Error ? err : new Error(String(err))));
-    }
     showToast(`Transaksi baru untuk "${newRecord.NAMA_STORE}" berhasil ditambahkan!`);
   };
 
@@ -413,56 +283,7 @@ export default function App() {
       lastSyncedAt: null,
     });
     setFilters(INITIAL_FILTERS);
-    if (firebaseUser?.emailVerified) {
-      clearCloudTransactions(firebaseUser.uid).catch((err) =>
-        setFatalFirestoreError(err instanceof Error ? err : new Error(String(err)))
-      );
-    }
     showToast('Dataset telah dikembalikan ke data simulasi bawaan.');
-  };
-
-  // Firebase Auth & Manual Cloud Sync Handlers
-  const handleFirebaseLogin = async () => {
-    try {
-      const user = await signInWithGoogle();
-      if (user) {
-        showToast(`Berhasil terhubung ke Firebase DB sebagai ${user.displayName || user.email}`);
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Gagal masuk dengan Google';
-      if (!msg.includes('popup-closed-by-user')) {
-        showToast(msg, 'error');
-      }
-    }
-  };
-
-  const handleFirebaseLogout = async () => {
-    try {
-      await signOutFirebase();
-      setLastCloudSyncedAt(null);
-      showToast('Berhasil keluar dari Firebase Cloud Database.');
-    } catch (err: unknown) {
-      showToast(err instanceof Error ? err.message : 'Gagal keluar', 'error');
-    }
-  };
-
-  const handleSyncCloudDb = async () => {
-    if (!firebaseUser?.emailVerified) {
-      await handleFirebaseLogin();
-      return;
-    }
-    try {
-      setIsCloudSyncing(true);
-      await ensureUserDocuments(firebaseUser);
-      await syncLocalConfigsToFirestore(firebaseUser.uid, true);
-      await syncTransactionDatasetToFirestore(firebaseUser.uid, latestRecordsRef.current, true);
-      setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID'));
-      showToast('Seluruh data transaksi & pengaturan berhasil disimpan ke Database Firebase!');
-    } catch (err) {
-      setFatalFirestoreError(err instanceof Error ? err : new Error(String(err)));
-    } finally {
-      setIsCloudSyncing(false);
-    }
   };
 
   // Export handlers for Excel (.xlsx) and PDF (.pdf)
@@ -561,13 +382,6 @@ export default function App() {
         onSyncGas={handleSyncGas}
         isSyncing={isSyncing}
         filters={filters}
-        firebaseUser={firebaseUser}
-        isAuthReady={isAuthReady}
-        isCloudSyncing={isCloudSyncing}
-        lastCloudSyncedAt={lastCloudSyncedAt}
-        onFirebaseLogin={handleFirebaseLogin}
-        onFirebaseLogout={handleFirebaseLogout}
-        onSyncCloudDb={handleSyncCloudDb}
       />
 
       {/* Main Workspace Canvas */}
@@ -650,22 +464,22 @@ export default function App() {
               mode={timeframeMode}
               onModeChange={setTimeframeMode}
               selectedMonth={filters.BULAN}
-              kaSellInValue={currentSpvMonthData.kaSellInValue}
-              dazzleMeMgSellInValue={currentSpvMonthData.dazzleMeMgSellInValue}
+              filters={filters}
+              totalFilteredRecords={filteredRecords.length}
             />
 
             {/* Split Grid: Category Share, Brand Share & Top Stores Quick Preview */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {/* Category Snapshot */}
-              <div className="bg-gradient-to-br from-white via-fuchsia-50/25 to-pink-50/20 rounded-2xl border border-fuchsia-200/90 shadow-sm p-5 flex flex-col justify-between hover:shadow-md transition-shadow">
+              <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-5 flex flex-col justify-between">
                 <div>
-                  <div className="flex items-center justify-between pb-3 border-b border-fuchsia-100">
+                  <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                     <div className="flex items-center gap-2">
-                      <div className="p-2 rounded-xl bg-gradient-to-tr from-fuchsia-600 to-pink-500 text-white shadow-xs">
+                      <div className="p-2 rounded-lg bg-fuchsia-600 text-white">
                         <Boxes className="w-4 h-4" />
                       </div>
                       <div>
-                        <h3 className="text-sm font-extrabold text-slate-900">
+                        <h3 className="text-sm font-bold text-slate-900">
                           Analisa Kategori
                         </h3>
                         <p className="text-[11px] text-slate-500">Pangsa omzet per kategori produk</p>
@@ -673,197 +487,221 @@ export default function App() {
                     </div>
                     <button
                       onClick={() => setActiveTab('category')}
-                      className="text-xs font-bold px-3 py-1.5 rounded-lg bg-fuchsia-50 text-fuchsia-800 hover:bg-fuchsia-100 border border-fuchsia-200 transition-colors flex items-center gap-1 shadow-2xs cursor-pointer"
+                      className="text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-fuchsia-50 text-fuchsia-800 hover:bg-fuchsia-100 border border-fuchsia-200 transition-colors flex items-center gap-1 cursor-pointer"
                     >
-                      <span>Detail Kategori</span>
+                      <span>Detail</span>
                       <ChevronRight className="w-3.5 h-3.5" />
                     </button>
                   </div>
 
                   <div className="mt-4 space-y-3">
                     {topCategories.length > 0 ? (
-                      topCategories.slice(0, 4).map((cat, idx) => {
-                        const colorConfigs = [
-                          { gradient: 'bg-gradient-to-r from-fuchsia-500 to-pink-500', badge: 'bg-fuchsia-100 text-fuchsia-800 border-fuchsia-200' },
-                          { gradient: 'bg-gradient-to-r from-indigo-500 to-sky-400', badge: 'bg-indigo-100 text-indigo-800 border-indigo-200' },
-                          { gradient: 'bg-gradient-to-r from-amber-500 to-orange-400', badge: 'bg-amber-100 text-amber-900 border-amber-200' },
-                          { gradient: 'bg-gradient-to-r from-emerald-500 to-teal-400', badge: 'bg-emerald-100 text-emerald-800 border-emerald-200' },
+                      topCategories.slice(0, 5).map((cat, idx) => {
+                        const barColors = [
+                          'bg-fuchsia-500',
+                          'bg-indigo-500',
+                          'bg-amber-500',
+                          'bg-emerald-500',
+                          'bg-cyan-500',
                         ];
-                        const cfg = colorConfigs[idx % colorConfigs.length];
-                        const pct = cat.contributionPercent;
+                        const pct = Math.max(0, cat.contributionPercent);
 
                         return (
                           <div key={cat.category} className="space-y-1">
-                            <div className="flex justify-between items-center text-xs">
-                              <span className={`font-bold px-2 py-0.5 rounded-md border text-[10px] ${cfg.badge}`}>
+                            <div className="flex justify-between items-center text-xs gap-2">
+                              <span className="font-bold text-slate-800 truncate">
                                 {cat.category}
                               </span>
-                              <span className="font-mono font-extrabold text-slate-900 tabular-nums text-[11px]">
+                              <span className="font-mono font-bold text-slate-900 tabular-nums text-[11px] shrink-0">
                                 {formatRupiah(cat.totalValue, true)}{' '}
                                 <span className="text-slate-500 font-medium">
                                   ({formatPercent(pct, false)})
                                 </span>
                               </span>
                             </div>
-                            <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden p-0.5 border border-slate-200/60 shadow-inner">
+                            <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
                               <div
-                                className={`${cfg.gradient} h-full rounded-full transition-all duration-500`}
-                                style={{ width: `${Math.min(100, Math.max(3, pct))}%` }}
+                                className={`${barColors[idx % barColors.length]} h-full rounded-full transition-all duration-300`}
+                                style={{ width: `${Math.min(100, Math.max(2, pct))}%` }}
                               />
                             </div>
                           </div>
                         );
                       })
                     ) : (
-                      <div className="p-4 text-center text-xs text-slate-400 font-medium">
+                      <div className="p-6 text-center text-xs text-slate-400 font-medium">
                         Tidak ada transaksi kategori pada filter ini.
                       </div>
                     )}
                   </div>
                 </div>
 
-                <div className="mt-4 pt-3 border-t border-fuchsia-100 flex items-center justify-between text-xs text-slate-500">
-                  <span className="font-medium">Pilar Portofolio:</span>
-                  <span className="font-extrabold px-2.5 py-0.5 rounded-full bg-fuchsia-100 text-fuchsia-900 border border-fuchsia-200 text-[11px]">
-                    💄 {topCategories.slice(0, 2).map((c) => c.category).join(' & ') || 'Lip Makeup & Body Care'}
+                <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+                  <span className="font-medium">Kategori Teratas:</span>
+                  <span className="font-bold text-slate-800 truncate max-w-[180px]">
+                    {topCategories.length > 0
+                      ? topCategories.slice(0, 2).map((c) => c.category).join(' & ')
+                      : '-'}
                   </span>
                 </div>
               </div>
 
-              {/* Brand Snapshot */}
-              <div className="bg-gradient-to-br from-white via-pink-50/20 to-purple-50/20 rounded-2xl border border-pink-200/80 shadow-sm p-5 flex flex-col justify-between hover:shadow-md transition-shadow">
+              {/* Brand Snapshot (100% Google Sheet + Integrated Filters) */}
+              <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-5 flex flex-col justify-between">
                 <div>
-                  <div className="flex items-center justify-between pb-3 border-b border-pink-100">
+                  <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                     <div className="flex items-center gap-2">
-                      <div className="p-2 rounded-xl bg-gradient-to-tr from-pink-500 to-rose-500 text-white shadow-xs">
+                      <div className="p-2 rounded-lg bg-pink-600 text-white">
                         <Layers className="w-4 h-4" />
                       </div>
                       <div>
-                        <h3 className="text-sm font-extrabold text-slate-900">
+                        <h3 className="text-sm font-bold text-slate-900">
                           Pangsa Brand Kosmetik
                         </h3>
-                        <p className="text-[11px] text-slate-500">Bauran kontribusi omzet per brand</p>
+                        <p className="text-[11px] text-slate-500">Kontribusi brand sesuai filter aktif</p>
                       </div>
                     </div>
                     <button
                       onClick={() => setActiveTab('brand')}
-                      className="text-xs font-bold px-3 py-1.5 rounded-lg bg-pink-50 text-pink-700 hover:bg-pink-100 border border-pink-200 transition-colors flex items-center gap-1 shadow-2xs cursor-pointer"
+                      className="text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-pink-50 text-pink-700 hover:bg-pink-100 border border-pink-200 transition-colors flex items-center gap-1 cursor-pointer"
                     >
-                      <span>Detail Brand</span>
+                      <span>Detail</span>
                       <ChevronRight className="w-3.5 h-3.5" />
                     </button>
                   </div>
 
-                  <div className="mt-4 space-y-2.5">
-                    {[
-                      { name: 'barenbliss', gradient: 'bg-gradient-to-r from-pink-500 to-rose-500', badge: 'bg-pink-100 text-pink-800 border-pink-200' },
-                      { name: 'Y.O.U', gradient: 'bg-gradient-to-r from-blue-600 to-indigo-600', badge: 'bg-blue-100 text-blue-800 border-blue-200' },
-                      { name: 'DAZZLE ME', gradient: 'bg-gradient-to-r from-amber-500 to-orange-500', badge: 'bg-amber-100 text-amber-900 border-amber-200' },
-                      { name: 'GLAMFIX', gradient: 'bg-gradient-to-r from-purple-600 to-fuchsia-600', badge: 'bg-purple-100 text-purple-800 border-purple-200' },
-                      { name: 'lavojoy', gradient: 'bg-gradient-to-r from-emerald-600 to-teal-500', badge: 'bg-emerald-100 text-emerald-800 border-emerald-200' },
-                    ].map((b) => {
-                      const brandRecords = filteredRecords.filter((r) => r.BRAND === b.name);
-                      const brandVal = brandRecords.reduce((acc, curr) => acc + (curr.VALUE || 0), 0);
-                      const totalVal = summary.totalRevenue || 1;
-                      const pct = Math.max(0, (brandVal / totalVal) * 100);
+                  <div className="mt-4 space-y-3">
+                    {topBrands.length > 0 ? (
+                      topBrands.slice(0, 6).map((b, idx) => {
+                        const brandColorMap: Record<string, string> = {
+                          BARENBLISS: 'bg-rose-500',
+                          'Y.O.U': 'bg-indigo-600',
+                          'DAZZLE ME': 'bg-amber-500',
+                          GLAMFIX: 'bg-purple-600',
+                          LAVOJOY: 'bg-emerald-600',
+                        };
+                        const fallbackColors = ['bg-sky-500', 'bg-teal-500', 'bg-orange-500', 'bg-slate-600'];
+                        const barColor =
+                          brandColorMap[b.name.trim().toUpperCase()] ||
+                          fallbackColors[idx % fallbackColors.length];
+                        const pct = Math.max(0, b.contributionPercent);
 
-                      return (
-                        <div key={b.name} className="space-y-1">
-                          <div className="flex justify-between items-center text-xs">
-                            <span className={`font-bold px-2 py-0.5 rounded-md border text-[10px] ${b.badge}`}>
-                              {b.name}
-                            </span>
-                            <span className="font-mono font-extrabold text-slate-900 tabular-nums text-[11px]">
-                              {formatRupiah(brandVal, true)}{' '}
-                              <span className="text-slate-500 font-semibold">
-                                ({formatPercent(pct, false)})
+                        return (
+                          <div key={b.name} className="space-y-1">
+                            <div className="flex justify-between items-center text-xs gap-2">
+                              <span className="font-bold text-slate-800 truncate">
+                                {b.name}
                               </span>
-                            </span>
+                              <span className="font-mono font-bold text-slate-900 tabular-nums text-[11px] shrink-0">
+                                {formatRupiah(b.totalValue, true)}{' '}
+                                <span className="text-slate-500 font-medium">
+                                  ({formatPercent(pct, false)})
+                                </span>
+                              </span>
+                            </div>
+                            <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                              <div
+                                className={`${barColor} h-full rounded-full transition-all duration-300`}
+                                style={{ width: `${Math.min(100, Math.max(2, pct))}%` }}
+                              />
+                            </div>
                           </div>
-                          <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden p-0.5 border border-slate-200/60 shadow-inner">
-                            <div
-                              className={`${b.gradient} h-full rounded-full transition-all duration-500 shadow-2xs`}
-                              style={{ width: `${Math.min(100, Math.max(3, pct))}%` }}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })}
+                        );
+                      })
+                    ) : (
+                      <div className="p-6 text-center text-xs text-slate-400 font-medium">
+                        Tidak ada transaksi brand pada filter ini.
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                <div className="mt-4 pt-3 border-t border-pink-100 flex items-center justify-between text-xs text-slate-500">
+                <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
                   <span className="font-medium">Kontributor Utama:</span>
-                  <span className="font-extrabold px-2.5 py-0.5 rounded-full bg-gradient-to-r from-rose-100 to-pink-100 text-rose-800 border border-rose-200 text-[11px]">
-                    ✨ barenbliss &amp; Y.O.U (64%+)
+                  <span className="font-bold text-slate-800 truncate max-w-[190px] tabular-nums">
+                    {topBrands.length > 0
+                      ? `${topBrands
+                          .slice(0, 2)
+                          .map((b) => b.name)
+                          .join(' & ')} (${topBrands
+                          .slice(0, 2)
+                          .reduce((acc, b) => acc + Math.max(0, b.contributionPercent), 0)
+                          .toFixed(1)}%)`
+                      : '-'}
                   </span>
                 </div>
               </div>
 
-              {/* Top Stores Snapshot */}
-              <div className="bg-gradient-to-br from-white via-amber-50/20 to-orange-50/20 rounded-2xl border border-amber-200/80 shadow-sm p-5 flex flex-col justify-between hover:shadow-md transition-shadow">
+              {/* Top Stores Snapshot (100% Google Sheet + Integrated Filters) */}
+              <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-5 flex flex-col justify-between">
                 <div>
-                  <div className="flex items-center justify-between pb-3 border-b border-amber-100">
+                  <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                     <div className="flex items-center gap-2">
-                      <div className="p-2 rounded-xl bg-gradient-to-tr from-amber-500 to-orange-500 text-white shadow-xs">
+                      <div className="p-2 rounded-lg bg-amber-500 text-white">
                         <Store className="w-4 h-4" />
                       </div>
                       <div>
-                        <h3 className="text-sm font-extrabold text-slate-900">
+                        <h3 className="text-sm font-bold text-slate-900">
                           Top Gerai Ritel
                         </h3>
-                        <p className="text-[11px] text-slate-500">Peringkat kontribusi gerai teraktif</p>
+                        <p className="text-[11px] text-slate-500">Peringkat gerai teraktif sesuai filter</p>
                       </div>
                     </div>
                     <button
                       onClick={() => setActiveTab('store')}
-                      className="text-xs font-bold px-3 py-1.5 rounded-lg bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200 transition-colors flex items-center gap-1 shadow-2xs cursor-pointer"
+                      className="text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200 transition-colors flex items-center gap-1 cursor-pointer"
                     >
-                      <span>Detail Store</span>
+                      <span>Detail</span>
                       <ChevronRight className="w-3.5 h-3.5" />
                     </button>
                   </div>
 
-                  <div className="mt-4 divide-y divide-amber-100/70 text-xs">
-                    {[
-                      { name: 'TOKO ALANA BEAUTY', rankColor: 'bg-gradient-to-tr from-amber-400 to-yellow-300 text-amber-950 shadow-2xs border border-amber-300' },
-                      { name: 'SYMPHONY KOSMETIK', rankColor: 'bg-gradient-to-tr from-slate-200 to-slate-300 text-slate-900 shadow-2xs border border-slate-300' },
-                      { name: 'I.C.A COSMETIK', rankColor: 'bg-gradient-to-tr from-amber-600 to-orange-500 text-white shadow-2xs border border-amber-500' },
-                      { name: 'Alfamart_DC PEKANBARU', rankColor: 'bg-blue-100 text-blue-900 border border-blue-200' },
-                      { name: 'TOKO CANTIK RIAU', rankColor: 'bg-purple-100 text-purple-900 border border-purple-200' },
-                    ].map((store, idx) => {
-                      const storeRecords = filteredRecords.filter((r) => r.NAMA_STORE.includes(store.name) || r.NAMA_STORE === store.name);
-                      const storeVal = storeRecords.reduce((acc, curr) => acc + (curr.VALUE || 0), 0);
-                      const storeQty = storeRecords.reduce((acc, curr) => acc + (curr.QTY || 0), 0);
+                  <div className="mt-4 divide-y divide-slate-100 text-xs">
+                    {topStores.length > 0 ? (
+                      topStores.slice(0, 5).map((store, idx) => {
+                        const rankColors = [
+                          'bg-amber-100 text-amber-900 border border-amber-300',
+                          'bg-slate-200 text-slate-900 border border-slate-300',
+                          'bg-orange-100 text-orange-900 border border-orange-300',
+                          'bg-blue-50 text-blue-900 border border-blue-200',
+                          'bg-slate-100 text-slate-700 border border-slate-200',
+                        ];
 
-                      return (
-                        <div key={store.name} className="py-2 flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className={`w-5 h-5 rounded-md font-mono text-[10px] font-extrabold flex items-center justify-center shrink-0 ${store.rankColor}`}>
-                              {idx + 1}
-                            </span>
-                            <span className="font-extrabold text-slate-900 truncate max-w-[130px] sm:max-w-[160px]">
-                              {store.name}
-                            </span>
+                        return (
+                          <div key={store.name} className="py-2.5 flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span
+                                className={`w-5 h-5 rounded font-mono text-[10px] font-bold flex items-center justify-center shrink-0 ${rankColors[idx] || rankColors[4]}`}
+                              >
+                                {idx + 1}
+                              </span>
+                              <span className="font-bold text-slate-900 truncate" title={store.name}>
+                                {store.name}
+                              </span>
+                            </div>
+                            <div className="text-right shrink-0 tabular-nums">
+                              <span className="font-mono font-bold text-slate-900 block text-[11px]">
+                                {formatRupiah(store.totalValue, true)}
+                              </span>
+                              <span className="text-[10px] text-slate-500 font-mono">
+                                {formatNumber(store.totalQty)} pcs ({formatPercent(store.contributionPercent, false)})
+                              </span>
+                            </div>
                           </div>
-                          <div className="text-right">
-                            <span className="font-mono font-extrabold text-slate-900 block tabular-nums text-[11px]">
-                              {formatRupiah(storeVal, true)}
-                            </span>
-                            <span className="text-[10px] text-amber-800 font-mono font-medium">
-                              {storeQty} pcs
-                            </span>
-                          </div>
-                        </div>
-                      );
-                    })}
+                        );
+                      })
+                    ) : (
+                      <div className="p-6 text-center text-xs text-slate-400 font-medium">
+                        Tidak ada transaksi gerai pada filter ini.
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                <div className="mt-4 pt-3 border-t border-amber-100 flex items-center justify-between text-xs text-slate-500">
-                  <span className="font-medium">Klasifikasi:</span>
-                  <span className="font-extrabold px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-100 to-yellow-100 text-amber-900 border border-amber-200 shadow-2xs text-[11px]">
-                    🏆 Gerai Pilar Kelas A
+                <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+                  <span className="font-medium">Total Gerai Aktif:</span>
+                  <span className="font-bold text-slate-800 truncate max-w-[180px] tabular-nums">
+                    {topStores.length > 0 ? `${topStores.length} Gerai (${topStores[0].name})` : '-'}
                   </span>
                 </div>
               </div>
@@ -933,6 +771,7 @@ export default function App() {
         {activeTab === 'cost' && (
           <CostAreaAnalysis
             records={filteredRecords}
+            allRecords={records}
             filters={filters}
           />
         )}
@@ -1151,14 +990,6 @@ export default function App() {
             status: source === 'google_sheet' ? 'connected' : 'idle',
             lastSyncedAt: new Date().toLocaleTimeString('id-ID'),
           }));
-          if (firebaseUser?.emailVerified) {
-            setIsCloudSyncing(true);
-            syncTransactionDatasetToFirestore(firebaseUser.uid, data, true)
-              .then(() => syncLocalConfigsToFirestore(firebaseUser.uid, false))
-              .then(() => setLastCloudSyncedAt(new Date().toLocaleTimeString('id-ID')))
-              .catch((err) => setFatalFirestoreError(err instanceof Error ? err : new Error(String(err))))
-              .finally(() => setIsCloudSyncing(false));
-          }
           showToast(`Berhasil memuat ${data.length} baris data transaksi!`);
         }}
         onResetToSample={handleResetToSample}
