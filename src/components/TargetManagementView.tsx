@@ -9,6 +9,7 @@ import {
   Calendar,
   Edit3,
   Sliders,
+  Check,
   CheckCircle2,
   AlertTriangle,
   RotateCcw,
@@ -168,15 +169,21 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
   const [trainerNameInput, setTrainerNameInput] = useState<string>('');
   const [trainerAreaInput, setTrainerAreaInput] = useState<string>('');
   const [trainerRegionInput, setTrainerRegionInput] = useState<string>('');
+  const [trainerBaCountInput, setTrainerBaCountInput] = useState<number>(0);
   const [trainerSellOutInput, setTrainerSellOutInput] = useState<number>(DEFAULT_TRAINER_SELL_OUT_TARGET);
   const [trainerFocusInput, setTrainerFocusInput] = useState<number>(DEFAULT_TRAINER_FOCUS_TARGET_PCS);
   const [trainerNotesInput, setTrainerNotesInput] = useState<string>('');
+
+  // Inline Edit Total BA Binaan di Tabel Target Trainer
+  const [inlineEditingTrainerBaId, setInlineEditingTrainerBaId] = useState<string | null>(null);
+  const [inlineTrainerBaValue, setInlineTrainerBaValue] = useState<string>('');
 
   // Add New Trainer Modal
   const [isAddTrainerOpen, setIsAddTrainerOpen] = useState(false);
   const [newTrainerName, setNewTrainerName] = useState('');
   const [newTrainerArea, setNewTrainerArea] = useState('');
   const [newTrainerRegion, setNewTrainerRegion] = useState('PEKAN BARU');
+  const [newTrainerBaCount, setNewTrainerBaCount] = useState<number>(10);
   const [newTrainerSellOut, setNewTrainerSellOut] = useState<number>(DEFAULT_TRAINER_SELL_OUT_TARGET);
   const [newTrainerFocus, setNewTrainerFocus] = useState<number>(DEFAULT_TRAINER_FOCUS_TARGET_PCS);
   const [newTrainerNotes, setNewTrainerNotes] = useState('');
@@ -324,6 +331,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     e.preventDefault();
     if (!editingTrainer) return;
 
+    const cleanBaCount = Math.max(0, Math.round(Number(trainerBaCountInput) || 0));
     const allTrainers = loadTrainerConfigs();
     const updatedTrainers = allTrainers.map((t) => {
       if (t.id === editingTrainer.id) {
@@ -332,6 +340,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
           trainerName: trainerNameInput.trim().toUpperCase() || t.trainerName,
           areaCovered: trainerAreaInput.trim() || t.areaCovered,
           region: trainerRegionInput.trim() || t.region,
+          baSupervisedCount: cleanBaCount,
           notes: trainerNotesInput.trim() || t.notes,
         };
       }
@@ -344,6 +353,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
       {
         targetSellOut: trainerSellOutInput,
         targetProdukFokusPcs: trainerFocusInput,
+        baSupervisedCount: cleanBaCount,
         notes: trainerNotesInput,
       },
       selectedMonth
@@ -353,7 +363,30 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     setRefreshKey((k) => k + 1);
     if (onTargetUpdated) onTargetUpdated();
     showNotification(
-      `Target Trainer "${trainerNameInput || editingTrainer.trainerName}" (${activeMonthLabel}) disimpan: SO ${formatRupiah(trainerSellOutInput)} & Fokus ${trainerFocusInput} pcs`
+      `Target Trainer "${trainerNameInput || editingTrainer.trainerName}" (${activeMonthLabel}) disimpan: ${cleanBaCount} BA, SO ${formatRupiah(trainerSellOutInput)} & Fokus ${trainerFocusInput} pcs`
+    );
+  };
+
+  // Inline Save Handler for Trainer Total BA Binaan
+  const handleSaveInlineTrainerBaCount = (item: TrainerTargetItem) => {
+    const cleanBaCount = Math.max(0, Math.round(Number(inlineTrainerBaValue) || 0));
+    const allTrainers = loadTrainerConfigs();
+    const updatedTrainers = allTrainers.map((t) =>
+      t.id === item.id ? { ...t, baSupervisedCount: cleanBaCount } : t
+    );
+    saveTrainerConfigs(updatedTrainers);
+
+    setSingleTrainerTargetOverride(
+      item.id,
+      { baSupervisedCount: cleanBaCount },
+      selectedMonth
+    );
+
+    setInlineEditingTrainerBaId(null);
+    setRefreshKey((k) => k + 1);
+    if (onTargetUpdated) onTargetUpdated();
+    showNotification(
+      `Total BA Binaan Trainer "${item.trainerName}" (${activeMonthLabel}) diubah menjadi ${cleanBaCount} BA.`
     );
   };
 
@@ -363,6 +396,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     if (!newTrainerName.trim()) return;
     const allTrainers = loadTrainerConfigs();
     const newId = `trn-${Date.now()}`;
+    const cleanBaCount = Math.max(0, Math.round(Number(newTrainerBaCount) || 0));
     const newConfig: TrainerTargetConfig = {
       id: newId,
       trainerName: newTrainerName.trim().toUpperCase(),
@@ -370,6 +404,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
       region: newTrainerRegion.trim() || 'PEKAN BARU',
       targetSellOut: newTrainerSellOut,
       targetProdukFokusPcs: newTrainerFocus,
+      baSupervisedCount: cleanBaCount,
       notes: newTrainerNotes.trim(),
     };
     allTrainers.push(newConfig);
@@ -380,6 +415,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
       {
         targetSellOut: newTrainerSellOut,
         targetProdukFokusPcs: newTrainerFocus,
+        baSupervisedCount: cleanBaCount,
         notes: newTrainerNotes.trim(),
       },
       selectedMonth
@@ -1652,16 +1688,21 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                         <div className="text-[10px] text-slate-400">{item.salesName}</div>
                       </td>
 
-                      {/* Non-Lavojoy */}
-                      <td className="py-3 px-3 text-right font-mono font-bold text-teal-900 bg-teal-50/20">
+                      {/* Non-Lavojoy / Sell Out Utama */}
+                      <td className="py-3 px-3 text-right font-mono tabular-nums font-bold text-teal-900 bg-teal-50/20">
                         {formatRupiah(item.targetNonLavojoy)}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono font-medium text-slate-900 bg-teal-50/20">
-                        {formatRupiah(item.actualNonLavojoy)}
+                      <td className="py-3 px-3 text-right font-mono tabular-nums font-medium text-slate-900 bg-teal-50/20">
+                        <div>{formatRupiah(item.actualNonLavojoy)}</div>
+                        {item.targetLavojoy === 0 && (
+                          <div className="text-[10px] text-teal-700 font-sans font-semibold">
+                            Total Sell Out (All Brand)
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-3 text-center bg-teal-50/20">
                         <span
-                          className={`inline-block px-1.5 py-0.2 rounded font-mono font-bold text-[10px] ${
+                          className={`inline-block px-1.5 py-0.2 rounded font-mono tabular-nums font-bold text-[10px] ${
                             item.achievementNonLavojoyPct >= 100
                               ? 'bg-emerald-100 text-emerald-800'
                               : item.achievementNonLavojoyPct >= 70
@@ -1674,22 +1715,35 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                       </td>
 
                       {/* Lavojoy */}
-                      <td className="py-3 px-3 text-right font-mono font-bold text-purple-900 bg-purple-50/20">
-                        {formatRupiah(item.targetLavojoy)}
+                      <td className="py-3 px-3 text-right font-mono tabular-nums font-bold text-purple-900 bg-purple-50/20">
+                        <div>{formatRupiah(item.targetLavojoy)}</div>
+                        {item.targetLavojoy === 0 && (
+                          <div className="text-[10px] text-purple-600 font-sans font-medium">
+                            Digabung ke Utama
+                          </div>
+                        )}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono font-medium text-slate-900 bg-purple-50/20">
-                        {formatRupiah(item.actualLavojoy)}
+                      <td className="py-3 px-3 text-right font-mono tabular-nums font-medium text-slate-900 bg-purple-50/20">
+                        {item.targetLavojoy === 0 ? (
+                          <span className="text-[10px] text-slate-400 font-sans">Masuk Utama</span>
+                        ) : (
+                          formatRupiah(item.actualLavojoy)
+                        )}
                       </td>
                       <td className="py-3 px-3 text-center bg-purple-50/20">
-                        <span
-                          className={`inline-block px-1.5 py-0.2 rounded font-mono font-bold text-[10px] ${
-                            item.achievementLavojoyPct >= 100
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : 'bg-slate-100 text-slate-700'
-                          }`}
-                        >
-                          {item.achievementLavojoyPct.toFixed(1)}%
-                        </span>
+                        {item.targetLavojoy === 0 ? (
+                          <span className="text-[10px] text-slate-400 font-mono">-</span>
+                        ) : (
+                          <span
+                            className={`inline-block px-1.5 py-0.2 rounded font-mono tabular-nums font-bold text-[10px] ${
+                              item.achievementLavojoyPct >= 100
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-slate-100 text-slate-700'
+                            }`}
+                          >
+                            {item.achievementLavojoyPct.toFixed(1)}%
+                          </span>
+                        )}
                       </td>
 
                       {/* Produk Fokus */}
@@ -1775,6 +1829,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                   setNewTrainerName('');
                   setNewTrainerArea('');
                   setNewTrainerRegion('PEKAN BARU');
+                  setNewTrainerBaCount(10);
                   setNewTrainerSellOut(DEFAULT_TRAINER_SELL_OUT_TARGET);
                   setNewTrainerFocus(DEFAULT_TRAINER_FOCUS_TARGET_PCS);
                   setNewTrainerNotes('');
@@ -1857,8 +1912,57 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                         <div className="text-slate-800 font-medium">{item.areaCovered}</div>
                         <div className="text-[10px] text-slate-500 font-mono">Region: {item.region}</div>
                       </td>
-                      <td className="py-3 px-2 text-center font-mono font-bold text-slate-700">
-                        {item.baSupervisedCount} BA
+                      <td className="py-3 px-2 text-center font-mono tabular-nums font-bold text-slate-700">
+                        {inlineEditingTrainerBaId === item.id ? (
+                          <div className="inline-flex items-center gap-1 justify-center">
+                            <input
+                              type="number"
+                              min={0}
+                              step={1}
+                              value={inlineTrainerBaValue}
+                              onChange={(e) => setInlineTrainerBaValue(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleSaveInlineTrainerBaCount(item);
+                                } else if (e.key === 'Escape') {
+                                  setInlineEditingTrainerBaId(null);
+                                }
+                              }}
+                              autoFocus
+                              className="w-16 px-2 py-1 text-xs font-mono font-bold text-center rounded-lg border border-amber-400 bg-white focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleSaveInlineTrainerBaCount(item)}
+                              title="Simpan Total BA"
+                              className="p-1 rounded-md bg-emerald-600 text-white hover:bg-emerald-500 cursor-pointer"
+                            >
+                              <Check className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setInlineEditingTrainerBaId(null)}
+                              title="Batal"
+                              className="p-1 rounded-md bg-slate-200 text-slate-600 hover:bg-slate-300 cursor-pointer"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setInlineEditingTrainerBaId(item.id);
+                              setInlineTrainerBaValue(String(item.baSupervisedCount));
+                            }}
+                            title="Klik untuk edit Total BA Binaan"
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-slate-200 hover:border-amber-300 hover:bg-amber-50 text-slate-800 transition-colors cursor-pointer"
+                          >
+                            <span>{item.baSupervisedCount} BA</span>
+                            <Edit3 className="w-3 h-3 text-amber-600" />
+                          </button>
+                        )}
                       </td>
 
                       {/* Sell Out */}
@@ -1933,6 +2037,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                             setTrainerNameInput(item.trainerName);
                             setTrainerAreaInput(item.areaCovered);
                             setTrainerRegionInput(item.region);
+                            setTrainerBaCountInput(item.baSupervisedCount);
                             setTrainerSellOutInput(item.targetSellOut);
                             setTrainerFocusInput(item.targetProdukFokusPcs);
                             setTrainerNotesInput(item.notes || '');
@@ -2005,17 +2110,31 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 </div>
               </div>
 
-              {/* Wilayah Binaan */}
-              <div>
-                <label className="block text-slate-700 font-bold mb-1">Wilayah Cover / Sales Binaan</label>
-                <input
-                  type="text"
-                  value={trainerAreaInput}
-                  onChange={(e) => setTrainerAreaInput(e.target.value)}
-                  placeholder="e.g. PEKANBARU, DUMAI, SIAK (Sales Albert, Ilhamsyah, Tiwi)"
-                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
-                  required
-                />
+              {/* Wilayah Binaan & Total BA Binaan */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-slate-700 font-bold mb-1">Wilayah Cover / Sales Binaan</label>
+                  <input
+                    type="text"
+                    value={trainerAreaInput}
+                    onChange={(e) => setTrainerAreaInput(e.target.value)}
+                    placeholder="e.g. PEKANBARU, DUMAI, SIAK (Sales Albert, Ilhamsyah, Tiwi)"
+                    className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">Total BA Binaan</label>
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={trainerBaCountInput}
+                    onChange={(e) => setTrainerBaCountInput(Math.max(0, Math.round(Number(e.target.value) || 0)))}
+                    className="w-full px-3 py-2 text-xs font-mono font-bold rounded-xl border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                    required
+                  />
+                </div>
               </div>
 
               {/* Target Sell Out */}
@@ -2158,16 +2277,30 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-slate-700 font-bold mb-1">Wilayah Cover / Sales Binaan</label>
-                <input
-                  type="text"
-                  value={newTrainerArea}
-                  onChange={(e) => setNewTrainerArea(e.target.value)}
-                  placeholder="e.g. PEKANBARU, DUMAI, SIAK (Sales Albert, Ilhamsyah)"
-                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
-                  required
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-slate-700 font-bold mb-1">Wilayah Cover / Sales Binaan</label>
+                  <input
+                    type="text"
+                    value={newTrainerArea}
+                    onChange={(e) => setNewTrainerArea(e.target.value)}
+                    placeholder="e.g. PEKANBARU, DUMAI, SIAK (Sales Albert, Ilhamsyah)"
+                    className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">Total BA Binaan</label>
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={newTrainerBaCount}
+                    onChange={(e) => setNewTrainerBaCount(Math.max(0, Math.round(Number(e.target.value) || 0)))}
+                    className="w-full px-3 py-2 text-xs font-mono font-bold rounded-xl border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                    required
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2549,14 +2682,16 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                   <label className="block text-purple-950 font-bold mb-1">Target Lavojoy 4% (Rp)</label>
                   <input
                     type="number"
+                    min={0}
                     step="any"
                     value={baLavojoyInput}
-                    onChange={(e) => setBaLavojoyInput(Math.max(1, Number(e.target.value)))}
+                    onChange={(e) => setBaLavojoyInput(Math.max(0, Number(e.target.value)))}
                     className="w-full px-3 py-1.5 text-xs font-mono font-bold rounded-lg border border-slate-300 focus:ring-2 focus:ring-purple-500"
                     required
                   />
                   <span className="text-[10px] text-slate-500 font-mono mt-1 block">
                     {formatRupiah(baLavojoyInput)}
+                    {baLavojoyInput === 0 ? ' — Semua Sell Out masuk ke pencapaian utama' : ''}
                   </span>
                 </div>
               </div>
@@ -2804,9 +2939,12 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 </label>
                 <input
                   type="number"
+                  min={batchTargetType === 'ba_lav' ? 0 : 1}
                   step="any"
                   value={batchTargetValue}
-                  onChange={(e) => setBatchTargetValue(Math.max(1, Number(e.target.value)))}
+                  onChange={(e) =>
+                    setBatchTargetValue(Math.max(batchTargetType === 'ba_lav' ? 0 : 1, Number(e.target.value)))
+                  }
                   className="w-full px-3 py-2 text-sm font-mono font-black rounded-xl border border-slate-300 focus:ring-2 focus:ring-indigo-500"
                   required
                 />

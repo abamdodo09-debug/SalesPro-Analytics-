@@ -2812,16 +2812,21 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, all
                       </td>
                       <td className="py-3 px-3 font-medium text-slate-700 align-top">{item.salesName}</td>
 
-                      {/* Non-Lavojoy */}
-                      <td className="py-3 px-3 text-right font-mono text-slate-500 bg-teal-50/20">
+                      {/* Non-Lavojoy / Sell Out Utama */}
+                      <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-500 bg-teal-50/20">
                         {formatRupiah(item.targetNonLavojoy)}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono font-bold text-slate-900 bg-teal-50/20">
-                        {formatRupiah(item.sellOutNonLavojoy)}
+                      <td className="py-3 px-3 text-right font-mono tabular-nums font-bold text-slate-900 bg-teal-50/20">
+                        <div>{formatRupiah(item.sellOutNonLavojoy)}</div>
+                        {item.targetLavojoy === 0 && (
+                          <span className="text-[10px] text-teal-700 block font-sans font-semibold">
+                            Total Sell Out (All Brand)
+                          </span>
+                        )}
                       </td>
                       <td className="py-3 px-3 text-right bg-teal-50/20">
                         <span
-                          className={`inline-block px-1.5 py-0.5 rounded font-mono font-bold text-[11px] ${
+                          className={`inline-block px-1.5 py-0.5 rounded font-mono tabular-nums font-bold text-[11px] ${
                             item.achievementNonLavojoyPercent >= 100
                               ? 'bg-emerald-100 text-emerald-800'
                               : item.achievementNonLavojoyPercent >= 70
@@ -2832,34 +2837,49 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, all
                           {formatPercent(item.achievementNonLavojoyPercent)}
                         </span>
                       </td>
-                      <td className="py-3 px-3 text-right font-mono text-slate-700 bg-teal-50/20">
+                      <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-700 bg-teal-50/20">
                         {formatRupiah(item.baseSalary)}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono font-bold text-teal-700 bg-teal-50/20">
+                      <td className="py-3 px-3 text-right font-mono tabular-nums font-bold text-teal-700 bg-teal-50/20">
                         {formatRupiah(item.incentiveNonLavojoyNominal)}
                         <span className="text-[10px] text-slate-400 block font-normal">({item.incentiveNonLavojoyPercent}%)</span>
                       </td>
 
                       {/* Lavojoy */}
-                      <td className="py-3 px-3 text-right font-mono text-slate-500 bg-purple-50/20">
-                        {formatRupiah(item.targetLavojoy)}
+                      <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-500 bg-purple-50/20">
+                        <div>{formatRupiah(item.targetLavojoy)}</div>
+                        {item.targetLavojoy === 0 && (
+                          <span className="text-[10px] text-purple-600 block font-sans font-medium">
+                            Gabung Utama
+                          </span>
+                        )}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono font-bold text-slate-900 bg-purple-50/20">
-                        {formatRupiah(item.sellOutLavojoy)}
+                      <td className="py-3 px-3 text-right font-mono tabular-nums font-bold text-slate-900 bg-purple-50/20">
+                        {item.targetLavojoy === 0 ? (
+                          <span className="text-[10px] text-slate-400 font-sans font-normal">Masuk Utama</span>
+                        ) : (
+                          formatRupiah(item.sellOutLavojoy)
+                        )}
                       </td>
                       <td className="py-3 px-3 text-right bg-purple-50/20">
-                        <span
-                          className={`inline-block px-1.5 py-0.5 rounded font-mono font-bold text-[11px] ${
-                            item.isLavojoyTargetMet
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : 'bg-slate-100 text-slate-700'
-                          }`}
-                        >
-                          {formatPercent(item.achievementLavojoyPercent)}
-                        </span>
+                        {item.targetLavojoy === 0 ? (
+                          <span className="text-[10px] text-slate-400 font-mono">-</span>
+                        ) : (
+                          <span
+                            className={`inline-block px-1.5 py-0.5 rounded font-mono tabular-nums font-bold text-[11px] ${
+                              item.isLavojoyTargetMet
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-slate-100 text-slate-700'
+                            }`}
+                          >
+                            {formatPercent(item.achievementLavojoyPercent)}
+                          </span>
+                        )}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono font-black text-purple-700 bg-purple-50/20">
-                        {item.incentiveLavojoyNominal > 0 ? (
+                      <td className="py-3 px-3 text-right font-mono tabular-nums font-black text-purple-700 bg-purple-50/20">
+                        {item.targetLavojoy === 0 ? (
+                          <span className="text-slate-400 font-sans font-normal text-[10px]">Digabung ke Utama</span>
+                        ) : item.incentiveLavojoyNominal > 0 ? (
                           <span className="inline-flex items-center gap-1">
                             <Sparkles className="w-3 h-3 text-purple-600" />
                             +{formatRupiah(item.incentiveLavojoyNominal)}
@@ -3701,13 +3721,16 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, all
                 </label>
                 <input
                   type="number"
+                  min={0}
                   step="any"
                   value={editBaLavojoyTarget}
-                  onChange={(e) => setEditBaLavojoyTarget(Math.max(1, Number(e.target.value)))}
+                  onChange={(e) => setEditBaLavojoyTarget(Math.max(0, Number(e.target.value)))}
                   className="w-full px-3 py-2 text-xs font-mono font-bold rounded-xl border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-purple-500"
                 />
                 <span className="text-[10px] text-slate-500 mt-0.5 block">
-                  Realisasi saat ini: {formatRupiah(editingBa.sellOutLavojoy)} (Syarat bonus 4% jika ≥ 100%)
+                  {editBaLavojoyTarget === 0
+                    ? 'Target Lavojoy = Rp 0: Seluruh pencapaian Sell Out BA digabung ke pencapaian utama'
+                    : `Realisasi saat ini: ${formatRupiah(editingBa.sellOutLavojoy)} (Syarat bonus 4% jika ≥ 100%)`}
                 </span>
               </div>
             </div>

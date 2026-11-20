@@ -149,6 +149,7 @@ export interface TrainerTargetConfig {
   region: string;
   targetSellOut: number;
   targetProdukFokusPcs: number;
+  baSupervisedCount?: number;
   notes?: string;
 }
 
@@ -236,7 +237,7 @@ export interface MonthlyTargetBucket {
   baNonLavojoy?: Record<string, number>;
   baLavojoy?: Record<string, number>;
   baFocus?: Record<string, number>;
-  trainer?: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; notes?: string }>;
+  trainer?: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; baSupervisedCount?: number; notes?: string }>;
 }
 
 // Structure of monthly targets
@@ -502,8 +503,8 @@ export function saveBaFocusTargets(targets: Record<string, number>, monthKey?: s
 
 export function loadTrainerTargets(
   monthKey?: string
-): Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; notes?: string }> {
-  let base: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; notes?: string }> = {};
+): Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; baSupervisedCount?: number; notes?: string }> {
+  let base: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; baSupervisedCount?: number; notes?: string }> = {};
   try {
     const saved = localStorage.getItem(STORAGE_KEY_TRAINER_TARGETS);
     base = saved ? JSON.parse(saved) : {};
@@ -525,7 +526,7 @@ export function loadTrainerTargets(
 }
 
 export function saveTrainerTargets(
-  targets: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; notes?: string }>,
+  targets: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; baSupervisedCount?: number; notes?: string }>,
   monthKey?: string
 ): void {
   const norm = normalizeMonthKey(monthKey);
@@ -597,7 +598,7 @@ export function setSingleTargetOverride(
 
 export function setSingleTrainerTargetOverride(
   trainerId: string,
-  patch: { targetSellOut?: number; targetProdukFokusPcs?: number; notes?: string },
+  patch: { targetSellOut?: number; targetProdukFokusPcs?: number; baSupervisedCount?: number; notes?: string },
   monthKey?: string
 ): void {
   const norm = normalizeMonthKey(monthKey);
@@ -651,11 +652,12 @@ export function copyMonthTargets(
     baFocusMap[b.storeName] = b.targetFocusPcs;
   });
 
-  const trainerMap: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; notes?: string }> = {};
+  const trainerMap: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; baSupervisedCount?: number; notes?: string }> = {};
   srcMatrix.trainers.forEach((t) => {
     trainerMap[t.id] = {
       targetSellOut: t.targetSellOut,
       targetProdukFokusPcs: t.targetProdukFokusPcs,
+      baSupervisedCount: t.baSupervisedCount,
       notes: t.notes,
     };
   });
@@ -1131,14 +1133,21 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
 
   // 4. Array BA Targets
   const bas: BaTargetItem[] = Object.values(baMap).map((b) => {
-    const isNonLavojoyCustom = customBaNonLavojoyTargets[b.storeName] !== undefined;
-    const isLavojoyCustom = customBaLavojoyTargets[b.storeName] !== undefined;
-    const targetNonLavojoy = isNonLavojoyCustom
-      ? customBaNonLavojoyTargets[b.storeName]
-      : DEFAULT_BA_NON_LAVOJOY_TARGET;
-    const targetLavojoy = isLavojoyCustom
-      ? customBaLavojoyTargets[b.storeName]
-      : DEFAULT_BA_LAVOJOY_TARGET;
+    const customNonLav =
+      customBaNonLavojoyTargets[b.storeName] ??
+      customBaNonLavojoyTargets[b.storeName.toUpperCase()] ??
+      customBaNonLavojoyTargets[b.baName] ??
+      customBaNonLavojoyTargets[b.baName.toUpperCase()];
+    const customLav =
+      customBaLavojoyTargets[b.storeName] ??
+      customBaLavojoyTargets[b.storeName.toUpperCase()] ??
+      customBaLavojoyTargets[b.baName] ??
+      customBaLavojoyTargets[b.baName.toUpperCase()];
+
+    const isNonLavojoyCustom = customNonLav !== undefined;
+    const isLavojoyCustom = customLav !== undefined;
+    const targetNonLavojoy = isNonLavojoyCustom ? customNonLav : DEFAULT_BA_NON_LAVOJOY_TARGET;
+    const targetLavojoy = isLavojoyCustom ? customLav : DEFAULT_BA_LAVOJOY_TARGET;
 
     const ov = focusOverrides[b.storeName] || focusOverrides[b.baName] || {};
     const monthFocus = customBaFocusTargets[b.storeName] ?? customBaFocusTargets[b.baName];
@@ -1157,10 +1166,18 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
       ov.customPenalty
     );
 
+    // Jika Target Lavojoy diset 0, maka seluruh pencapaian Sell Out BA (Non-Lavojoy + Lavojoy)
+    // dihitung sebagai pencapaian Sell Out utama BA tersebut.
+    const isLavojoyMergedToMain = targetLavojoy === 0;
+    const actualNonLavojoy = isLavojoyMergedToMain
+      ? b.sellOutNonLavojoy + b.sellOutLavojoy
+      : b.sellOutNonLavojoy;
+    const actualLavojoy = isLavojoyMergedToMain ? 0 : b.sellOutLavojoy;
+
     const achievementNonLavojoyPct =
-      targetNonLavojoy > 0 ? (b.sellOutNonLavojoy / targetNonLavojoy) * 100 : 0;
+      targetNonLavojoy > 0 ? (actualNonLavojoy / targetNonLavojoy) * 100 : 0;
     const achievementLavojoyPct =
-      targetLavojoy > 0 ? (b.sellOutLavojoy / targetLavojoy) * 100 : 0;
+      targetLavojoy > 0 ? (actualLavojoy / targetLavojoy) * 100 : 0;
 
     return {
       storeName: b.storeName,
@@ -1171,10 +1188,10 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
       salesName: b.salesName,
       spv: b.spv,
       targetNonLavojoy,
-      actualNonLavojoy: b.sellOutNonLavojoy,
+      actualNonLavojoy,
       achievementNonLavojoyPct,
       targetLavojoy,
-      actualLavojoy: b.sellOutLavojoy,
+      actualLavojoy,
       achievementLavojoyPct,
       targetFocusPcs,
       actualFocusPcs,
@@ -1206,10 +1223,18 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
       return false;
     });
 
-    const baSupervisedCount =
+    const autoBaSupervisedCount =
       matchingBas.length > 0
         ? matchingBas.length
         : Math.max(1, Math.floor(Object.keys(baMap).length / Math.max(1, activeTrainerConfigs.length)));
+    const customBaSupervised =
+      customConfig.baSupervisedCount !== undefined
+        ? customConfig.baSupervisedCount
+        : t.baSupervisedCount;
+    const baSupervisedCount =
+      customBaSupervised !== undefined && customBaSupervised >= 0
+        ? customBaSupervised
+        : autoBaSupervisedCount;
     const storeSupervisedCount = baSupervisedCount;
 
     let actualSellOut = matchingBas.reduce((acc, b) => acc + b.sellOutNonLavojoy + b.sellOutLavojoy, 0);
@@ -1232,7 +1257,12 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
         ? 'on_track'
         : 'lagging';
 
-    const isCustom = Boolean(customConfig.targetSellOut !== undefined || customConfig.targetProdukFokusPcs !== undefined);
+    const isCustom = Boolean(
+      customConfig.targetSellOut !== undefined ||
+      customConfig.targetProdukFokusPcs !== undefined ||
+      customConfig.baSupervisedCount !== undefined ||
+      t.baSupervisedCount !== undefined
+    );
 
     return {
       id: t.id,

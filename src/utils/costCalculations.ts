@@ -408,13 +408,20 @@ export function calculateBaSalary(
   focusPenaltyOverride?: number
 ): BaSalaryItem {
   const tNonLavojoy = targetNonLavojoy > 0 ? targetNonLavojoy : 30000000;
-  const tLavojoy = targetLavojoy > 0 ? targetLavojoy : 5000000;
+  const tLavojoy = targetLavojoy >= 0 ? targetLavojoy : 5000000;
+  const isLavojoyMergedToMain = tLavojoy === 0;
 
-  const achievementNonLavojoyPercent = (sellOutNonLavojoy / tNonLavojoy) * 100;
+  // Jika Target Lavojoy diset 0, maka seluruh pencapaian Sell Out BA (Non-Lavojoy + Lavojoy)
+  // dihitung sebagai pencapaian Sell Out utama BA tersebut.
+  const effectiveMainSellOut = isLavojoyMergedToMain
+    ? sellOutNonLavojoy + sellOutLavojoy
+    : sellOutNonLavojoy;
+
+  const achievementNonLavojoyPercent = (effectiveMainSellOut / tNonLavojoy) * 100;
   const sellOutActual = sellOutNonLavojoy + sellOutLavojoy;
   const isMinSalesMet = sellOutActual >= 1000000;
 
-  // 1. Gaji Pokok & Insentif Non-Lavojoy
+  // 1. Gaji Pokok & Insentif Non-Lavojoy (atau Total Sell Out jika Target Lavojoy = 0)
   let baseSalary = 0;
   let incentiveNonLavojoyPercent = 0;
   let tierLabel = '';
@@ -435,12 +442,12 @@ export function calculateBaSalary(
     incentiveNonLavojoyPercent = 0;
     tierLabel = 'Tier Dasar (70% - 99%)';
     tierColor = 'bg-amber-100 text-amber-800 border-amber-300';
-  } else if (sellOutNonLavojoy >= 1000000 && sellOutNonLavojoy <= 25000000) {
+  } else if (effectiveMainSellOut >= 1000000 && effectiveMainSellOut <= 25000000) {
     baseSalary = 2000000;
     incentiveNonLavojoyPercent = 0;
     tierLabel = 'Omset Rp 1 Jt - 25 Jt';
     tierColor = 'bg-orange-100 text-orange-800 border-orange-300';
-  } else if (sellOutNonLavojoy > 25000000) {
+  } else if (effectiveMainSellOut > 25000000) {
     baseSalary = 2000000;
     incentiveNonLavojoyPercent = 0;
     tierLabel = 'Omset > 25 Jt (< 70%)';
@@ -452,11 +459,11 @@ export function calculateBaSalary(
     tierColor = 'bg-rose-100 text-rose-800 border-rose-300';
   }
 
-  const incentiveNonLavojoyNominal = Math.round((incentiveNonLavojoyPercent / 100) * sellOutNonLavojoy);
+  const incentiveNonLavojoyNominal = Math.round((incentiveNonLavojoyPercent / 100) * effectiveMainSellOut);
 
-  // 2. Insentif Khusus Lavojoy (4% jika capai 100%)
+  // 2. Insentif Khusus Lavojoy (4% jika target > 0 & capai 100%; jika target = 0, sudah digabung ke pencapaian utama)
   const achievementLavojoyPercent = tLavojoy > 0 ? (sellOutLavojoy / tLavojoy) * 100 : 0;
-  const isLavojoyTargetMet = achievementLavojoyPercent >= 100;
+  const isLavojoyTargetMet = tLavojoy > 0 && achievementLavojoyPercent >= 100;
   const incentiveLavojoyPercent = isLavojoyTargetMet ? 4.0 : 0;
   const incentiveLavojoyNominal = isLavojoyTargetMet ? Math.round((4.0 / 100) * sellOutLavojoy) : 0;
 
@@ -510,7 +517,7 @@ export function calculateBaSalary(
     region,
     salesName,
     spv,
-    sellOutNonLavojoy,
+    sellOutNonLavojoy: effectiveMainSellOut,
     targetNonLavojoy: tNonLavojoy,
     achievementNonLavojoyPercent,
     baseSalary,
@@ -518,7 +525,7 @@ export function calculateBaSalary(
     incentiveNonLavojoyNominal,
     tierLabel,
     tierColor,
-    sellOutLavojoy,
+    sellOutLavojoy: isLavojoyMergedToMain ? 0 : sellOutLavojoy,
     targetLavojoy: tLavojoy,
     achievementLavojoyPercent,
     isLavojoyTargetMet,
@@ -1078,10 +1085,10 @@ export function aggregateAreaCost(
   const baList: BaSalaryItem[] = Array.from(mergedBaMap.values())
     .map((ba) => {
       const targetNonLavojoy =
-        lookupByBaOrStore(baNonLavojoyLookup, ba.baName, ba.storeName, ba.storeDetails) ||
+        lookupByBaOrStore(baNonLavojoyLookup, ba.baName, ba.storeName, ba.storeDetails) ??
         defaultBaNonLavojoyTarget;
       const targetLavojoy =
-        lookupByBaOrStore(baLavojoyLookup, ba.baName, ba.storeName, ba.storeDetails) ||
+        lookupByBaOrStore(baLavojoyLookup, ba.baName, ba.storeName, ba.storeDetails) ??
         defaultBaLavojoyTarget;
 
       const ov =

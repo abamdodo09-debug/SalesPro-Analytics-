@@ -9,6 +9,8 @@ export interface WeeklyStoreConfig {
   coverArea: string;
   region: string;
   targetMonthly: number;
+  isBaCustom?: boolean;
+  sourceStoreName?: string;
 }
 
 export const STORAGE_KEY_WEEKLY_STORES = 'salespro_weekly_stores_config_v5';
@@ -858,10 +860,14 @@ export function resolveWeeklyBaStores(sellOutRecords: TransactionRecord[] = []):
 
   // Deduplikasi per storeName (case-insensitive) agar 1 toko tidak dihitung gaji ganda
   const uniqueMap = new Map<string, WeeklyStoreConfig>();
+  const sourceAliasSet = new Set<string>();
   for (const s of filteredBase) {
     const sLower = s.storeName.trim().toLowerCase();
     const sAlnum = normalizeStoreAlnum(s.storeName);
-    const liveBa = sheetBaByStore.get(sLower) || sheetBaByAlnum.get(sAlnum);
+    if (s.sourceStoreName) {
+      sourceAliasSet.add(s.sourceStoreName.trim().toLowerCase());
+    }
+    const liveBa = !s.isBaCustom ? (sheetBaByStore.get(sLower) || sheetBaByAlnum.get(sAlnum)) : undefined;
     const resolvedItem: WeeklyStoreConfig = liveBa ? { ...s, baName: liveBa } : { ...s };
     if (!uniqueMap.has(sLower)) {
       uniqueMap.set(sLower, resolvedItem);
@@ -876,7 +882,7 @@ export function resolveWeeklyBaStores(sellOutRecords: TransactionRecord[] = []):
     if (isStoreExcludedFromIlhamsyah(r.SALES, r.NAMA_STORE)) continue;
     const sLower = r.NAMA_STORE.trim().toLowerCase();
     if (deletedSet.has(sLower)) continue;
-    if (uniqueMap.has(sLower)) continue;
+    if (uniqueMap.has(sLower) || sourceAliasSet.has(sLower)) continue;
 
     const baTrim = (r.BA || '').trim();
     const baUpper = baTrim.toUpperCase();

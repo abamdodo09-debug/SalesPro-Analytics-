@@ -292,24 +292,35 @@ export function buildDefaultSlipFromBa(
   const month = getPeriodCode(periodLabel);
   const seq = String(index + 1).padStart(3, '0');
 
+  const isLavojoyMerged = item.targetLavojoy === 0;
   const earnings: SalarySlipLineItem[] = [
     {
       id: 'base-ba',
-      label: 'Gaji Pokok Beauty Advisor (Non-Lavojoy)',
+      label: isLavojoyMerged
+        ? 'Gaji Pokok Beauty Advisor (Total Sell Out)'
+        : 'Gaji Pokok Beauty Advisor (Non-Lavojoy)',
       amount: item.baseSalary,
       note: `${item.tierLabel} (${item.achievementNonLavojoyPercent.toFixed(1)}%)`,
     },
     {
       id: 'inc-non-lavojoy',
-      label: `Insentif Sell Out Non-Lavojoy (${item.incentiveNonLavojoyPercent}%)`,
+      label: isLavojoyMerged
+        ? `Insentif Sell Out Total (${item.incentiveNonLavojoyPercent}%)`
+        : `Insentif Sell Out Non-Lavojoy (${item.incentiveNonLavojoyPercent}%)`,
       amount: item.incentiveNonLavojoyNominal,
-      note: `Capaian Non-Lavojoy ${item.achievementNonLavojoyPercent.toFixed(1)}%`,
+      note: isLavojoyMerged
+        ? `Capaian Total Sell Out ${item.achievementNonLavojoyPercent.toFixed(1)}%`
+        : `Capaian Non-Lavojoy ${item.achievementNonLavojoyPercent.toFixed(1)}%`,
     },
     {
       id: 'inc-lavojoy',
-      label: `Insentif Khusus Brand Lavojoy (${item.incentiveLavojoyPercent}%)`,
+      label: isLavojoyMerged
+        ? 'Insentif Khusus Brand Lavojoy (Digabung ke Utama)'
+        : `Insentif Khusus Brand Lavojoy (${item.incentiveLavojoyPercent}%)`,
       amount: item.incentiveLavojoyNominal,
-      note: item.isLavojoyTargetMet
+      note: isLavojoyMerged
+        ? 'Target Lavojoy Rp 0 — seluruh Sell Out dihitung pada pencapaian utama'
+        : item.isLavojoyTargetMet
         ? `Target Lavojoy tercapai (${item.achievementLavojoyPercent.toFixed(1)}%)`
         : `Belum mencapai 100% (${item.achievementLavojoyPercent.toFixed(1)}%)`,
     },

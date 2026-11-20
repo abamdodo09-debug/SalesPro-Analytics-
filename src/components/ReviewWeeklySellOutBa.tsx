@@ -208,9 +208,16 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
   // Master Store List (gabungan default stores, custom added stores, dan stores dari sheets Sell Out)
   const allMasterStores = useMemo(() => {
     const map = new Map<string, WeeklyStoreConfig>();
+    const renamedSourceNames = new Set<string>();
+    storesList.forEach((s) => {
+      if (s.sourceStoreName) {
+        renamedSourceNames.add(s.sourceStoreName.trim().toLowerCase());
+      }
+    });
     DEFAULT_WEEKLY_STORES.forEach((s) => {
-      if (!isStoreExcludedFromIlhamsyah(s.salesName, s.storeName)) {
-        map.set(s.storeName.trim().toLowerCase(), s);
+      const sLower = s.storeName.trim().toLowerCase();
+      if (!renamedSourceNames.has(sLower) && !isStoreExcludedFromIlhamsyah(s.salesName, s.storeName)) {
+        map.set(sLower, s);
       }
     });
     storesList.forEach((s) => {
@@ -222,7 +229,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       if (!r.NAMA_STORE) return;
       if (isStoreExcludedFromIlhamsyah(r.SALES, r.NAMA_STORE)) return;
       const key = r.NAMA_STORE.trim().toLowerCase();
-      if (!map.has(key)) {
+      if (!map.has(key) && !renamedSourceNames.has(key)) {
         map.set(key, {
           id: `gs-store-${key.replace(/\s+/g, '-')}`,
           storeName: r.NAMA_STORE.trim(),
@@ -247,7 +254,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       (s) => !deletedSet.has(s.storeName.trim().toLowerCase()) && !isStoreExcludedFromIlhamsyah(s.salesName, s.storeName)
     );
 
-    // Priority sync: if Sell Out records from Google Sheet have a matching store with a live BA name, apply it!
+    // Priority sync: if Sell Out records from Google Sheet have a matching store with a live BA name, apply it ONLY if user hasn't customized BA
     const sheetBaByStore: Record<string, string> = {};
     sellOutSourceRecords.forEach((r) => {
       if (r.NAMA_STORE && r.BA && r.BA !== '-' && r.BA.toUpperCase() !== 'NON BA' && r.BA.toUpperCase() !== 'STANDBY') {
@@ -256,6 +263,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
     });
 
     list = list.map((s) => {
+      if (s.isBaCustom) return s;
       const liveBa = sheetBaByStore[s.storeName.trim().toLowerCase()];
       if (liveBa) {
         return { ...s, baName: liveBa };
@@ -263,8 +271,14 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       return s;
     });
 
-    // Auto-sync additional stores from connected Google Sheet (Sell Out records only) if present and NOT deleted
-    const existingNames = new Set(list.map((s) => s.storeName.trim().toLowerCase()));
+    // Auto-sync additional stores from connected Google Sheet (Sell Out records only) if present and NOT deleted or renamed
+    const existingNames = new Set<string>();
+    list.forEach((s) => {
+      existingNames.add(s.storeName.trim().toLowerCase());
+      if (s.sourceStoreName) {
+        existingNames.add(s.sourceStoreName.trim().toLowerCase());
+      }
+    });
     const extraStores: WeeklyStoreConfig[] = [];
 
     sellOutSourceRecords.forEach((r) => {
@@ -297,8 +311,11 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
 
     // Apply per-month BA target overrides from Pusat Kelola Target
     list = list.map((s) => {
-      const syncedTarget = getExplicitBaTotalTargetOverride(s.storeName, selectedMonth);
-      if (syncedTarget !== undefined && syncedTarget > 0) {
+      let syncedTarget = getExplicitBaTotalTargetOverride(s.storeName, selectedMonth);
+      if (syncedTarget === undefined && s.sourceStoreName) {
+        syncedTarget = getExplicitBaTotalTargetOverride(s.sourceStoreName, selectedMonth);
+      }
+      if (syncedTarget !== undefined && syncedTarget >= 0) {
         return { ...s, targetMonthly: syncedTarget };
       }
       return s;
@@ -608,19 +625,26 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
     }
 
     // 2. Direct lookup in synced Google Sheet SELL OUT transaction records (by dateKey and by day)
-    const txKeyExact = `${store.storeName.trim().toLowerCase()}_${dayNum}`;
-    const txKeyNorm = `${normalizeStore(store.storeName)}_${dayNum}`;
-    const txDateExact = `date_${store.storeName.trim().toLowerCase()}_${dateKey}`;
-    const txDateNorm = `date_${normalizeStore(store.storeName)}_${dateKey}`;
+    const lookupStoreNames = [store.storeName];
+    if (store.sourceStoreName && store.sourceStoreName.trim().toUpperCase() !== store.storeName.trim().toUpperCase()) {
+      lookupStoreNames.push(store.sourceStoreName);
+    }
 
-    const sheetVal =
-      transactionsMap[txDateExact] ??
-      transactionsMap[txDateNorm] ??
-      transactionsMap[txKeyExact] ??
-      transactionsMap[txKeyNorm];
+    for (const sName of lookupStoreNames) {
+      const txKeyExact = `${sName.trim().toLowerCase()}_${dayNum}`;
+      const txKeyNorm = `${normalizeStore(sName)}_${dayNum}`;
+      const txDateExact = `date_${sName.trim().toLowerCase()}_${dateKey}`;
+      const txDateNorm = `date_${normalizeStore(sName)}_${dateKey}`;
 
-    if (sheetVal !== undefined && sheetVal > 0) {
-      return sheetVal;
+      const sheetVal =
+        transactionsMap[txDateExact] ??
+        transactionsMap[txDateNorm] ??
+        transactionsMap[txKeyExact] ??
+        transactionsMap[txKeyNorm];
+
+      if (sheetVal !== undefined && sheetVal > 0) {
+        return sheetVal;
+      }
     }
 
     // 3. Jika di tanggal tersebut tidak ada pencapaian Sell Out di Google Sheet, kosongkan (0)
@@ -968,21 +992,57 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
   // Save Store Edit (metadata saved to store list; target saved strictly per chosen month!)
   const handleSaveEditStore = () => {
     if (!editingStore) return;
-    const targetStoreName = editStoreName.trim().toUpperCase() || editingStore.storeName;
+    const oldStoreName = editingStore.storeName;
+    const targetStoreName = editStoreName.trim().toUpperCase() || oldStoreName;
+    const targetBaName = editBaName.trim().toUpperCase() || editingStore.baName;
+    const targetSalesName = editSalesName.trim().toUpperCase() || editingStore.salesName;
+    const targetTrainerName = editTrainerName.trim().toUpperCase() || editingStore.trainerName;
+    const targetCoverArea = editCoverArea.trim().toUpperCase() || editingStore.coverArea;
+    const targetRegion = editRegion.trim().toUpperCase() || editingStore.region;
+
+    const cleanNon = Math.max(0, Number(editTargetNonLavojoy) || 0);
+    const cleanLav = Math.max(0, Number(editTargetLavojoy) || 0);
+    const newTargetMonthly = cleanNon + cleanLav;
+
+    const isStoreRenamed = targetStoreName.trim().toUpperCase() !== oldStoreName.trim().toUpperCase();
+    const resolvedSourceStoreName =
+      editingStore.sourceStoreName || (isStoreRenamed ? oldStoreName : undefined);
+
+    let foundInList = false;
     const updated = storesList.map((s) => {
-      if (s.id === editingStore.id) {
+      if (s.id === editingStore.id || s.storeName.trim().toUpperCase() === oldStoreName.trim().toUpperCase()) {
+        foundInList = true;
         return {
           ...s,
           storeName: targetStoreName,
-          baName: editBaName.trim().toUpperCase() || s.baName,
-          salesName: editSalesName.trim().toUpperCase() || s.salesName,
-          trainerName: editTrainerName.trim().toUpperCase() || s.trainerName,
-          coverArea: editCoverArea.trim().toUpperCase() || s.coverArea,
-          region: editRegion.trim().toUpperCase() || s.region,
+          sourceStoreName: resolvedSourceStoreName || s.sourceStoreName,
+          baName: targetBaName,
+          isBaCustom: true,
+          salesName: targetSalesName,
+          trainerName: targetTrainerName,
+          coverArea: targetCoverArea,
+          region: targetRegion,
+          targetMonthly: newTargetMonthly,
         };
       }
       return s;
     });
+
+    if (!foundInList) {
+      updated.push({
+        ...editingStore,
+        storeName: targetStoreName,
+        sourceStoreName: resolvedSourceStoreName,
+        baName: targetBaName,
+        isBaCustom: true,
+        salesName: targetSalesName,
+        trainerName: targetTrainerName,
+        coverArea: targetCoverArea,
+        region: targetRegion,
+        targetMonthly: newTargetMonthly,
+      });
+    }
+
     setStoresList(updated);
     try {
       localStorage.setItem(STORAGE_KEY_WEEKLY_STORES, JSON.stringify(updated));
@@ -990,8 +1050,47 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       console.warn(e);
     }
 
+    // Ensure target store name is not blocked in deletedStoreNames
+    const targetLower = targetStoreName.trim().toLowerCase();
+    if (deletedStoreNames.some((n) => n.trim().toLowerCase() === targetLower)) {
+      const cleanedDeleted = deletedStoreNames.filter((n) => n.trim().toLowerCase() !== targetLower);
+      setDeletedStoreNames(cleanedDeleted);
+      try {
+        localStorage.setItem(STORAGE_KEY_WEEKLY_DELETED_STORES, JSON.stringify(cleanedDeleted));
+      } catch (e) {
+        console.warn(e);
+      }
+    }
+
+    // Migrate custom daily actuals if store was renamed
+    if (isStoreRenamed) {
+      const oldPrefix = `${oldStoreName}_`;
+      const newPrefix = `${targetStoreName}_`;
+      let actualsChanged = false;
+      const migratedActuals: Record<string, number> = { ...customDailyActuals };
+      Object.keys(migratedActuals).forEach((k) => {
+        if (k.startsWith(oldPrefix)) {
+          const suffix = k.slice(oldPrefix.length);
+          migratedActuals[`${newPrefix}${suffix}`] = migratedActuals[k];
+          delete migratedActuals[k];
+          actualsChanged = true;
+        }
+      });
+      if (actualsChanged) {
+        setCustomDailyActuals(migratedActuals);
+        try {
+          localStorage.setItem(STORAGE_KEY_WEEKLY_ACTUALS, JSON.stringify(migratedActuals));
+        } catch (e) {
+          console.warn(e);
+        }
+      }
+    }
+
     if (editPerformaVal >= 0) {
-      const newPerforma = { ...customPerformaBa, [editingStore.storeName]: editPerformaVal };
+      const newPerforma = { ...customPerformaBa, [targetStoreName]: editPerformaVal };
+      if (isStoreRenamed) {
+        delete newPerforma[oldStoreName];
+      }
       setCustomPerformaBa(newPerforma);
       try {
         localStorage.setItem(STORAGE_KEY_WEEKLY_PERFORMA, JSON.stringify(newPerforma));
@@ -1001,14 +1100,24 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
     }
 
     if (editCumulativeVal >= 0) {
-      const activeWeekKey = `${selectedWeek}_${editingStore.storeName}`;
-      const monthWeekKey = `${selectedMonth.trim().toUpperCase()}_${selectedWeek}_${editingStore.storeName}`;
-      const newCum = {
-        ...customCumulative,
-        [editingStore.storeName]: editCumulativeVal,
-        [activeWeekKey]: editCumulativeVal,
-        [monthWeekKey]: editCumulativeVal,
-      };
+      const newCum = { ...customCumulative };
+      if (isStoreRenamed) {
+        // Migrate any existing cumulative overrides from old store name
+        const oldSuffix = `_${oldStoreName}`;
+        Object.keys(newCum).forEach((k) => {
+          if (k.endsWith(oldSuffix)) {
+            const prefix = k.slice(0, k.length - oldSuffix.length);
+            newCum[`${prefix}_${targetStoreName}`] = newCum[k];
+            delete newCum[k];
+          }
+        });
+        delete newCum[oldStoreName];
+      }
+      const activeWeekKey = `${selectedWeek}_${targetStoreName}`;
+      const monthWeekKey = `${editTargetMonth.trim().toUpperCase()}_${selectedWeek}_${targetStoreName}`;
+      newCum[targetStoreName] = editCumulativeVal;
+      newCum[activeWeekKey] = editCumulativeVal;
+      newCum[monthWeekKey] = editCumulativeVal;
       setCustomCumulative(newCum);
       try {
         localStorage.setItem(STORAGE_KEY_WEEKLY_CUMULATIVE, JSON.stringify(newCum));
@@ -1017,20 +1126,19 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       }
     }
 
-    const initialBd = getStoreMonthlyTargetBreakdown(editingStore, editTargetMonth);
-    const cleanNon = Math.max(0, Number(editTargetNonLavojoy) || 0);
-    const cleanLav = Math.max(0, Number(editTargetLavojoy) || 0);
-    if (
-      cleanNon !== initialBd.nonLavojoy ||
-      cleanLav !== initialBd.lavojoy ||
-      cleanNon + cleanLav !== editingStore.targetMonthly
-    ) {
-      setSingleTargetOverride('baNonLavojoy', targetStoreName, cleanNon, editTargetMonth);
-      setSingleTargetOverride('baLavojoy', targetStoreName, cleanLav, editTargetMonth);
+    // Always save BA target breakdown for the chosen month under targetStoreName
+    setSingleTargetOverride('baNonLavojoy', targetStoreName, cleanNon, editTargetMonth);
+    setSingleTargetOverride('baLavojoy', targetStoreName, cleanLav, editTargetMonth);
+
+    if (editTargetMonth !== selectedMonth) {
+      setSelectedMonth(editTargetMonth);
     }
 
+    setTargetSyncVersion((v) => v + 1);
+    window.dispatchEvent(new Event('weekly_ba_stores_updated'));
+
     setEditingStore(null);
-    showToast(`Target bulan ${editTargetMonth} & info ${targetStoreName} berhasil disimpan!`);
+    showToast(`Perubahan ${targetStoreName} (BA: ${targetBaName}, Target ${editTargetMonth}) berhasil disimpan!`);
   };
 
   // Buka Modal Edit Pencapaian Kumulatif Progresif
@@ -1148,6 +1256,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
       id: `ws-custom-${Date.now()}`,
       storeName: sName,
       baName: newBaName.trim().toUpperCase() || 'BA STANDBY',
+      isBaCustom: Boolean(newBaName.trim()),
       salesName: newSalesName.trim().toUpperCase() || 'ALBERT FERNANDO',
       trainerName: newTrainerName.trim().toUpperCase() || 'ARA',
       coverArea: newCoverArea.trim().toUpperCase() || 'PEKANBARU',
@@ -2672,91 +2781,96 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
         </div>
       )}
 
-      {/* MODAL: EDIT STORE TARGET & PERFORMA */}
+      {/* MODAL: EDIT STORE TARGET & PERFORMA (COMPACT) */}
       {editingStore && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150 text-xs">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
-                <Edit2 className="w-4 h-4 text-blue-600" />
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-2.5 sm:p-4">
+          <div className="bg-white rounded-xl max-w-md w-full max-h-[86vh] flex flex-col overflow-hidden shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150 text-[11px]">
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-100 shrink-0 bg-white">
+              <h3 className="text-sm font-extrabold text-slate-900 flex items-center gap-1.5">
+                <Edit2 className="w-3.5 h-3.5 text-blue-600" />
                 Edit Toko &amp; Target BA
               </h3>
-              <button onClick={() => setEditingStore(null)} className="text-slate-400 hover:text-slate-600 p-1">
+              <button
+                type="button"
+                onClick={() => setEditingStore(null)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-slate-100 cursor-pointer"
+              >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="space-y-3 mt-4">
-              <div>
-                <label className="font-bold text-slate-700 block mb-1">Nama Toko</label>
-                <input
-                  type="text"
-                  value={editStoreName}
-                  onChange={(e) => setEditStoreName(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 font-bold focus:bg-white"
-                />
-              </div>
-
-              <div>
-                <label className="font-bold text-slate-700 block mb-1">Nama Beauty Advisor (BA)</label>
-                <input
-                  type="text"
-                  value={editBaName}
-                  onChange={(e) => setEditBaName(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 font-bold focus:bg-white"
-                />
+            <div className="px-4 py-2.5 space-y-2 overflow-y-auto flex-1">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="font-bold text-slate-700 block mb-0.5 text-[10px]">Nama Toko</label>
+                  <input
+                    type="text"
+                    value={editStoreName}
+                    onChange={(e) => setEditStoreName(e.target.value)}
+                    className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-bold text-slate-900 focus:bg-white focus:border-blue-400 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="font-bold text-slate-700 block mb-0.5 text-[10px]">Nama Beauty Advisor (BA)</label>
+                  <input
+                    type="text"
+                    value={editBaName}
+                    onChange={(e) => setEditBaName(e.target.value)}
+                    className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-bold text-slate-900 focus:bg-white focus:border-blue-400 outline-none"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="font-bold text-slate-700 block mb-1">Coveran Sales</label>
+                  <label className="font-bold text-slate-700 block mb-0.5 text-[10px]">Coveran Sales</label>
                   <input
                     type="text"
                     value={editSalesName}
                     onChange={(e) => setEditSalesName(e.target.value)}
                     placeholder="ALBERT FERNANDO"
-                    className="w-full px-3 py-1.5 rounded-xl border border-slate-200 bg-slate-50 font-bold text-xs"
+                    className="w-full px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 font-bold text-[11px] focus:bg-white focus:border-blue-400 outline-none"
                   />
                 </div>
                 <div>
-                  <label className="font-bold text-slate-700 block mb-1">Trainer</label>
+                  <label className="font-bold text-slate-700 block mb-0.5 text-[10px]">Trainer</label>
                   <input
                     type="text"
                     value={editTrainerName}
                     onChange={(e) => setEditTrainerName(e.target.value)}
                     placeholder="ARA / RATIH / ONLINE"
-                    className="w-full px-3 py-1.5 rounded-xl border border-slate-200 bg-slate-50 font-bold text-xs"
+                    className="w-full px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 font-bold text-[11px] focus:bg-white focus:border-blue-400 outline-none"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="font-bold text-slate-700 block mb-1">Area</label>
+                  <label className="font-bold text-slate-700 block mb-0.5 text-[10px]">Area</label>
                   <input
                     type="text"
                     value={editCoverArea}
                     onChange={(e) => setEditCoverArea(e.target.value)}
                     placeholder="PEKANBARU"
-                    className="w-full px-3 py-1.5 rounded-xl border border-slate-200 bg-slate-50 font-bold text-xs"
+                    className="w-full px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 font-bold text-[11px] focus:bg-white focus:border-blue-400 outline-none"
                   />
                 </div>
                 <div>
-                  <label className="font-bold text-slate-700 block mb-1">Region</label>
+                  <label className="font-bold text-slate-700 block mb-0.5 text-[10px]">Region</label>
                   <input
                     type="text"
                     value={editRegion}
                     onChange={(e) => setEditRegion(e.target.value)}
                     placeholder="PEKAN BARU"
-                    className="w-full px-3 py-1.5 rounded-xl border border-slate-200 bg-slate-50 font-bold text-xs"
+                    className="w-full px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 font-bold text-[11px] focus:bg-white focus:border-blue-400 outline-none"
                   />
                 </div>
               </div>
 
-              <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3 space-y-2">
+              <div className="bg-amber-50/70 border border-amber-200 rounded-lg p-2.5 space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
-                  <label className="font-extrabold text-amber-950">
-                    Setting Target BA + Lavojoy per Bulan
+                  <label className="font-extrabold text-amber-950 text-[11px]">
+                    Target BA + Lavojoy
                   </label>
                   <select
                     value={editTargetMonth}
@@ -2770,7 +2884,7 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
                         setEditTargetMonthly(bd.total);
                       }
                     }}
-                    className="px-2 py-1 rounded-lg border border-amber-300 bg-white font-bold text-amber-950 text-[11px] outline-none cursor-pointer"
+                    className="px-2 py-0.5 rounded-md border border-amber-300 bg-white font-bold text-amber-950 text-[10px] outline-none cursor-pointer"
                   >
                     {MONTH_OPTIONS_2026.map((m) => {
                       const val = `${m.bulanName} 2026`;
@@ -2785,8 +2899,8 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
 
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="font-bold text-slate-700 block mb-1 text-[10px]">
-                      Target BA Non-Lavojoy (Rp)
+                    <label className="font-bold text-slate-700 block mb-0.5 text-[10px]">
+                      Non-Lavojoy (Rp)
                     </label>
                     <input
                       type="number"
@@ -2797,12 +2911,12 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
                         setEditTargetNonLavojoy(val);
                         setEditTargetMonthly(val + editTargetLavojoy);
                       }}
-                      className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white font-mono font-bold text-slate-800"
+                      className="w-full px-2 py-1 rounded-lg border border-slate-200 bg-white font-mono font-bold text-slate-800 tabular-nums"
                     />
                   </div>
                   <div>
-                    <label className="font-bold text-slate-700 block mb-1 text-[10px]">
-                      Target Lavojoy (Rp)
+                    <label className="font-bold text-slate-700 block mb-0.5 text-[10px]">
+                      Lavojoy (Rp)
                     </label>
                     <input
                       type="number"
@@ -2813,15 +2927,20 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
                         setEditTargetLavojoy(val);
                         setEditTargetMonthly(editTargetNonLavojoy + val);
                       }}
-                      className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white font-mono font-bold text-slate-800"
+                      className="w-full px-2 py-1 rounded-lg border border-slate-200 bg-white font-mono font-bold text-slate-800 tabular-nums"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="font-bold text-slate-700 block mb-1">
-                    Total Target BA + Lavojoy — {editTargetMonth} (Rp)
-                  </label>
+                  <div className="flex items-center justify-between gap-2 mb-0.5">
+                    <label className="font-bold text-slate-700 text-[10px]">
+                      Total Target ({editTargetMonth})
+                    </label>
+                    <span className="text-[9.5px] text-slate-600 font-mono tabular-nums">
+                      Harian: Rp {Math.round(editTargetMonthly / 30).toLocaleString('id-ID')}
+                    </span>
+                  </div>
                   <input
                     type="number"
                     step="any"
@@ -2836,70 +2955,66 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
                         setEditTargetNonLavojoy(0);
                       }
                     }}
-                    className="w-full px-3 py-2 rounded-xl border border-amber-300 bg-white font-mono font-black text-blue-900"
+                    className="w-full px-2.5 py-1 rounded-lg border border-amber-300 bg-white font-mono font-black text-blue-900 tabular-nums"
                   />
-                  <span className="text-[10px] text-slate-600 mt-0.5 block">
-                    Target harian otomatis ({editTargetMonth}): Rp {Math.round(editTargetMonthly / 30).toLocaleString('id-ID')} • Disimpan khusus untuk bulan ini.
-                  </span>
                 </div>
               </div>
 
-              <div>
-                <label className="font-bold text-slate-700 block mb-1">
-                  Pencapaian Kumulatif ({weekRangeLabel}) (Rp)
-                </label>
-                <input
-                  type="number"
-                  step="any"
-                  value={editCumulativeVal}
-                  onChange={(e) => setEditCumulativeVal(Number(e.target.value))}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 font-mono font-bold text-slate-900"
-                />
-              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="font-bold text-slate-700 block mb-0.5 text-[10px]">
+                    Kumulatif ({weekRangeLabel}) (Rp)
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={editCumulativeVal}
+                    onChange={(e) => setEditCumulativeVal(Number(e.target.value))}
+                    className="w-full px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 font-mono font-bold text-slate-900 tabular-nums focus:bg-white outline-none"
+                  />
+                </div>
 
-              <div>
-                <label className="font-bold text-slate-700 block mb-1">
-                  Performa Kontribusi BA (%)
-                </label>
-                <input
-                  type="number"
-                  step="any"
-                  value={editPerformaVal}
-                  onChange={(e) => setEditPerformaVal(Number(e.target.value))}
-                  className="w-full px-3 py-2 rounded-xl border border-red-200 bg-red-50/50 font-mono font-black text-red-700"
-                />
-                <span className="text-[10px] text-slate-500 mt-0.5 block">
-                  *Otomatis dihitung dari persentase omset toko terhadap total omset mingguan area.
-                </span>
+                <div>
+                  <label className="font-bold text-slate-700 block mb-0.5 text-[10px]">
+                    Performa BA (%)
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={editPerformaVal}
+                    onChange={(e) => setEditPerformaVal(Number(e.target.value))}
+                    className="w-full px-2.5 py-1 rounded-lg border border-red-200 bg-red-50/50 font-mono font-black text-red-700 tabular-nums focus:bg-white outline-none"
+                  />
+                </div>
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-2 pt-4 border-t border-slate-100 mt-5">
+            <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-t border-slate-100 bg-slate-50/90 shrink-0">
               <button
                 type="button"
                 onClick={() => handleDeleteStoreColumn(editingStore.id, editingStore.storeName)}
-                className="flex items-center gap-1.5 px-3 py-2 text-rose-700 hover:text-white bg-rose-50 hover:bg-rose-600 rounded-xl font-bold transition-all cursor-pointer"
+                className="flex items-center gap-1 px-2.5 py-1.5 text-rose-700 hover:text-white bg-rose-50 hover:bg-rose-600 rounded-lg font-bold transition-all cursor-pointer text-[11px]"
                 title="Hapus kolom toko ini dari laporan weekly sell out"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span>Hapus Kolom Toko</span>
+                <span>Hapus</span>
               </button>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => setEditingStore(null)}
-                  className="px-4 py-2 font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
+                  className="px-3 py-1.5 font-semibold text-slate-600 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg cursor-pointer text-[11px]"
                 >
                   Batal
                 </button>
                 <button
                   type="button"
                   onClick={handleSaveEditStore}
-                  className="px-4 py-2 font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer"
+                  className="px-3.5 py-1.5 font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-lg shadow-xs flex items-center gap-1.5 cursor-pointer text-[11px]"
                 >
                   <Save className="w-3.5 h-3.5" />
-                  Simpan Target
+                  <span>Simpan Perubahan</span>
                 </button>
               </div>
             </div>
