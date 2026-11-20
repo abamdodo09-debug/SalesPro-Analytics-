@@ -42,6 +42,41 @@ interface OnlinePromoReportViewProps {
   onNotify?: (message: string, type?: 'success' | 'error') => void;
 }
 
+function parseFreeActualInput(raw: string): number | null {
+  const cleaned = raw.trim().replace(/^rp\s*/i, '').replace(/\s+/g, '');
+  if (!cleaned) return null;
+
+  const signMatch = cleaned.match(/^([+-])?(.*)$/);
+  const sign = signMatch?.[1] === '-' ? -1 : 1;
+  const body = signMatch?.[2] ?? '';
+  if (!body) return null;
+
+  if (/^\d{1,3}(\.\d{3})+$/.test(body)) {
+    const val = Number(body.replace(/\./g, ''));
+    return Number.isFinite(val) ? sign * val : null;
+  }
+
+  if (/^\d{1,3}(,\d{3})+$/.test(body)) {
+    const val = Number(body.replace(/,/g, ''));
+    return Number.isFinite(val) ? sign * val : null;
+  }
+
+  if (/^\d{1,3}(\.\d{3})+,\d+$/.test(body)) {
+    const val = Number(body.replace(/\./g, '').replace(',', '.'));
+    return Number.isFinite(val) ? sign * val : null;
+  }
+
+  if (/^\d{1,3}(,\d{3})+\.\d+$/.test(body)) {
+    const val = Number(body.replace(/,/g, ''));
+    return Number.isFinite(val) ? sign * val : null;
+  }
+
+  const normalized = body.replace(',', '.');
+  if (!/^\d+(\.\d+)?$/.test(normalized)) return null;
+  const val = Number(normalized);
+  return Number.isFinite(val) ? sign * val : null;
+}
+
 export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
   filters,
   onNotify,
@@ -112,8 +147,8 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
 
   // Preview Growth (Per Hari & Bulanan) for the Add Form
   const addPreview = useMemo(() => {
-    const parsedActual = Number(newActualStr);
-    if (!newStoreName.trim() || newActualStr.trim() === '' || !Number.isFinite(parsedActual)) {
+    const parsedActual = parseFreeActualInput(newActualStr);
+    if (!newStoreName.trim() || parsedActual === null) {
       return null;
     }
     const tempId = '__add_preview__';
@@ -122,7 +157,7 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
       storeName: newStoreName.trim(),
       monthPeriod: newMonthPeriod,
       date: newDate,
-      actual: Math.round(parsedActual),
+      actual: parsedActual,
       createdAt: new Date().toISOString(),
     };
     const simulated = computeOnlinePromoGrowth([...items, tempItem]);
@@ -132,7 +167,7 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
   // Live preview during inline row editing
   const editPreview = useMemo(() => {
     if (!editingRowId) return null;
-    const parsedActual = Number(editActualStr);
+    const parsedActual = parseFreeActualInput(editActualStr);
     const simulated = items.map((x) =>
       x.id === editingRowId
         ? {
@@ -140,7 +175,7 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
             storeName: editStoreName.trim() || x.storeName,
             monthPeriod: editMonthPeriod || x.monthPeriod,
             date: editDate || x.date,
-            actual: Number.isFinite(parsedActual) ? Math.round(parsedActual) : x.actual,
+            actual: parsedActual !== null ? parsedActual : x.actual,
           }
         : x
     );
@@ -194,7 +229,7 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
     setFormError(null);
 
     const trimmedStore = newStoreName.trim();
-    const parsedActual = Number(newActualStr);
+    const parsedActual = parseFreeActualInput(newActualStr);
 
     if (!trimmedStore) {
       setFormError('Nama Toko wajib diisi.');
@@ -208,8 +243,8 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
       setFormError('Tanggal wajib diisi.');
       return;
     }
-    if (newActualStr.trim() === '' || !Number.isFinite(parsedActual) || parsedActual < 0) {
-      setFormError('Nominal Actual wajib diisi dengan angka valid (>= 0).');
+    if (parsedActual === null) {
+      setFormError('Nominal Actual wajib diisi dengan angka yang valid.');
       return;
     }
 
@@ -218,7 +253,7 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
       storeName: trimmedStore,
       monthPeriod: newMonthPeriod.trim().toUpperCase(),
       date: newDate,
-      actual: Math.round(parsedActual),
+      actual: parsedActual,
       createdAt: new Date().toISOString(),
     };
 
@@ -246,10 +281,10 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
     if (!existing) return;
 
     const trimmedStore = editStoreName.trim();
-    const parsedActual = Number(editActualStr);
+    const parsedActual = parseFreeActualInput(editActualStr);
 
-    if (!trimmedStore || !editMonthPeriod.trim() || !editDate.trim() || !Number.isFinite(parsedActual) || parsedActual < 0) {
-      onNotify?.('Nama Toko, Bulan, Tanggal, dan Actual wajib diisi dengan benar.', 'error');
+    if (!trimmedStore || !editMonthPeriod.trim() || !editDate.trim() || parsedActual === null) {
+      onNotify?.('Nama Toko, Bulan, Tanggal, dan Actual wajib diisi dengan angka yang valid.', 'error');
       return;
     }
 
@@ -258,7 +293,7 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
       storeName: trimmedStore,
       monthPeriod: editMonthPeriod.trim().toUpperCase(),
       date: editDate,
-      actual: Math.round(parsedActual),
+      actual: parsedActual,
       updatedAt: new Date().toISOString(),
     };
 
@@ -567,15 +602,14 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
                 Actual (Rp) <span className="text-rose-600">*</span>
               </label>
               <input
-                type="number"
-                min={0}
-                step="1000"
+                type="text"
+                inputMode="decimal"
                 value={newActualStr}
                 onChange={(e) => {
                   setNewActualStr(e.target.value);
                   setFormError(null);
                 }}
-                placeholder="Contoh: 15000000"
+                placeholder="Angka bebas, misal: 15250500"
                 className="w-full px-3 py-2 text-xs font-mono font-bold tabular-nums rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
@@ -785,9 +819,8 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
                         </td>
                         <td className="px-3 py-2.5 min-w-[150px]">
                           <input
-                            type="number"
-                            min={0}
-                            step="1000"
+                            type="text"
+                            inputMode="decimal"
                             value={editActualStr}
                             onChange={(e) => setEditActualStr(e.target.value)}
                             className="w-full px-2.5 py-1.5 text-xs font-mono font-extrabold text-right tabular-nums rounded-lg border border-amber-300 bg-white"
