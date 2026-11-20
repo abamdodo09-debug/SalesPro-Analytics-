@@ -682,7 +682,7 @@ export interface BaNihilIncidentRecord {
   customDendaNominal?: number;
 }
 
-export type BaDayStatus = 'report' | 'no_sell' | 'off_day';
+export type BaDayStatus = 'report' | 'no_sell' | 'off_day' | 'upcoming';
 
 export interface BaDailyDayRecord {
   dayNum: number;
@@ -709,8 +709,10 @@ export interface BaPunishmentSummaryItem {
   totalNihilDays: number;
   totalOffDays?: number;         // Total hari BA off (denda Rp 0)
   totalReportDays?: number;      // Total hari ada penjualan sell out (Report)
+  totalUpcomingDays?: number;    // Total hari yang belum berjalan dalam bulan ini (denda Rp 0)
   noSellDays: number;            // Total hari tidak ada penjualan sell out (No sell)
-  daysInMonthCount?: number;     // Total hari dalam bulan (1 - 30 hari)
+  daysInMonthCount?: number;     // Total hari kalender dalam bulan (28 - 31 hari)
+  evaluatedDaysCount?: number;   // Jumlah hari berjalan yang dievaluasi (misal 20 dari 30 hari)
   totalDendaNominal: number;     // totalNihilDays * 25.000 (excluding dispensation & off days)
   disciplineBadge: 'tertib' | 'peringatan_1' | 'peringatan_2' | 'peringatan_sp';
   incidents: BaNihilIncidentRecord[];

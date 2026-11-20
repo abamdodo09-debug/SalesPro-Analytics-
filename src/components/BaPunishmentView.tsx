@@ -35,7 +35,7 @@ import {
 } from '../types/dashboard';
 import { loadBaIncidents, saveBaIncidents } from '../services/agingAndKpiService';
 import { aggregateAreaCost } from '../utils/costCalculations';
-import { formatRupiah, formatNumber, getTrainerForRecord } from '../utils/analytics';
+import { formatRupiah, formatNumber, getTrainerForRecord, parseTransactionDate } from '../utils/analytics';
 import * as XLSX from 'xlsx';
 
 interface BaPunishmentViewProps {
@@ -158,6 +158,17 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
     return 'SEPTEMBER';
   });
 
+  const selectedYear = useMemo(() => {
+    if (filters.TAHUN && filters.TAHUN !== 'ALL') {
+      const y = Number(filters.TAHUN);
+      if (!isNaN(y) && y > 2000) return y;
+    }
+    return 2026;
+  }, [filters.TAHUN]);
+
+  // Override manual jumlah hari berjalan (null = otomatis sesuai kalender berjalan)
+  const [evaluatedDaysOverride, setEvaluatedDaysOverride] = useState<number | null>(null);
+
   // Sinkronisasi otomatis jika global filter BULAN berubah
   useEffect(() => {
     if (filters.BULAN && filters.BULAN !== 'ALL') {
@@ -167,6 +178,11 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
       }
     }
   }, [filters.BULAN]);
+
+  // Reset override hari berjalan saat bulan/tahun berganti agar otomatis akurat
+  useEffect(() => {
+    setEvaluatedDaysOverride(null);
+  }, [selectedMonth, selectedYear]);
 
   // Tarif Denda Per Hari No Sell (Default Rp 25.000, bisa diedit)
   const [finePerDayRate, setFinePerDayRate] = useState<number>(() => {
@@ -249,18 +265,15 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
     setTimeout(() => setToastMsg(null), 3200);
   };
 
-  // Jumlah Hari dalam Bulan Berjalan (September = 30 hari, dsb.)
-  const daysInSelectedMonth = useMemo(() => {
-    const m = selectedMonth.toUpperCase();
-    if (m === 'FEBRUARI') return 28;
-    if (['APRIL', 'JUNI', 'SEPTEMBER', 'NOVEMBER'].includes(m)) return 30;
-    return 31;
-  }, [selectedMonth]);
-
   const selectedMonthIndex = useMemo(() => {
     const idx = MONTHS_LIST.indexOf(selectedMonth.toUpperCase());
     return idx >= 0 ? idx : 8; // Default September = 8
   }, [selectedMonth]);
+
+  // Jumlah Hari dalam Bulan Berjalan (mengikuti tahun aktif, mis. Nov = 30, Okt = 31)
+  const daysInSelectedMonth = useMemo(() => {
+    return new Date(selectedYear, selectedMonthIndex + 1, 0).getDate();
+  }, [selectedYear, selectedMonthIndex]);
 
   // Helper: Nama Hari Bahasa Indonesia (Senin, Selasa, dll.)
   const getIndonesianDayName = (dayNum: number, monthIdx: number, year: number = 2026): string => {
@@ -295,69 +308,83 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
     }
   };
 
-  // Deteksi Penjualan Sell Out Harian per BA dari Google Sheet (Tanggal 1 s/d 30)
-  const { baDailySalesMap, storeDailySalesMap } = useMemo(() => {
+  // Deteksi Penjualan Sell Out Harian per BA dari Google Sheet + tanggal maksimal data bulan aktif
+  const { baDailySalesMap, storeDailySalesMap, maxDataDayInMonth } = useMemo(() => {
     const baMap: Record<string, Record<number, number>> = {};
     const storeMap: Record<string, Record<number, number>> = {};
+    let maxDay = 0;
 
     for (const r of records) {
       if (!r.TANGGAL) continue;
       if ((r.KET || '').toUpperCase() === 'RETURN') continue;
 
+      const parsedDate = parseTransactionDate(r);
+      const rYear = parsedDate ? parsedDate.getFullYear() : (Number(r.TAHUN) || selectedYear);
+      const rMonth = parsedDate ? parsedDate.getMonth() + 1 : 0;
+      const rDay = parsedDate ? parsedDate.getDate() : 0;
+
+      const recordMonthName = (r.BULAN || '').toUpperCase().replace(/\s*\d{4}/g, '').trim();
+      const yearMatches = !r.TAHUN || rYear === selectedYear;
+      const monthMatches =
+        yearMatches &&
+        (rMonth === selectedMonthIndex + 1 ||
+          (recordMonthName && recordMonthName === selectedMonth.toUpperCase()));
+
+      if (!monthMatches || rDay < 1 || rDay > 31) continue;
+
+      // Track tanggal transaksi terakhir di bulan terpilih
+      if (rDay > maxDay) maxDay = rDay;
+
       // Sell out check
       const isSellOut = (r.KET || '').toUpperCase().includes('SELL OUT') || !r.KET;
       if (!isSellOut) continue;
 
-      let rYear = r.TAHUN || 2026;
-      let rMonth = selectedMonthIndex + 1;
-      let rDay = 1;
-
-      const trimmed = r.TANGGAL.trim();
-      const parts = trimmed.split(/[-/]/);
-      if (parts.length === 3) {
-        if (parts[0].length === 4) {
-          rYear = parseInt(parts[0], 10);
-          rMonth = parseInt(parts[1], 10);
-          rDay = parseInt(parts[2], 10);
-        } else {
-          const p0 = parseInt(parts[0], 10);
-          const p1 = parseInt(parts[1], 10);
-          const p2 = parseInt(parts[2], 10);
-          if (p2 > 1000) {
-            rYear = p2;
-            if (p0 <= 12 && p1 <= 31) {
-              rMonth = p0;
-              rDay = p1;
-            } else {
-              rDay = p0;
-              rMonth = p1;
-            }
-          }
-        }
+      const val = r.VALUE || 0;
+      if (r.BA && r.BA !== '-' && r.BA.toUpperCase() !== 'NON BA' && r.BA.toUpperCase() !== 'STANDBY') {
+        const bKey = r.BA.trim().toLowerCase();
+        if (!baMap[bKey]) baMap[bKey] = {};
+        baMap[bKey][rDay] = (baMap[bKey][rDay] || 0) + val;
       }
-
-      const recordMonthName = (r.BULAN || '').toUpperCase().replace(/\s*2026/g, '').trim();
-      const monthMatches =
-        rMonth === selectedMonthIndex + 1 ||
-        (recordMonthName && recordMonthName === selectedMonth.toUpperCase());
-
-      if (monthMatches && rDay >= 1 && rDay <= 31) {
-        const val = r.VALUE || 0;
-        if (r.BA && r.BA !== '-' && r.BA.toUpperCase() !== 'NON BA' && r.BA.toUpperCase() !== 'STANDBY') {
-          const bKey = r.BA.trim().toLowerCase();
-          if (!baMap[bKey]) baMap[bKey] = {};
-          baMap[bKey][rDay] = (baMap[bKey][rDay] || 0) + val;
-        }
-        if (r.NAMA_STORE) {
-          const sKey = r.NAMA_STORE.trim().toLowerCase();
-          if (!storeMap[sKey]) storeMap[sKey] = {};
-          storeMap[sKey][rDay] = (storeMap[sKey][rDay] || 0) + val;
-        }
+      if (r.NAMA_STORE) {
+        const sKey = r.NAMA_STORE.trim().toLowerCase();
+        if (!storeMap[sKey]) storeMap[sKey] = {};
+        storeMap[sKey][rDay] = (storeMap[sKey][rDay] || 0) + val;
       }
     }
 
-    return { baDailySalesMap: baMap, storeDailySalesMap: storeMap };
-  }, [records, selectedMonth, selectedMonthIndex]);
+    return {
+      baDailySalesMap: baMap,
+      storeDailySalesMap: storeMap,
+      maxDataDayInMonth: maxDay,
+    };
+  }, [records, selectedMonth, selectedMonthIndex, selectedYear]);
+
+  // Hitung jumlah hari berjalan otomatis:
+  // - Bulan lampau: seluruh hari kalender bulan (30/31 hari)
+  // - Bulan berjalan (mis. Nov 2026 tgl 20): cukup hitung sampai hari berjalan (20 hari)
+  // - Bulan mendatang: 0 hari (kecuali ada transaksi tercatat)
+  const autoEvaluatedDays = useMemo(() => {
+    const now = new Date();
+    const nowYear = now.getFullYear();
+    const nowMonthIdx = now.getMonth();
+    const nowDay = now.getDate();
+
+    if (
+      selectedYear < nowYear ||
+      (selectedYear === nowYear && selectedMonthIndex < nowMonthIdx)
+    ) {
+      return daysInSelectedMonth;
+    }
+    if (selectedYear === nowYear && selectedMonthIndex === nowMonthIdx) {
+      return Math.min(daysInSelectedMonth, Math.max(1, nowDay, maxDataDayInMonth));
+    }
+    return maxDataDayInMonth > 0 ? Math.min(daysInSelectedMonth, maxDataDayInMonth) : 0;
+  }, [selectedYear, selectedMonthIndex, daysInSelectedMonth, maxDataDayInMonth]);
+
+  const effectiveEvaluatedDays =
+    evaluatedDaysOverride !== null
+      ? Math.max(0, Math.min(daysInSelectedMonth, evaluatedDaysOverride))
+      : autoEvaluatedDays;
 
   // Helper: Deteksi Trainer ARA vs RATIH
   const resolveTrainerForBa = (
@@ -501,12 +528,13 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
       const dailySchedule: BaDailyDayRecord[] = [];
 
       for (let day = 1; day <= daysInSelectedMonth; day++) {
-        const dayName = getIndonesianDayName(day, selectedMonthIndex, 2026);
-        const dateStr = `2026-${String(selectedMonthIndex + 1).padStart(2, '0')}-${String(
+        const dayName = getIndonesianDayName(day, selectedMonthIndex, selectedYear);
+        const dateStr = `${selectedYear}-${String(selectedMonthIndex + 1).padStart(2, '0')}-${String(
           day
         ).padStart(2, '0')}`;
         const actualSales = actualBaDays[day] || actualStoreDays[day] || 0;
         const hasActualSellOut = actualSales > 0;
+        const isFutureDay = day > effectiveEvaluatedDays;
 
         const override = overridesForBa[day];
 
@@ -533,8 +561,21 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
             isCustomOverride: true,
             note: override.note,
           });
+        } else if (isFutureDay) {
+          // Hari setelah hari berjalan (belum berjalan -> TIDAK dikenakan denda Rp 0)
+          dailySchedule.push({
+            dayNum: day,
+            dateStr,
+            dayName,
+            status: 'upcoming',
+            dendaNominal: 0,
+            sellOutAmount: 0,
+            isSystemDetected: true,
+            isCustomOverride: false,
+            note: 'Belum berjalan',
+          });
         } else {
-          // Deteksi otomatis sistem:
+          // Deteksi otomatis sistem pada hari berjalan (1 s/d effectiveEvaluatedDays):
           // Jika ada penjualan sell out -> Report (denda Rp 0)
           // Jika tidak ada penjualan sell out -> No sell (denda Rp 25.000)
           if (hasActualSellOut) {
@@ -566,6 +607,7 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
       const reportDays = dailySchedule.filter((s) => s.status === 'report').length;
       const noSellDays = dailySchedule.filter((s) => s.status === 'no_sell').length;
       const offDays = dailySchedule.filter((s) => s.status === 'off_day').length;
+      const upcomingDays = dailySchedule.filter((s) => s.status === 'upcoming').length;
 
       const totalCalculatedDenda = dailySchedule
         .filter((s) => s.status === 'no_sell')
@@ -604,8 +646,10 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
         totalNihilDays: noSellDays,
         totalOffDays: offDays,
         totalReportDays: reportDays,
+        totalUpcomingDays: upcomingDays,
         noSellDays,
         daysInMonthCount: daysInSelectedMonth,
+        evaluatedDaysCount: effectiveEvaluatedDays,
         totalDendaNominal: effectiveDenda,
         disciplineBadge,
         incidents: incidents.filter((i) => i.baName.toLowerCase() === baKey),
@@ -625,7 +669,9 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
     deletedBaKeys,
     customBaConfigs,
     selectedMonth,
+    selectedYear,
     daysInSelectedMonth,
+    effectiveEvaluatedDays,
     selectedMonthIndex,
     baDailyOverrides,
     baDailySalesMap,
@@ -675,15 +721,15 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
     );
   };
 
-  // Handler: Jadwalkan Hari Minggu Jadi Off Day (Bebas Denda)
+  // Handler: Jadwalkan Hari Minggu Jadi Off Day (Bebas Denda) hingga hari berjalan
   const handleSetSundaysAsOff = (baName: string) => {
     const baKey = baName.trim().toLowerCase();
     const storageKey = `${selectedMonth}_${baKey}`;
     const existingForBa = { ...(baDailyOverrides[storageKey] || {}) };
     let count = 0;
 
-    for (let d = 1; d <= daysInSelectedMonth; d++) {
-      const dayName = getIndonesianDayName(d, selectedMonthIndex, 2026);
+    for (let d = 1; d <= effectiveEvaluatedDays; d++) {
+      const dayName = getIndonesianDayName(d, selectedMonthIndex, selectedYear);
       if (dayName === 'Minggu') {
         existingForBa[d] = {
           ...existingForBa[d],
@@ -703,13 +749,13 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
     showToast(`${count} hari Minggu di ${selectedMonth} diset sebagai "Off day" (Bebas Denda)!`);
   };
 
-  // Handler: Set Semua Hari Jadi Report
+  // Handler: Set Semua Hari Berjalan Jadi Report
   const handleSetAllDaysReport = (baName: string) => {
     const baKey = baName.trim().toLowerCase();
     const storageKey = `${selectedMonth}_${baKey}`;
     const existingForBa = { ...(baDailyOverrides[storageKey] || {}) };
 
-    for (let d = 1; d <= daysInSelectedMonth; d++) {
+    for (let d = 1; d <= effectiveEvaluatedDays; d++) {
       existingForBa[d] = {
         ...existingForBa[d],
         status: 'report',
@@ -722,7 +768,7 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
       [storageKey]: existingForBa,
     };
     saveBaDailyOverrides(updatedOverrides);
-    showToast(`Seluruh 30 hari untuk ${baName} diatur menjadi "Report" (Aktif)!`);
+    showToast(`Seluruh ${effectiveEvaluatedDays} hari berjalan untuk ${baName} diatur menjadi "Report" (Aktif)!`);
   };
 
   // Handler: Reset Riwayat Kehadiran BA Sesuai Sheet
@@ -1043,6 +1089,7 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
       'Sales',
       'SPV',
       'Periode Bulan',
+      'Hari Berjalan Dievaluasi',
       'Hari Report (Ada Sell Out)',
       'Hari No Sell (Tanpa Penjualan)',
       'Hari Off Day (Libur Resmi)',
@@ -1064,7 +1111,8 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
       b.region,
       b.salesName,
       b.spvName,
-      `${selectedMonth} 2026`,
+      `${selectedMonth} ${selectedYear}`,
+      `${b.evaluatedDaysCount ?? effectiveEvaluatedDays} / ${b.daysInMonthCount ?? daysInSelectedMonth} Hari`,
       b.totalReportDays || 0,
       b.noSellDays || 0,
       b.totalOffDays || 0,
@@ -1084,7 +1132,7 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
 
     const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
     XLSX.utils.book_append_sheet(wb, ws, `Evaluasi_${selectedMonth}`);
-    XLSX.writeFile(wb, `Evaluasi_Kedisiplinan_Gaji_BA_${selectedMonth}_2026.xlsx`);
+    XLSX.writeFile(wb, `Evaluasi_Kedisiplinan_Gaji_BA_${selectedMonth}_${selectedYear}.xlsx`);
     showToast('File Excel laporan evaluasi kedisiplinan BA berhasil diunduh!');
   };
 
@@ -1123,10 +1171,15 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
     }
   };
 
-  // Ambil data detail BA yang sedang dibuka di modal history 30 hari
+  // Ambil data detail BA yang sedang dibuka di modal history
   const liveBaHistoryData = useMemo(() => {
     if (!selectedBaFor30DayHistory) return null;
     return (
+      punishmentList.find(
+        (b) =>
+          b.baName === selectedBaFor30DayHistory.baName &&
+          b.storeName === selectedBaFor30DayHistory.storeName
+      ) ||
       punishmentList.find((b) => b.baName === selectedBaFor30DayHistory.baName) ||
       selectedBaFor30DayHistory
     );
@@ -1151,14 +1204,17 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
                 Sistem Otomatis Evaluasi Penjualan Harian
               </span>
               <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-slate-800 text-slate-300 border border-slate-700">
-                Periode: 1 s/d {daysInSelectedMonth} {selectedMonth} 2026
+                Periode Berjalan: 1 s/d {effectiveEvaluatedDays} {selectedMonth} {selectedYear} ({effectiveEvaluatedDays}/{daysInSelectedMonth} Hari)
               </span>
             </div>
             <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight">
               Daftar Evaluasi Kedisiplinan &amp; Gaji Bersih Beauty Advisor (BA)
             </h2>
             <p className="text-xs text-rose-200/80 mt-1 max-w-3xl leading-relaxed">
-              Sistem secara otomatis mengevaluasi pelaporan penjualan sell out dari tanggal 1 sampai {daysInSelectedMonth} sesuai bulan berjalan. Jika tidak ada penjualan sell out (<strong>No sell</strong>), BA dikenakan denda sebesar <strong>{formatRupiah(finePerDayRate)}</strong> per hari. Status dapat diedit per hari menjadi <strong>Report</strong>, <strong>No sell</strong>, atau <strong>Off day</strong> (hari libur/off resmi bebas denda).
+              Sistem mengevaluasi pelaporan penjualan sell out sesuai <strong>hari berjalan</strong> (tanggal 1 s/d {effectiveEvaluatedDays} dari {daysInSelectedMonth} hari bulan {selectedMonth}). Jika tidak ada penjualan sell out (<strong>No sell</strong>), BA dikenakan denda sebesar <strong>{formatRupiah(finePerDayRate)}</strong> per hari.
+              {effectiveEvaluatedDays < daysInSelectedMonth && (
+                <> Sisa tanggal {effectiveEvaluatedDays + 1} s/d {daysInSelectedMonth} belum berjalan sehingga <strong>tidak dikenakan denda (Rp 0)</strong>.</>
+              )}
             </p>
           </div>
 
@@ -1174,7 +1230,30 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
               >
                 {MONTHS_LIST.map((m) => (
                   <option key={m} value={m} className="bg-slate-900 text-white font-bold">
-                    {m} 2026 ({m === 'FEBRUARI' ? '28' : ['APRIL', 'JUNI', 'SEPTEMBER', 'NOVEMBER'].includes(m) ? '30' : '31'} Hari)
+                    {m} {selectedYear} ({m === 'FEBRUARI' ? (selectedYear % 4 === 0 ? '29' : '28') : ['APRIL', 'JUNI', 'SEPTEMBER', 'NOVEMBER'].includes(m) ? '30' : '31'} Hari)
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Filter Hari Berjalan */}
+            <div className="flex items-center gap-1.5 bg-white/10 px-3 py-1.5 rounded-xl border border-white/20">
+              <Clock className="w-3.5 h-3.5 text-amber-300" />
+              <span className="text-[11px] font-bold text-rose-200 whitespace-nowrap">Hari Berjalan:</span>
+              <select
+                value={evaluatedDaysOverride === null ? 'AUTO' : String(evaluatedDaysOverride)}
+                onChange={(e) =>
+                  setEvaluatedDaysOverride(e.target.value === 'AUTO' ? null : Number(e.target.value))
+                }
+                className="bg-transparent text-xs font-black text-white focus:outline-none cursor-pointer font-mono tabular-nums"
+                title="Atur batas tanggal evaluasi hari berjalan"
+              >
+                <option value="AUTO" className="bg-slate-900 text-white font-bold">
+                  Otomatis ({autoEvaluatedDays}/{daysInSelectedMonth} Hr)
+                </option>
+                {Array.from({ length: daysInSelectedMonth }, (_, i) => i + 1).map((d) => (
+                  <option key={d} value={String(d)} className="bg-slate-900 text-white font-bold">
+                    1 s/d {d} ({d} Hari)
                   </option>
                 ))}
               </select>
@@ -1217,7 +1296,7 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
         {/* Formula Box & Petunjuk Keterangan */}
         <div className="mt-4 p-3 rounded-xl bg-black/40 border border-rose-500/20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs font-mono">
           <div className="text-rose-200">
-            <strong>Formula Gaji Bersih:</strong> Gaji Bersih = Gaji Pokok - (Hari No Sell &times; {formatRupiah(finePerDayRate)})
+            <strong>Formula Gaji Bersih ({effectiveEvaluatedDays} Hari Berjalan):</strong> Gaji Bersih = Gaji Pokok - (Hari No Sell &times; {formatRupiah(finePerDayRate)})
           </div>
           <div className="flex items-center gap-2 text-[11px] text-slate-300 flex-wrap">
             <span className="flex items-center gap-1">
@@ -1234,6 +1313,15 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
               <span className="w-2.5 h-2.5 rounded-full bg-sky-400 inline-block"></span>
               <strong>Off day:</strong> Libur resmi (Bebas denda)
             </span>
+            {effectiveEvaluatedDays < daysInSelectedMonth && (
+              <>
+                <span>&bull;</span>
+                <span className="flex items-center gap-1">
+                  <span className="w-2.5 h-2.5 rounded-full bg-slate-400 inline-block"></span>
+                  <strong>Belum Berjalan:</strong> Tgl {effectiveEvaluatedDays + 1}–{daysInSelectedMonth} (Rp 0)
+                </span>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -1307,10 +1395,10 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
           <div>
             <h3 className="text-sm sm:text-base font-extrabold text-slate-900 flex items-center gap-2">
               <Users className="w-4 h-4 text-rose-600" />
-              Daftar Evaluasi Kedisiplinan &amp; Gaji Bersih Beauty Advisor (BA) &bull; {selectedMonth} 2026
+              Daftar Evaluasi Kedisiplinan &amp; Gaji Bersih Beauty Advisor (BA) &bull; {selectedMonth} {selectedYear}
             </h3>
             <p className="text-xs text-slate-500 font-medium mt-0.5">
-              Klik tombol <strong>"📅 Kalender &amp; History (1-{daysInSelectedMonth})"</strong> untuk memeriksa dan mengedit status harian (Report, No sell, Off day).
+              Denda dihitung hanya untuk <strong>{effectiveEvaluatedDays} hari berjalan</strong> (1–{effectiveEvaluatedDays} {selectedMonth} dari total {daysInSelectedMonth} hari). Klik <strong>&quot;History&quot;</strong> untuk memeriksa &amp; mengedit status harian.
             </p>
           </div>
 
@@ -1416,7 +1504,9 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
                 <th className="py-3 px-3">Counter Toko</th>
                 <th className="py-3 px-3 text-center">Trainer</th>
                 <th className="py-3 px-3">Coveran Sales &amp; Area</th>
-                <th className="py-3 px-3 text-center">Rekap Kehadiran (1-{daysInSelectedMonth} {selectedMonth})</th>
+                <th className="py-3 px-3 text-center">
+                  Rekap Kehadiran (1-{effectiveEvaluatedDays} {selectedMonth})
+                </th>
                 <th className="py-3 px-3 text-center">Hari No Sell (Tanpa Sell Out)</th>
                 <th className="py-3 px-3 text-center">Tingkat Disiplin</th>
                 <th className="py-3 px-3 text-right">Gaji Pokok</th>
@@ -1543,7 +1633,7 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
                         <button
                           onClick={() => setSelectedBaFor30DayHistory(ba)}
                           className="px-2 py-1 text-xs font-bold text-indigo-700 hover:text-white bg-indigo-50 hover:bg-indigo-600 border border-indigo-200 rounded-lg cursor-pointer transition-all flex items-center gap-1 shadow-2xs"
-                          title="Buka Kalender & History Status Harian 1-30"
+                          title={`Buka Kalender & History Status Harian 1-${daysInSelectedMonth} (Berjalan: ${effectiveEvaluatedDays} Hari)`}
                         >
                           <CalendarDays className="w-3.5 h-3.5" />
                           <span>History</span>
@@ -1587,7 +1677,7 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
                   <h3 className="text-base sm:text-lg font-black text-slate-900 flex items-center gap-2">
                     Riwayat Kehadiran &amp; Evaluasi Sell Out: {liveBaHistoryData.baName}
                     <span className="px-2 py-0.5 rounded-full text-xs font-mono font-bold bg-indigo-100 text-indigo-800">
-                      {selectedMonth} 2026
+                      {selectedMonth} {selectedYear} ({liveBaHistoryData.evaluatedDaysCount ?? effectiveEvaluatedDays}/{liveBaHistoryData.daysInMonthCount ?? daysInSelectedMonth} Hr)
                     </span>
                   </h3>
                   <p className="text-[11px] text-slate-500 mt-0.5">
@@ -1619,6 +1709,12 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
                   <Coffee className="w-3.5 h-3.5 text-sky-600" />
                   Off day: {liveBaHistoryData.totalOffDays || 0} Hari (Rp 0)
                 </span>
+                {(liveBaHistoryData.totalUpcomingDays ?? 0) > 0 && (
+                  <span className="px-2.5 py-1 rounded-lg bg-slate-200/80 text-slate-700 border border-slate-300 flex items-center gap-1">
+                    <Clock className="w-3.5 h-3.5 text-slate-500" />
+                    Belum Berjalan: {liveBaHistoryData.totalUpcomingDays} Hari (Rp 0)
+                  </span>
+                )}
                 <span className="px-2.5 py-1 rounded-lg bg-slate-200 text-slate-900 border border-slate-300 font-mono">
                   Gaji Bersih: {formatRupiah(liveBaHistoryData.totalTakeHomePay)}
                 </span>
@@ -1630,7 +1726,7 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
                   type="button"
                   onClick={() => handleSetSundaysAsOff(liveBaHistoryData.baName)}
                   className="px-2.5 py-1.5 text-[11px] font-bold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded-lg cursor-pointer flex items-center gap-1"
-                  title="Otomatis tandai semua hari Minggu di bulan ini sebagai Off Day (Bebas Denda)"
+                  title="Otomatis tandai semua hari Minggu di hari berjalan sebagai Off Day (Bebas Denda)"
                 >
                   <Coffee className="w-3 h-3" />
                   <span>Set Hari Minggu Off</span>
@@ -1639,7 +1735,7 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
                   type="button"
                   onClick={() => handleSetAllDaysReport(liveBaHistoryData.baName)}
                   className="px-2.5 py-1.5 text-[11px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg cursor-pointer flex items-center gap-1"
-                  title="Tandai semua hari jadi Report"
+                  title="Tandai semua hari berjalan jadi Report"
                 >
                   <Check className="w-3 h-3" />
                   <span>Set Semua Report</span>
@@ -1659,20 +1755,21 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
             {/* Petunjuk Penggunaan */}
             <div className="mt-2.5 px-1 shrink-0 flex items-center justify-between text-[11px] text-slate-500">
               <span>
-                💡 Klik salah satu tombol (<strong>Report</strong>, <strong>No sell</strong>, atau <strong>Off day</strong>) pada tanggal yang ingin diubah. Perhitungan denda dan gaji bersih langsung diperbarui otomatis.
+                Klik salah satu tombol (<strong>Report</strong>, <strong>No sell</strong>, atau <strong>Off day</strong>) pada tanggal yang ingin diubah. Hari yang belum berjalan otomatis bebas denda.
               </span>
               <span className="font-mono text-slate-700 font-bold">
                 Tarif Denda: {formatRupiah(finePerDayRate)} / Hari No Sell
               </span>
             </div>
 
-            {/* Grid Kalender 30 Hari */}
+            {/* Grid Kalender Bulan */}
             <div className="overflow-y-auto flex-1 mt-3 pr-1 border border-slate-200 rounded-xl p-2 bg-slate-100/60">
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2">
                 {liveBaHistoryData.dailySchedule?.map((dayRecord) => {
                   const isReport = dayRecord.status === 'report';
                   const isNoSell = dayRecord.status === 'no_sell';
                   const isOffDay = dayRecord.status === 'off_day';
+                  const isUpcoming = dayRecord.status === 'upcoming';
                   const isSunday = dayRecord.dayName === 'Minggu';
 
                   return (
@@ -1683,7 +1780,9 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
                           ? 'bg-white border-emerald-300 shadow-2xs ring-1 ring-emerald-200/50'
                           : isNoSell
                           ? 'bg-rose-50/70 border-rose-300 shadow-2xs ring-1 ring-rose-200/50'
-                          : 'bg-sky-50/70 border-sky-300 shadow-2xs ring-1 ring-sky-200/50'
+                          : isOffDay
+                          ? 'bg-sky-50/70 border-sky-300 shadow-2xs ring-1 ring-sky-200/50'
+                          : 'bg-slate-50/90 border-slate-200 opacity-85'
                       }`}
                     >
                       <div>
@@ -1730,6 +1829,17 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
                               </span>
                               <div className="text-[11px] font-mono font-bold text-sky-700 mt-1">
                                 Bebas Denda (Rp 0)
+                              </div>
+                            </div>
+                          )}
+
+                          {isUpcoming && (
+                            <div>
+                              <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-slate-200 text-slate-700 border border-slate-300 inline-block">
+                                Belum Berjalan
+                              </span>
+                              <div className="text-[11px] font-mono font-bold text-slate-500 mt-1">
+                                Tidak Dihitung Denda (Rp 0)
                               </div>
                             </div>
                           )}
@@ -1804,10 +1914,13 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
             <div className="flex flex-wrap items-center justify-between gap-3 pt-3.5 border-t border-slate-200 mt-3 shrink-0">
               <div className="text-xs text-slate-600">
                 <span>
-                  Total Evaluasi: <strong>{liveBaHistoryData.daysInMonthCount} Hari</strong> &bull;{' '}
+                  Evaluasi Berjalan: <strong>{liveBaHistoryData.evaluatedDaysCount ?? effectiveEvaluatedDays} / {liveBaHistoryData.daysInMonthCount} Hari</strong> &bull;{' '}
                   <strong className="text-emerald-700">{liveBaHistoryData.totalReportDays} Report</strong> &bull;{' '}
                   <strong className="text-rose-700">{liveBaHistoryData.noSellDays} No sell</strong> &bull;{' '}
                   <strong className="text-sky-700">{liveBaHistoryData.totalOffDays} Off day</strong>
+                  {(liveBaHistoryData.totalUpcomingDays ?? 0) > 0 && (
+                    <> &bull; <strong className="text-slate-500">{liveBaHistoryData.totalUpcomingDays} Belum Berjalan</strong></>
+                  )}
                 </span>
               </div>
 
@@ -1823,7 +1936,7 @@ export const BaPunishmentView: React.FC<BaPunishmentViewProps> = ({ records, fil
                   type="button"
                   onClick={() => {
                     setSelectedBaFor30DayHistory(null);
-                    showToast(`Riwayat evaluasi 30 hari untuk ${liveBaHistoryData.baName} berhasil disimpan!`);
+                    showToast(`Riwayat evaluasi untuk ${liveBaHistoryData.baName} berhasil disimpan!`);
                   }}
                   className="px-5 py-2 font-black text-white bg-emerald-600 hover:bg-emerald-500 rounded-xl shadow-md flex items-center gap-1.5 cursor-pointer"
                 >

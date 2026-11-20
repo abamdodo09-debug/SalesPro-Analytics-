@@ -132,6 +132,13 @@ export const SalesAnalysis: React.FC<SalesAnalysisProps> = ({ records, filters }
     return aggregateByDimension(effectiveRecords, 'SALES');
   }, [effectiveRecords]);
 
+  const resolveSalesTarget = (map: Record<string, number>, name: string, fallback: number): number => {
+    if (map[name] !== undefined) return map[name];
+    const upper = name.trim().toUpperCase();
+    const matchedKey = Object.keys(map).find((k) => k.trim().toUpperCase() === upper);
+    return matchedKey !== undefined ? map[matchedKey] : fallback;
+  };
+
   // Combine with manual Sell In overrides and dynamic Target Sell In / Sell Out
   const salesData = useMemo(() => {
     const withOverrides = rawSalesData.map((s) => {
@@ -150,12 +157,10 @@ export const SalesAnalysis: React.FC<SalesAnalysisProps> = ({ records, filters }
         }
       }
 
-      let targetVal: number;
-      if (ketFilter === 'SELL OUT') {
-        targetVal = customSellOutTargets[s.name] !== undefined ? customSellOutTargets[s.name] : DEFAULT_SALES_SELLOUT_TARGET;
-      } else {
-        targetVal = customSellInTargets[s.name] !== undefined ? customSellInTargets[s.name] : DEFAULT_SALES_TARGET;
-      }
+      const targetVal =
+        ketFilter === 'SELL OUT'
+          ? resolveSalesTarget(customSellOutTargets, s.name, DEFAULT_SALES_SELLOUT_TARGET)
+          : resolveSalesTarget(customSellInTargets, s.name, DEFAULT_SALES_TARGET);
 
       const achievementPct = targetVal > 0 ? (effectiveTotalValue / targetVal) * 100 : 0;
       return {
@@ -175,7 +180,11 @@ export const SalesAnalysis: React.FC<SalesAnalysisProps> = ({ records, filters }
         ...item,
         contributionPercent: grandTotal > 0 ? (item.totalValue / grandTotal) * 100 : 0,
       }))
-      .sort((a, b) => b.totalValue - a.totalValue);
+      .sort((a, b) => {
+        const pctDiff = (b.achievementPercent || 0) - (a.achievementPercent || 0);
+        if (Math.abs(pctDiff) > 0.0001) return pctDiff;
+        return b.totalValue - a.totalValue;
+      });
   }, [
     rawSalesData,
     ketFilter,
@@ -236,8 +245,8 @@ export const SalesAnalysis: React.FC<SalesAnalysisProps> = ({ records, filters }
     setEditSellInActualInput(manualVal !== undefined ? manualVal : sheetVal);
     setClearManualSellInOnSave(false);
 
-    const curIn = customSellInTargets[salesName] !== undefined ? customSellInTargets[salesName] : DEFAULT_SALES_TARGET;
-    const curOut = customSellOutTargets[salesName] !== undefined ? customSellOutTargets[salesName] : DEFAULT_SALES_SELLOUT_TARGET;
+    const curIn = resolveSalesTarget(customSellInTargets, salesName, DEFAULT_SALES_TARGET);
+    const curOut = resolveSalesTarget(customSellOutTargets, salesName, DEFAULT_SALES_SELLOUT_TARGET);
     setTargetSellInInput(curIn);
     setTargetSellOutInput(curOut);
   };
@@ -278,7 +287,7 @@ export const SalesAnalysis: React.FC<SalesAnalysisProps> = ({ records, filters }
             </h2>
           </div>
           <p className="text-xs text-slate-500 mt-0.5 font-medium">
-            Evaluasi target &amp; pencapaian ({getMonthDisplayLabel(activeMonth)}), kuantitas, kontribusi, dan bauran produk ({ketFilter === 'ALL' ? 'Konsolidasi' : ketFilter})
+            Peringkat juara diurutkan berdasarkan <strong>Persentase Pencapaian (%) tertinggi</strong> ({getMonthDisplayLabel(activeMonth)} • {ketFilter === 'ALL' ? 'Konsolidasi' : ketFilter})
           </p>
         </div>
 
@@ -391,30 +400,35 @@ export const SalesAnalysis: React.FC<SalesAnalysisProps> = ({ records, filters }
                   </div>
                 </div>
 
-                <div className="mt-4 p-3 bg-white/95 rounded-xl border border-slate-200/80 shadow-2xs">
+                <div className="mt-4 pt-3 border-t border-slate-200/70">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[11px] font-semibold text-slate-500">
-                      {ketFilter === 'SELL IN' ? 'Realisasi Sell In:' : ketFilter === 'SELL OUT' ? 'Realisasi Sell Out:' : 'Total Penjualan:'}
+                      Pencapaian Persentase:
                     </span>
                     {sales.hasManualSellIn && (
-                      <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300">
-                        Manual
+                      <span className="text-[10px] font-bold text-amber-700">
+                        Edit Manual
                       </span>
                     )}
                   </div>
-                  <div className="text-xl font-extrabold font-mono text-slate-950 tabular-nums mt-0.5">
-                    {formatRupiah(sales.totalValue)}
+                  <div className="flex items-baseline justify-between gap-2 mt-0.5">
+                    <span className="text-2xl font-extrabold font-mono text-emerald-700 tabular-nums">
+                      {formatPercent(sales.achievementPercent || 0, false)}
+                    </span>
+                    <span className="text-xs font-mono font-bold text-slate-700 tabular-nums">
+                      {formatRupiah(sales.totalValue)}
+                    </span>
                   </div>
                 </div>
 
-                <div className="mt-4 space-y-2">
+                <div className="mt-3 space-y-2">
                   <div className="flex justify-between items-center text-xs">
                     <span className="text-slate-500 font-medium">
                       Target {ketFilter === 'SELL OUT' ? 'Sell Out' : 'Sell In'}:{' '}
-                      <strong className="tabular-nums">{formatRupiah(sales.target || 0, true)}</strong>
+                      <strong className="tabular-nums text-slate-800">{formatRupiah(sales.target || 0, true)}</strong>
                     </span>
-                    <span className="font-mono font-extrabold text-emerald-700 tabular-nums">
-                      {formatPercent(sales.achievementPercent || 0, false)}
+                    <span className="text-[11px] text-slate-500 font-medium">
+                      {ketFilter === 'SELL IN' ? 'Realisasi Sell In' : ketFilter === 'SELL OUT' ? 'Realisasi Sell Out' : 'Total Penjualan'}
                     </span>
                   </div>
                   <div className="w-full bg-slate-200/80 h-2.5 rounded-full overflow-hidden shadow-inner">

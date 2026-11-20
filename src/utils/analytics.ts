@@ -1207,7 +1207,8 @@ export function aggregateTimeframe(
 export function calculateComparisonGrowth(
   allRecords: TransactionRecord[],
   mode: 'wow' | 'mom' | 'yoy',
-  selectedFilters: DashboardFilters
+  selectedFilters: DashboardFilters,
+  dayRange?: { startDay?: number; endDay?: number }
 ): ComparisonGrowthResult {
   // Determine target years and subsets
   let currentRecords: TransactionRecord[] = [];
@@ -1215,26 +1216,98 @@ export function calculateComparisonGrowth(
   let currentPeriodLabel = '';
   let previousPeriodLabel = '';
 
-  const activeYear = selectedFilters.TAHUN !== 'ALL' ? Number(selectedFilters.TAHUN) : 2026;
-
   // Filter helper for non-temporal dimensions (preserves sales, brand, store, etc. across compared periods)
   const matchOtherFilters = (r: TransactionRecord) => {
-    if (selectedFilters.BRAND && selectedFilters.BRAND !== 'ALL' && r.BRAND !== selectedFilters.BRAND) return false;
-    if (selectedFilters.SALES && selectedFilters.SALES !== 'ALL' && r.SALES !== selectedFilters.SALES) return false;
-    if (selectedFilters.SPV && selectedFilters.SPV !== 'ALL' && r.SPV !== selectedFilters.SPV) return false;
-    if (selectedFilters.REGION && selectedFilters.REGION !== 'ALL' && r.REGION !== selectedFilters.REGION) return false;
-    if (selectedFilters.NAMA_STORE && selectedFilters.NAMA_STORE !== 'ALL' && r.NAMA_STORE !== selectedFilters.NAMA_STORE) return false;
-    if (selectedFilters.KATEGORI && selectedFilters.KATEGORI !== 'ALL' && r.KATEGORI !== selectedFilters.KATEGORI) return false;
-    if (selectedFilters.KET && selectedFilters.KET !== 'ALL' && r.KET !== selectedFilters.KET) return false;
-    if (selectedFilters.SKU && selectedFilters.SKU !== 'ALL' && r.SKU !== selectedFilters.SKU) return false;
+    if (selectedFilters.BRAND && selectedFilters.BRAND !== 'ALL') {
+      if ((r.BRAND || '').trim().toUpperCase() !== selectedFilters.BRAND.trim().toUpperCase()) return false;
+    }
+    if (selectedFilters.SALES && selectedFilters.SALES !== 'ALL') {
+      if ((r.SALES || '').trim().toUpperCase() !== selectedFilters.SALES.trim().toUpperCase()) return false;
+    }
+    if (selectedFilters.TRAINER && selectedFilters.TRAINER !== 'ALL') {
+      if (getTrainerForRecord(r).trim().toUpperCase() !== selectedFilters.TRAINER.trim().toUpperCase()) return false;
+    }
+    if (selectedFilters.SPV && selectedFilters.SPV !== 'ALL') {
+      if ((r.SPV || '').trim().toUpperCase() !== selectedFilters.SPV.trim().toUpperCase()) return false;
+    }
+    if (selectedFilters.REGION && selectedFilters.REGION !== 'ALL') {
+      if ((r.REGION || '').trim().toUpperCase() !== selectedFilters.REGION.trim().toUpperCase()) return false;
+    }
+    if (selectedFilters.NAMA_STORE && selectedFilters.NAMA_STORE !== 'ALL') {
+      if ((r.NAMA_STORE || '').trim().toUpperCase() !== selectedFilters.NAMA_STORE.trim().toUpperCase()) return false;
+    }
+    if (selectedFilters.KATEGORI && selectedFilters.KATEGORI !== 'ALL') {
+      if (resolveCategory(r).trim().toUpperCase() !== selectedFilters.KATEGORI.trim().toUpperCase()) return false;
+    }
+    if (selectedFilters.STATUS_PRODUK && selectedFilters.STATUS_PRODUK !== 'ALL') {
+      if (resolveProductStatus(r) !== selectedFilters.STATUS_PRODUK) return false;
+    }
+    if (selectedFilters.KET && selectedFilters.KET !== 'ALL') {
+      if ((r.KET || '').trim().toUpperCase() !== selectedFilters.KET.trim().toUpperCase()) return false;
+    }
+    if (selectedFilters.SKU && selectedFilters.SKU !== 'ALL') {
+      const qSku = selectedFilters.SKU.toLowerCase();
+      const matchSku =
+        (r.SKU || '').toLowerCase().includes(qSku) ||
+        (r.NO_SKU || '').toLowerCase().includes(qSku) ||
+        (r.SPU || '').toLowerCase().includes(qSku);
+      if (!matchSku) return false;
+    }
+    if (selectedFilters.searchQuery && selectedFilters.searchQuery.trim()) {
+      const q = selectedFilters.searchQuery.trim().toLowerCase();
+      const trainerName = getTrainerForRecord(r).toLowerCase();
+      const resolvedCat = resolveCategory(r).toLowerCase();
+      const match =
+        (r.TANGGAL && r.TANGGAL.toLowerCase().includes(q)) ||
+        (r.BULAN && r.BULAN.toLowerCase().includes(q)) ||
+        (r.SKU && r.SKU.toLowerCase().includes(q)) ||
+        resolvedCat.includes(q) ||
+        (r.STATUS_PRODUK && r.STATUS_PRODUK.toLowerCase().includes(q)) ||
+        (r.NAMA_STORE && r.NAMA_STORE.toLowerCase().includes(q)) ||
+        (r.SALES && r.SALES.toLowerCase().includes(q)) ||
+        trainerName.includes(q) ||
+        (r.SPV && r.SPV.toLowerCase().includes(q)) ||
+        (r.BRAND && r.BRAND.toLowerCase().includes(q)) ||
+        (r.REGION && r.REGION.toLowerCase().includes(q)) ||
+        (r.NO_SKU && r.NO_SKU.toLowerCase().includes(q)) ||
+        (r.SPU && r.SPU.toLowerCase().includes(q)) ||
+        (r.BA && r.BA.toLowerCase().includes(q)) ||
+        (r.COVER_AREA && r.COVER_AREA.toLowerCase().includes(q)) ||
+        (r.KET && r.KET.toLowerCase().includes(q));
+      if (!match) return false;
+    }
     return true;
   };
+
+  const activeYear = (() => {
+    if (selectedFilters.TAHUN && selectedFilters.TAHUN !== 'ALL') {
+      return Number(selectedFilters.TAHUN) || 2026;
+    }
+    const matchingYears = Array.from(
+      new Set(
+        allRecords
+          .filter((r) => matchOtherFilters(r))
+          .map((r) => Number(r.TAHUN))
+          .filter((y) => !isNaN(y) && y > 2000)
+      )
+    ).sort((a, b) => b - a);
+    if (matchingYears.length > 0) return matchingYears[0];
+    const allYears = Array.from(
+      new Set(allRecords.map((r) => Number(r.TAHUN)).filter((y) => !isNaN(y) && y > 2000))
+    ).sort((a, b) => b - a);
+    return allYears[0] || 2026;
+  })();
 
   if (mode === 'wow') {
     // Week vs Week
     const activeWeeks = Array.from(new Set(
       allRecords
-        .filter((r) => r.TAHUN === activeYear && (selectedFilters.BULAN === 'ALL' || r.BULAN === selectedFilters.BULAN) && matchOtherFilters(r))
+        .filter(
+          (r) =>
+            Number(r.TAHUN) === activeYear &&
+            (selectedFilters.BULAN === 'ALL' || (r.BULAN || '').trim().toUpperCase() === selectedFilters.BULAN.trim().toUpperCase()) &&
+            matchOtherFilters(r)
+        )
         .map((r) => r.weekNumber || 39)
     )).sort((a, b) => b - a);
 
@@ -1244,21 +1317,27 @@ export function calculateComparisonGrowth(
     currentPeriodLabel = `Minggu ${currentWeek}`;
     previousPeriodLabel = `Minggu ${previousWeek}`;
 
-    currentRecords = allRecords.filter((r) => r.TAHUN === activeYear && r.weekNumber === currentWeek && matchOtherFilters(r));
-    previousRecords = allRecords.filter((r) => r.TAHUN === activeYear && r.weekNumber === previousWeek && matchOtherFilters(r));
+    currentRecords = allRecords.filter((r) => Number(r.TAHUN) === activeYear && r.weekNumber === currentWeek && matchOtherFilters(r));
+    previousRecords = allRecords.filter((r) => Number(r.TAHUN) === activeYear && r.weekNumber === previousWeek && matchOtherFilters(r));
   } else if (mode === 'mom') {
     // Month vs Month (MoM)
     let targetMonth = selectedFilters.BULAN && selectedFilters.BULAN !== 'ALL'
       ? selectedFilters.BULAN.toUpperCase().trim()
       : '';
-    let targetYear = activeYear;
+    const targetYear = activeYear;
 
     if (!targetMonth || targetMonth === 'ALL') {
-      // Find latest month available in dataset for activeYear
+      // Find latest month available in dataset for activeYear that has matching filtered data
+      const matchingMonths = allRecords.filter(
+        (r) => Number(r.TAHUN) === activeYear && r.BULAN && r.BULAN !== 'ALL' && matchOtherFilters(r)
+      );
+      const sourceForMonths =
+        matchingMonths.length > 0
+          ? matchingMonths
+          : allRecords.filter((r) => Number(r.TAHUN) === activeYear && r.BULAN && r.BULAN !== 'ALL');
+
       const availableMonths = Array.from(new Set(
-        allRecords
-          .filter((r) => r.TAHUN === activeYear && r.BULAN && r.BULAN !== 'ALL')
-          .map((r) => r.BULAN.toUpperCase().trim())
+        sourceForMonths.map((r) => r.BULAN.toUpperCase().trim())
       )).sort((a, b) => (MONTH_ORDER[b] || 0) - (MONTH_ORDER[a] || 0));
 
       targetMonth = availableMonths[0] || 'OKTOBER';
@@ -1273,10 +1352,10 @@ export function calculateComparisonGrowth(
     previousPeriodLabel = `${prevMonthName} ${prevYear}`;
 
     currentRecords = allRecords.filter(
-      (r) => r.TAHUN === targetYear && (r.BULAN || '').toUpperCase().trim() === targetMonth && matchOtherFilters(r)
+      (r) => Number(r.TAHUN) === targetYear && (r.BULAN || '').toUpperCase().trim() === targetMonth && matchOtherFilters(r)
     );
     previousRecords = allRecords.filter(
-      (r) => r.TAHUN === prevYear && (r.BULAN || '').toUpperCase().trim() === prevMonthName && matchOtherFilters(r)
+      (r) => Number(r.TAHUN) === prevYear && (r.BULAN || '').toUpperCase().trim() === prevMonthName && matchOtherFilters(r)
     );
   } else {
     // Year vs Year (YoY)
@@ -1290,11 +1369,52 @@ export function calculateComparisonGrowth(
       const bNorm = selectedFilters.BULAN.toUpperCase().trim();
       currentPeriodLabel += ` (${bNorm})`;
       previousPeriodLabel += ` (${bNorm})`;
-      currentRecords = allRecords.filter((r) => r.TAHUN === currentYear && (r.BULAN || '').toUpperCase().trim() === bNorm && matchOtherFilters(r));
-      previousRecords = allRecords.filter((r) => r.TAHUN === previousYear && (r.BULAN || '').toUpperCase().trim() === bNorm && matchOtherFilters(r));
+      currentRecords = allRecords.filter((r) => Number(r.TAHUN) === currentYear && (r.BULAN || '').toUpperCase().trim() === bNorm && matchOtherFilters(r));
+      previousRecords = allRecords.filter((r) => Number(r.TAHUN) === previousYear && (r.BULAN || '').toUpperCase().trim() === bNorm && matchOtherFilters(r));
     } else {
-      currentRecords = allRecords.filter((r) => r.TAHUN === currentYear && matchOtherFilters(r));
-      previousRecords = allRecords.filter((r) => r.TAHUN === previousYear && matchOtherFilters(r));
+      currentRecords = allRecords.filter((r) => Number(r.TAHUN) === currentYear && matchOtherFilters(r));
+      previousRecords = allRecords.filter((r) => Number(r.TAHUN) === previousYear && matchOtherFilters(r));
+    }
+  }
+
+  // Filter day-of-month range (e.g., Tanggal 1 s/d 10 across both compared periods)
+  const hasDayFilter =
+    (dayRange?.startDay !== undefined && dayRange.startDay >= 1) ||
+    (dayRange?.endDay !== undefined && dayRange.endDay >= 1);
+
+  if (hasDayFilter) {
+    let dStart = Math.max(1, Math.min(31, dayRange?.startDay ?? 1));
+    let dEnd = Math.max(1, Math.min(31, dayRange?.endDay ?? 31));
+    if (dStart > dEnd) {
+      [dStart, dEnd] = [dEnd, dStart];
+    }
+
+    const getRecordDay = (r: TransactionRecord): number | null => {
+      const parsed = parseTransactionDate(r);
+      if (parsed) return parsed.getDate();
+      const dayOnlyMatch = String(r.TANGGAL || '').trim().match(/^(\d{1,2})$/);
+      if (dayOnlyMatch) {
+        const d = Number(dayOnlyMatch[1]);
+        if (d >= 1 && d <= 31) return d;
+      }
+      return null;
+    };
+
+    const matchDayOfMonth = (r: TransactionRecord) => {
+      const d = getRecordDay(r);
+      return d !== null && d >= dStart && d <= dEnd;
+    };
+
+    currentRecords = currentRecords.filter(matchDayOfMonth);
+    previousRecords = previousRecords.filter(matchDayOfMonth);
+
+    const dayLabel = dStart === dEnd ? `Tgl ${dStart}` : `Tgl ${dStart}–${dEnd}`;
+    if (mode === 'mom') {
+      currentPeriodLabel = `${dayLabel} ${currentPeriodLabel}`;
+      previousPeriodLabel = `${dayLabel} ${previousPeriodLabel}`;
+    } else {
+      currentPeriodLabel = `${currentPeriodLabel} (${dayLabel})`;
+      previousPeriodLabel = `${previousPeriodLabel} (${dayLabel})`;
     }
   }
 
@@ -1359,6 +1479,22 @@ export function calculateComparisonGrowth(
     previousQty: prevNewQty,
   };
 
+  const resolveKetLabel = (
+    curSellInCount: number,
+    prevSellInCount: number,
+    curSellOutCount: number,
+    prevSellOutCount: number
+  ): 'SELL IN' | 'SELL OUT' | 'SELL IN & OUT' => {
+    const filterKet = (selectedFilters.KET || 'ALL').trim().toUpperCase();
+    if (filterKet.includes('SELL IN')) return 'SELL IN';
+    if (filterKet.includes('SELL OUT')) return 'SELL OUT';
+    const hasSellIn = curSellInCount > 0 || prevSellInCount > 0;
+    const hasSellOut = curSellOutCount > 0 || prevSellOutCount > 0;
+    if (hasSellIn && hasSellOut) return 'SELL IN & OUT';
+    if (hasSellIn) return 'SELL IN';
+    return 'SELL OUT';
+  };
+
   // Helper for dimension breakdown with detailed Produk Fokus & Produk New metrics
   const buildDimensionComparison = (
     dimension: 'SALES' | 'SPV' | 'BRAND' | 'NAMA_STORE' | 'KATEGORI'
@@ -1373,6 +1509,8 @@ export function calculateComparisonGrowth(
       regular: number;
       sellIn: number;
       sellOut: number;
+      sellInCount: number;
+      sellOutCount: number;
       focusSkus: Record<string, { sku: string; brand: string; value: number; qty: number }>;
       newSkus: Record<string, { sku: string; brand: string; value: number; qty: number }>;
     }
@@ -1387,6 +1525,8 @@ export function calculateComparisonGrowth(
       regular: 0,
       sellIn: 0,
       sellOut: 0,
+      sellInCount: 0,
+      sellOutCount: 0,
       focusSkus: {},
       newSkus: {},
     });
@@ -1404,13 +1544,16 @@ export function calculateComparisonGrowth(
       const isNew = isNewProduct(r.PRODUK_NEW);
       const rawKet = (r.KET || '').toUpperCase().trim();
       const isSellInRow = rawKet === 'SELL IN' || rawKet.includes('SELL IN');
+      const isSellOutRow = rawKet === 'SELL OUT' || rawKet.includes('SELL OUT');
 
       curMap[k].total += val;
       curMap[k].qty += qty;
       if (isSellInRow) {
         curMap[k].sellIn += val;
-      } else {
+        curMap[k].sellInCount += 1;
+      } else if (isSellOutRow) {
         curMap[k].sellOut += val;
+        curMap[k].sellOutCount += 1;
       }
 
       if (isFocus) {
@@ -1447,13 +1590,16 @@ export function calculateComparisonGrowth(
       const isNew = isNewProduct(r.PRODUK_NEW);
       const rawKet = (r.KET || '').toUpperCase().trim();
       const isSellInRow = rawKet === 'SELL IN' || rawKet.includes('SELL IN');
+      const isSellOutRow = rawKet === 'SELL OUT' || rawKet.includes('SELL OUT');
 
       prevMap[k].total += val;
       prevMap[k].qty += qty;
       if (isSellInRow) {
         prevMap[k].sellIn += val;
-      } else {
+        prevMap[k].sellInCount += 1;
+      } else if (isSellOutRow) {
         prevMap[k].sellOut += val;
+        prevMap[k].sellOutCount += 1;
       }
 
       if (isFocus) {
@@ -1544,10 +1690,7 @@ export function calculateComparisonGrowth(
         currentSellOut: cur.sellOut,
         previousSellIn: prev.sellIn,
         previousSellOut: prev.sellOut,
-        ket: (cur.sellIn > 0 && cur.sellOut > 0 ? 'SELL IN & OUT' : cur.sellIn > 0 ? 'SELL IN' : 'SELL OUT') as
-          | 'SELL IN'
-          | 'SELL OUT'
-          | 'SELL IN & OUT',
+        ket: resolveKetLabel(cur.sellInCount, prev.sellInCount, cur.sellOutCount, prev.sellOutCount),
 
         topFocusSkus,
         topNewSkus,
@@ -1565,6 +1708,10 @@ export function calculateComparisonGrowth(
       newVal: number;
       newQty: number;
       regular: number;
+      sellIn: number;
+      sellOut: number;
+      sellInCount: number;
+      sellOutCount: number;
       focusSkus: Record<string, { sku: string; brand: string; value: number; qty: number }>;
       newSkus: Record<string, { sku: string; brand: string; value: number; qty: number }>;
     }
@@ -1577,6 +1724,10 @@ export function calculateComparisonGrowth(
       newVal: 0,
       newQty: 0,
       regular: 0,
+      sellIn: 0,
+      sellOut: 0,
+      sellInCount: 0,
+      sellOutCount: 0,
       focusSkus: {},
       newSkus: {},
     });
@@ -1598,9 +1749,19 @@ export function calculateComparisonGrowth(
       const skuKey = r.SKU || r.SPU || r.NO_SKU || 'SKU';
       const isFocus = isFocusProduct(r.PRODUK_FOCUS);
       const isNew = isNewProduct(r.PRODUK_NEW);
+      const rawKet = (r.KET || '').toUpperCase().trim();
+      const isSellInRow = rawKet === 'SELL IN' || rawKet.includes('SELL IN');
+      const isSellOutRow = rawKet === 'SELL OUT' || rawKet.includes('SELL OUT');
 
       curMap[k].total += val;
       curMap[k].qty += qty;
+      if (isSellInRow) {
+        curMap[k].sellIn += val;
+        curMap[k].sellInCount += 1;
+      } else if (isSellOutRow) {
+        curMap[k].sellOut += val;
+        curMap[k].sellOutCount += 1;
+      }
 
       if (isFocus) {
         curMap[k].focus += val;
@@ -1634,9 +1795,19 @@ export function calculateComparisonGrowth(
       const qty = r.QTY || 0;
       const isFocus = isFocusProduct(r.PRODUK_FOCUS);
       const isNew = isNewProduct(r.PRODUK_NEW);
+      const rawKet = (r.KET || '').toUpperCase().trim();
+      const isSellInRow = rawKet === 'SELL IN' || rawKet.includes('SELL IN');
+      const isSellOutRow = rawKet === 'SELL OUT' || rawKet.includes('SELL OUT');
 
       prevMap[k].total += val;
       prevMap[k].qty += qty;
+      if (isSellInRow) {
+        prevMap[k].sellIn += val;
+        prevMap[k].sellInCount += 1;
+      } else if (isSellOutRow) {
+        prevMap[k].sellOut += val;
+        prevMap[k].sellOutCount += 1;
+      }
 
       if (isFocus) {
         prevMap[k].focus += val;
@@ -1715,6 +1886,11 @@ export function calculateComparisonGrowth(
         newQtyPrevious: prev.newQty,
         currentRegular: cur.regular,
         previousRegular: prev.regular,
+        currentSellIn: cur.sellIn,
+        currentSellOut: cur.sellOut,
+        previousSellIn: prev.sellIn,
+        previousSellOut: prev.sellOut,
+        ket: resolveKetLabel(cur.sellInCount, prev.sellInCount, cur.sellOutCount, prev.sellOutCount),
         topFocusSkus,
         topNewSkus,
       };

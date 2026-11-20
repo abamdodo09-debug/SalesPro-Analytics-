@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   TrendingUp,
   TrendingDown,
@@ -20,6 +20,7 @@ import {
   AlertTriangle,
   Info,
   GraduationCap,
+  RotateCcw,
 } from 'lucide-react';
 import { ComparisonMode, TransactionRecord, DashboardFilters, EntityProductAnalysisItem } from '../types/dashboard';
 import { calculateComparisonGrowth, formatRupiah, formatNumber, formatPercent } from '../utils/analytics';
@@ -38,12 +39,43 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
   const [compMode, setCompMode] = useState<ComparisonMode>('mom');
   const [dimensionTab, setDimensionTab] = useState<'brand' | 'sales' | 'spv' | 'store' | 'category' | 'trainer'>('brand');
   const [viewFilter, setViewFilter] = useState<'all' | 'focus' | 'new'>('all');
+  const [ketOverride, setKetOverride] = useState<'INHERIT' | 'ALL' | 'SELL IN' | 'SELL OUT'>('INHERIT');
+  const [startDay, setStartDay] = useState<string>('');
+  const [endDay, setEndDay] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
-  const [sortBy, setSortBy] = useState<'current' | 'growth' | 'focusVal' | 'focusGrowth' | 'newVal' | 'newGrowth'>('current');
+  const [sortBy, setSortBy] = useState<
+    'previous' | 'current' | 'growth' | 'focusPrev' | 'focusVal' | 'focusGrowth' | 'newPrev' | 'newVal' | 'newGrowth'
+  >('current');
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const [expandedEntity, setExpandedEntity] = useState<string | null>(null);
 
-  const comparison = calculateComparisonGrowth(allRecords && allRecords.length > 0 ? allRecords : records, compMode, filters);
+  useEffect(() => {
+    setKetOverride('INHERIT');
+  }, [filters.KET]);
+
+  const activeKet = ketOverride === 'INHERIT' ? (filters.KET || 'ALL') : ketOverride;
+  const effectiveFilters = useMemo<DashboardFilters>(
+    () => ({ ...filters, KET: activeKet }),
+    [filters, activeKet]
+  );
+
+  const dayRange = useMemo(
+    () =>
+      startDay || endDay
+        ? {
+            startDay: startDay ? Number(startDay) : undefined,
+            endDay: endDay ? Number(endDay) : undefined,
+          }
+        : undefined,
+    [startDay, endDay]
+  );
+
+  const comparison = calculateComparisonGrowth(
+    allRecords && allRecords.length > 0 ? allRecords : records,
+    compMode,
+    effectiveFilters,
+    dayRange
+  );
   const { overall, currentPeriodLabel, previousPeriodLabel, focusSummary, newSummary } = comparison;
 
   const isPos = overall.growthPercent >= 0;
@@ -81,6 +113,10 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
       let valB = 0;
 
       switch (sortBy) {
+        case 'previous':
+          valA = a.previous;
+          valB = b.previous;
+          break;
         case 'current':
           valA = a.current;
           valB = b.current;
@@ -89,6 +125,10 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
           valA = a.growth;
           valB = b.growth;
           break;
+        case 'focusPrev':
+          valA = a.previousFocus;
+          valB = b.previousFocus;
+          break;
         case 'focusVal':
           valA = a.currentFocus;
           valB = b.currentFocus;
@@ -96,6 +136,10 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
         case 'focusGrowth':
           valA = a.focusGrowth;
           valB = b.focusGrowth;
+          break;
+        case 'newPrev':
+          valA = a.previousNew;
+          valB = b.previousNew;
           break;
         case 'newVal':
           valA = a.currentNew;
@@ -112,6 +156,13 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
 
     return items;
   }, [rawDimensionItems, searchQuery, sortBy, sortOrder]);
+
+  const tableColSpan =
+    1 +
+    3 +
+    (viewFilter === 'all' || viewFilter === 'focus' ? 4 : 0) +
+    (viewFilter === 'all' || viewFilter === 'new' ? 4 : 0) +
+    2;
 
   const maxVal = Math.max(
     ...rawDimensionItems.map((d) => Math.max(d.current, d.previous)),
@@ -521,193 +572,350 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
         </div>
 
         {/* Filter & View Mode Controls Bar */}
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 mt-4 pt-1">
-          {/* Search Box */}
-          <div className="relative flex-1 max-w-sm">
-            <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
-            <input
-              type="text"
-              placeholder={`Cari nama ${dimensionTab}...`}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-3 py-1.5 text-xs rounded-xl border border-slate-200 bg-slate-50/50 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-500 text-slate-800"
-            />
+        <div className="flex flex-col gap-3 mt-4 pt-1">
+          <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+            {/* Search Box */}
+            <div className="relative flex-1 max-w-sm">
+              <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+              <input
+                type="text"
+                placeholder={`Cari nama ${dimensionTab}...`}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-3 py-1.5 text-xs rounded-xl border border-slate-200 bg-slate-50/50 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-500 text-slate-800"
+              />
+            </div>
+
+            {/* Filter Tanggal (1 - 31) untuk perbandingan MoM / YoY / WoW */}
+            <div className="flex flex-wrap items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-200 text-xs">
+              <span className="inline-flex items-center gap-1.5 font-semibold text-slate-700 whitespace-nowrap shrink-0">
+                <CalendarDays className="w-3.5 h-3.5 text-blue-600" />
+                Filter Tanggal:
+              </span>
+              <div className="flex items-center gap-1.5">
+                <select
+                  aria-label="Dari Tanggal"
+                  title="Dari Tanggal"
+                  value={startDay}
+                  onChange={(e) => setStartDay(e.target.value)}
+                  className="px-2.5 py-1 text-xs font-mono tabular-nums rounded-lg border border-slate-200 bg-white text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500 cursor-pointer"
+                >
+                  <option value="">Tgl Awal</option>
+                  {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+                    <option key={d} value={String(d)}>
+                      Tgl {d}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-slate-400 font-semibold px-0.5">s/d</span>
+                <select
+                  aria-label="Sampai Tanggal"
+                  title="Sampai Tanggal"
+                  value={endDay}
+                  onChange={(e) => setEndDay(e.target.value)}
+                  className="px-2.5 py-1 text-xs font-mono tabular-nums rounded-lg border border-slate-200 bg-white text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500 cursor-pointer"
+                >
+                  <option value="">Tgl Akhir</option>
+                  {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+                    <option key={d} value={String(d)}>
+                      Tgl {d}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {(startDay || endDay) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStartDay('');
+                    setEndDay('');
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  Reset
+                </button>
+              )}
+            </div>
           </div>
 
-          {/* Quick Focus / New / All View Toggles */}
-          <div className="flex items-center gap-1 self-start sm:self-auto bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
-            <button
-              onClick={() => setViewFilter('all')}
-              className={`px-2.5 py-1 rounded-lg font-bold transition-all ${
-                viewFilter === 'all'
-                  ? 'bg-white text-slate-900 shadow-2xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Semua Kolom
-            </button>
-            <button
-              onClick={() => setViewFilter('focus')}
-              className={`px-2.5 py-1 rounded-lg font-bold flex items-center gap-1 transition-all ${
-                viewFilter === 'focus'
-                  ? 'bg-amber-500 text-white shadow-2xs'
-                  : 'text-amber-800 hover:bg-amber-100/60'
-              }`}
-            >
-              <Target className="w-3 h-3" />
-              Fokus Produk Fokus
-            </button>
-            <button
-              onClick={() => setViewFilter('new')}
-              className={`px-2.5 py-1 rounded-lg font-bold flex items-center gap-1 transition-all ${
-                viewFilter === 'new'
-                  ? 'bg-teal-600 text-white shadow-2xs'
-                  : 'text-teal-800 hover:bg-teal-100/60'
-              }`}
-            >
-              <Sparkles className="w-3 h-3" />
-              Fokus Produk New
-            </button>
+          {/* Quick Ket Transaksi & Focus / New / All View Toggles */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
+              {(['ALL', 'SELL IN', 'SELL OUT'] as const).map((kTab) => {
+                const normalizedActive = (activeKet || 'ALL').trim().toUpperCase();
+                const isActive =
+                  kTab === 'ALL'
+                    ? normalizedActive === 'ALL'
+                    : normalizedActive === kTab;
+                return (
+                  <button
+                    key={kTab}
+                    type="button"
+                    onClick={() => setKetOverride(kTab)}
+                    className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                      isActive
+                        ? kTab === 'SELL IN'
+                          ? 'bg-blue-600 text-white shadow-2xs'
+                          : kTab === 'SELL OUT'
+                          ? 'bg-emerald-600 text-white shadow-2xs'
+                          : 'bg-white text-slate-900 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {kTab === 'ALL' ? 'Semua Ket' : kTab}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
+              <button
+                onClick={() => setViewFilter('all')}
+                className={`px-2.5 py-1 rounded-lg font-bold transition-all whitespace-nowrap shrink-0 ${
+                  viewFilter === 'all'
+                    ? 'bg-white text-slate-900 shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Semua Kolom
+              </button>
+              <button
+                onClick={() => setViewFilter('focus')}
+                className={`px-2.5 py-1 rounded-lg font-bold flex items-center gap-1 transition-all whitespace-nowrap shrink-0 ${
+                  viewFilter === 'focus'
+                    ? 'bg-amber-500 text-white shadow-2xs'
+                    : 'text-amber-800 hover:bg-amber-100/60'
+                }`}
+              >
+                <Target className="w-3 h-3" />
+                Fokus Produk Fokus
+              </button>
+              <button
+                onClick={() => setViewFilter('new')}
+                className={`px-2.5 py-1 rounded-lg font-bold flex items-center gap-1 transition-all whitespace-nowrap shrink-0 ${
+                  viewFilter === 'new'
+                    ? 'bg-teal-600 text-white shadow-2xs'
+                    : 'text-teal-800 hover:bg-teal-100/60'
+                }`}
+              >
+                <Sparkles className="w-3 h-3" />
+                Fokus Produk New
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* Legend for Composition Bars & Tipe Keterangan */}
-        <div className="flex flex-wrap items-center gap-4 mt-3 py-2 px-3 bg-slate-50/80 rounded-xl border border-slate-200/60 text-[11px] text-slate-600">
-          <span className="font-bold text-slate-700">Keterangan:</span>
-          <div className="flex items-center gap-1.5">
-            <span className="px-2 py-0.5 rounded-md font-bold text-[10px] bg-blue-100 text-blue-800 border border-blue-200">
-              SELL IN (Distributor)
+        {/* Legend & Active Period Strip */}
+        <div className="flex flex-wrap items-center justify-between gap-3 mt-3 py-2.5 px-3.5 bg-slate-50/80 rounded-xl border border-slate-200/70 text-[11px] text-slate-600">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="font-semibold text-slate-700">
+              Periode Sebelumnya: <strong className="text-slate-900">{previousPeriodLabel}</strong>
             </span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="px-2 py-0.5 rounded-md font-bold text-[10px] bg-emerald-100 text-emerald-800 border border-emerald-200">
-              SELL OUT (Konsumen)
+            <span aria-hidden="true" className="text-slate-300">·</span>
+            <span className="font-semibold text-slate-700">
+              Periode Sekarang: <strong className="text-blue-700">{currentPeriodLabel}</strong>
             </span>
+            <span aria-hidden="true" className="text-slate-300 hidden sm:inline">|</span>
+            <div className="flex items-center gap-3">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-gradient-to-r from-amber-500 to-orange-500" />
+                <span className="font-semibold text-slate-700">Produk Fokus</span>
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-gradient-to-r from-teal-500 to-emerald-500" />
+                <span className="font-semibold text-slate-700">Produk New</span>
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-slate-300" />
+                <span className="font-semibold text-slate-600">Regular</span>
+              </span>
+            </div>
           </div>
-          <span className="font-bold text-slate-700 ml-2">Komposisi:</span>
-          <div className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-full bg-gradient-to-r from-amber-500 to-orange-500" />
-            <span className="font-semibold text-slate-800">Produk Fokus</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-full bg-gradient-to-r from-teal-500 to-emerald-500" />
-            <span className="font-semibold text-slate-800">Produk New</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-full bg-slate-300" />
-            <span className="font-semibold text-slate-600">Regular</span>
-          </div>
-          <div className="ml-auto text-[10px] text-slate-400 font-medium hidden md:inline">
-            * Klik baris entitas untuk melihat Top SKU Fokus &amp; Produk Baru
+          <div className="text-[10px] text-slate-400 font-medium hidden md:inline">
+            Klik baris entitas untuk detail Top SKU Fokus &amp; Produk New
           </div>
         </div>
 
         {/* Main Table */}
         <div className="overflow-x-auto mt-3 border border-slate-200 rounded-xl">
-          <table className="w-full text-left border-collapse text-xs">
+          <table className="w-full min-w-[1160px] text-left border-collapse text-xs">
             <thead>
-              <tr className="border-b border-slate-200 text-slate-600 font-bold bg-slate-100/80">
-                <th className="py-3 px-3.5">
-                  <span className="uppercase text-[11px] tracking-wider">
+              {/* Group Header Row */}
+              <tr className="border-b border-slate-200 text-slate-700 font-bold bg-slate-100/90">
+                <th
+                  rowSpan={2}
+                  className="py-2.5 px-3.5 align-middle sticky left-0 z-20 bg-slate-100 border-r border-slate-200 min-w-[180px]"
+                >
+                  <span className="text-[11px] font-extrabold uppercase tracking-wider text-slate-800 block">
                     Nama {dimensionTab.toUpperCase()}
                   </span>
-                </th>
-                <th className="py-3 px-3 text-center">
-                  <span className="uppercase text-[11px] tracking-wider">
-                    Ket Transaksi
+                  <span className="text-[10px] font-medium text-slate-500">
+                    Jenis Transaksi &amp; Volume
                   </span>
                 </th>
 
-                {/* Total Sales Columns */}
-                {(viewFilter === 'all' || viewFilter === 'focus' || viewFilter === 'new') && (
-                  <>
-                    <th
-                      onClick={() => toggleSort('current')}
-                      className="py-3 px-3 text-right cursor-pointer hover:bg-slate-200/50 transition-colors"
-                    >
-                      <div className="flex items-center justify-end gap-1">
-                        <span>Total Sekarang</span>
-                        <ArrowUpDown className="w-3 h-3 text-slate-400" />
-                      </div>
-                    </th>
-                    <th
-                      onClick={() => toggleSort('growth')}
-                      className="py-3 px-3 text-right cursor-pointer hover:bg-slate-200/50 transition-colors"
-                    >
-                      <div className="flex items-center justify-end gap-1">
-                        <span>Total Growth</span>
-                        <ArrowUpDown className="w-3 h-3 text-slate-400" />
-                      </div>
-                    </th>
-                  </>
+                <th
+                  colSpan={3}
+                  className="py-2 px-3 text-center bg-slate-100/90 border-r border-slate-200 text-slate-800"
+                >
+                  <span className="text-[11px] font-extrabold uppercase tracking-wider">
+                    Total Penjualan
+                  </span>
+                </th>
+
+                {(viewFilter === 'all' || viewFilter === 'focus') && (
+                  <th
+                    colSpan={4}
+                    className="py-2 px-3 text-center bg-amber-100/80 border-r border-amber-200/80 text-amber-950"
+                  >
+                    <div className="inline-flex items-center justify-center gap-1.5">
+                      <Target className="w-3.5 h-3.5 text-amber-600" />
+                      <span className="text-[11px] font-extrabold uppercase tracking-wider">
+                        Produk Fokus
+                      </span>
+                    </div>
+                  </th>
                 )}
 
-                {/* PRODUK FOKUS COLUMNS */}
+                {(viewFilter === 'all' || viewFilter === 'new') && (
+                  <th
+                    colSpan={4}
+                    className="py-2 px-3 text-center bg-teal-100/80 border-r border-teal-200/80 text-teal-950"
+                  >
+                    <div className="inline-flex items-center justify-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-teal-600" />
+                      <span className="text-[11px] font-extrabold uppercase tracking-wider">
+                        Produk New
+                      </span>
+                    </div>
+                  </th>
+                )}
+
+                <th
+                  rowSpan={2}
+                  className="py-2.5 px-3 align-middle w-40 bg-slate-100/90 border-r border-slate-200 text-slate-700"
+                >
+                  Komposisi &amp; Perbandingan
+                </th>
+                <th
+                  rowSpan={2}
+                  className="py-2.5 px-2.5 align-middle text-center w-14 bg-slate-100/90 text-slate-700"
+                >
+                  Detail
+                </th>
+              </tr>
+
+              {/* Sub-Column Header Row */}
+              <tr className="border-b border-slate-200 text-slate-600 font-bold bg-slate-50/95 text-[11px]">
+                {/* Total: Periode Sebelumnya, Periode Sekarang, Total Growth */}
+                <th
+                  onClick={() => toggleSort('previous')}
+                  className="py-2 px-2.5 text-right cursor-pointer hover:bg-slate-200/50 transition-colors whitespace-nowrap border-r border-slate-200/70"
+                >
+                  <div className="flex items-center justify-end gap-1">
+                    <span>Periode Sebelumnya</span>
+                    <ArrowUpDown className="w-3 h-3 text-slate-400 shrink-0" />
+                  </div>
+                </th>
+                <th
+                  onClick={() => toggleSort('current')}
+                  className="py-2 px-2.5 text-right cursor-pointer hover:bg-slate-200/50 transition-colors whitespace-nowrap border-r border-slate-200/70"
+                >
+                  <div className="flex items-center justify-end gap-1 text-slate-900">
+                    <span>Periode Sekarang</span>
+                    <ArrowUpDown className="w-3 h-3 text-slate-500 shrink-0" />
+                  </div>
+                </th>
+                <th
+                  onClick={() => toggleSort('growth')}
+                  className="py-2 px-2.5 text-right cursor-pointer hover:bg-slate-200/50 transition-colors whitespace-nowrap border-r border-slate-200"
+                >
+                  <div className="flex items-center justify-end gap-1">
+                    <span>Growth</span>
+                    <ArrowUpDown className="w-3 h-3 text-slate-400 shrink-0" />
+                  </div>
+                </th>
+
+                {/* Produk Fokus Sub-Columns */}
                 {(viewFilter === 'all' || viewFilter === 'focus') && (
                   <>
                     <th
-                      onClick={() => toggleSort('focusVal')}
-                      className="py-3 px-3 text-right bg-amber-50/70 border-x border-amber-200/70 text-amber-950 cursor-pointer hover:bg-amber-100/60 transition-colors"
+                      onClick={() => toggleSort('focusPrev')}
+                      className="py-2 px-2.5 text-right bg-amber-50/80 border-r border-amber-200/60 text-amber-900 cursor-pointer hover:bg-amber-100/60 transition-colors whitespace-nowrap"
                     >
                       <div className="flex items-center justify-end gap-1">
-                        <Target className="w-3.5 h-3.5 text-amber-600" />
-                        <span>Nominal Fokus</span>
-                        <ArrowUpDown className="w-3 h-3 text-amber-400" />
+                        <span>Periode Sebelumnya</span>
+                        <ArrowUpDown className="w-3 h-3 text-amber-400 shrink-0" />
+                      </div>
+                    </th>
+                    <th
+                      onClick={() => toggleSort('focusVal')}
+                      className="py-2 px-2.5 text-right bg-amber-50/80 border-r border-amber-200/60 text-amber-950 cursor-pointer hover:bg-amber-100/60 transition-colors whitespace-nowrap"
+                    >
+                      <div className="flex items-center justify-end gap-1">
+                        <span>Periode Sekarang</span>
+                        <ArrowUpDown className="w-3 h-3 text-amber-500 shrink-0" />
                       </div>
                     </th>
                     <th
                       onClick={() => toggleSort('focusGrowth')}
-                      className="py-3 px-3 text-right bg-amber-50/70 border-r border-amber-200/70 text-amber-950 cursor-pointer hover:bg-amber-100/60 transition-colors"
+                      className="py-2 px-2.5 text-right bg-amber-50/80 border-r border-amber-200/60 text-amber-950 cursor-pointer hover:bg-amber-100/60 transition-colors whitespace-nowrap"
                     >
                       <div className="flex items-center justify-end gap-1">
-                        <span>Growth Fokus</span>
-                        <ArrowUpDown className="w-3 h-3 text-amber-400" />
+                        <span>Growth</span>
+                        <ArrowUpDown className="w-3 h-3 text-amber-400 shrink-0" />
                       </div>
                     </th>
-                    <th className="py-3 px-3 text-right bg-amber-50/70 border-r border-amber-200/70 text-amber-950">
+                    <th className="py-2 px-2.5 text-right bg-amber-50/80 border-r border-amber-200/80 text-amber-950 whitespace-nowrap">
                       <span>Penetrasi %</span>
                     </th>
                   </>
                 )}
 
-                {/* PRODUK NEW COLUMNS */}
+                {/* Produk New Sub-Columns */}
                 {(viewFilter === 'all' || viewFilter === 'new') && (
                   <>
                     <th
-                      onClick={() => toggleSort('newVal')}
-                      className="py-3 px-3 text-right bg-teal-50/70 border-x border-teal-200/70 text-teal-950 cursor-pointer hover:bg-teal-100/60 transition-colors"
+                      onClick={() => toggleSort('newPrev')}
+                      className="py-2 px-2.5 text-right bg-teal-50/80 border-r border-teal-200/60 text-teal-900 cursor-pointer hover:bg-teal-100/60 transition-colors whitespace-nowrap"
                     >
                       <div className="flex items-center justify-end gap-1">
-                        <Sparkles className="w-3.5 h-3.5 text-teal-600" />
-                        <span>Nominal New</span>
-                        <ArrowUpDown className="w-3 h-3 text-teal-400" />
+                        <span>Periode Sebelumnya</span>
+                        <ArrowUpDown className="w-3 h-3 text-teal-400 shrink-0" />
+                      </div>
+                    </th>
+                    <th
+                      onClick={() => toggleSort('newVal')}
+                      className="py-2 px-2.5 text-right bg-teal-50/80 border-r border-teal-200/60 text-teal-950 cursor-pointer hover:bg-teal-100/60 transition-colors whitespace-nowrap"
+                    >
+                      <div className="flex items-center justify-end gap-1">
+                        <span>Periode Sekarang</span>
+                        <ArrowUpDown className="w-3 h-3 text-teal-500 shrink-0" />
                       </div>
                     </th>
                     <th
                       onClick={() => toggleSort('newGrowth')}
-                      className="py-3 px-3 text-right bg-teal-50/70 border-r border-teal-200/70 text-teal-950 cursor-pointer hover:bg-teal-100/60 transition-colors"
+                      className="py-2 px-2.5 text-right bg-teal-50/80 border-r border-teal-200/60 text-teal-950 cursor-pointer hover:bg-teal-100/60 transition-colors whitespace-nowrap"
                     >
                       <div className="flex items-center justify-end gap-1">
-                        <span>Growth New</span>
-                        <ArrowUpDown className="w-3 h-3 text-teal-400" />
+                        <span>Growth</span>
+                        <ArrowUpDown className="w-3 h-3 text-teal-400 shrink-0" />
                       </div>
                     </th>
-                    <th className="py-3 px-3 text-right bg-teal-50/70 border-r border-teal-200/70 text-teal-950">
+                    <th className="py-2 px-2.5 text-right bg-teal-50/80 border-r border-teal-200/80 text-teal-950 whitespace-nowrap">
                       <span>Adopsi %</span>
                     </th>
                   </>
                 )}
-
-                <th className="py-3 px-3 w-44">Komposisi & Perbandingan</th>
-                <th className="py-3 px-3 text-center w-16">Detail</th>
               </tr>
             </thead>
 
             <tbody className="divide-y divide-slate-100">
               {dimensionItems.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="py-10 text-center text-slate-400 font-medium">
-                    Tidak ada data entitas yang cocok dengan pencarian "{searchQuery}".
+                  <td colSpan={tableColSpan} className="py-10 text-center text-slate-400 font-medium">
+                    Tidak ada data entitas yang cocok dengan filter aktif{searchQuery ? ` ("${searchQuery}")` : ''}.
                   </td>
                 </tr>
               ) : (
@@ -722,90 +930,100 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
                   const newPct = item.current > 0 ? (item.currentNew / item.current) * 100 : 0;
                   const regularPct = Math.max(0, 100 - focusPct - newPct);
 
+                  const ketColorClass =
+                    item.ket === 'SELL IN'
+                      ? 'text-blue-700'
+                      : item.ket === 'SELL OUT'
+                      ? 'text-emerald-700'
+                      : 'text-indigo-700';
+
                   return (
                     <React.Fragment key={item.name}>
                       <tr
                         onClick={() => setExpandedEntity(isExpanded ? null : item.name)}
-                        className={`cursor-pointer transition-colors ${
-                          isExpanded
-                            ? 'bg-blue-50/40 border-l-4 border-l-blue-600'
-                            : 'hover:bg-slate-50'
+                        className={`group cursor-pointer transition-colors ${
+                          isExpanded ? 'bg-blue-50/70' : 'hover:bg-slate-50'
                         }`}
                       >
-                        {/* Name and Rank */}
-                        <td className="py-3 px-3.5">
-                          <div className="flex items-center gap-2">
-                            <span className="w-5 h-5 rounded-md bg-slate-100 text-slate-600 text-[10px] font-mono font-bold flex items-center justify-center shrink-0 border border-slate-200">
+                        {/* Name, Rank & Transaction Type Metadata */}
+                        <td
+                          className={`py-2.5 px-3.5 sticky left-0 z-10 border-r border-slate-200 transition-colors ${
+                            isExpanded
+                              ? 'bg-blue-50'
+                              : 'bg-white group-hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="flex items-start gap-2">
+                            <span className="w-5 h-5 mt-0.5 rounded-md bg-slate-100 text-slate-600 text-[10px] font-mono font-bold flex items-center justify-center shrink-0 border border-slate-200 tabular-nums">
                               {index + 1}
                             </span>
-                            <div>
-                              <div className="font-extrabold text-slate-900">{item.name}</div>
-                              <div className="text-[10px] text-slate-400 font-mono">
-                                Vol: {formatNumber(item.currentQty)} pcs
+                            <div className="min-w-0">
+                              <div className="font-extrabold text-slate-900 leading-snug">{item.name}</div>
+                              <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500 font-mono tabular-nums mt-0.5">
+                                <span className={`font-bold ${ketColorClass}`}>
+                                  {item.ket || 'SELL IN & OUT'}
+                                </span>
+                                <span aria-hidden="true" className="text-slate-300">·</span>
+                                <span>{formatNumber(item.currentQty)} pcs</span>
                               </div>
                             </div>
                           </div>
                         </td>
 
-                        {/* Keterangan Transaksi: Sell In / Sell Out */}
-                        <td className="py-3 px-3 text-center">
-                          <div className="flex flex-col items-center gap-0.5">
-                            <span
-                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                item.ket === 'SELL IN'
-                                  ? 'bg-blue-100 text-blue-800 border border-blue-200'
-                                  : item.ket === 'SELL OUT'
-                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                                  : 'bg-indigo-100 text-indigo-800 border border-indigo-200'
-                              }`}
-                            >
-                              {item.ket || 'SELL IN & OUT'}
-                            </span>
-                            {item.currentSellIn && item.currentSellIn > 0 && (
-                              <span className="text-[9px] font-mono text-blue-700 font-semibold block">
-                                In: {formatRupiah(item.currentSellIn, true)}
-                              </span>
-                            )}
-                            {item.currentSellOut && item.currentSellOut > 0 && (
-                              <span className="text-[9px] font-mono text-emerald-700 font-semibold block">
-                                Out: {formatRupiah(item.currentSellOut, true)}
-                              </span>
-                            )}
+                        {/* Total: Periode Sebelumnya, Periode Sekarang, Growth */}
+                        <td className="py-2.5 px-2.5 text-right border-r border-slate-100 whitespace-nowrap">
+                          <div className="font-mono font-semibold text-slate-600 tabular-nums">
+                            {formatRupiah(item.previous)}
+                          </div>
+                          <div className="text-[10px] text-slate-400 font-mono tabular-nums">
+                            {formatNumber(item.previousQty)} pcs
                           </div>
                         </td>
+                        <td className="py-2.5 px-2.5 text-right border-r border-slate-100 whitespace-nowrap">
+                          <div className="font-mono font-bold text-slate-900 tabular-nums">
+                            {formatRupiah(item.current)}
+                          </div>
+                          <div className="text-[10px] text-slate-500 font-mono tabular-nums">
+                            {formatNumber(item.currentQty)} pcs
+                          </div>
+                        </td>
+                        <td className="py-2.5 px-2.5 text-right border-r border-slate-200 whitespace-nowrap">
+                          <span
+                            className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded-md font-mono font-bold text-[11px] tabular-nums ${
+                              itemIsPos
+                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                : 'bg-rose-50 text-rose-700 border border-rose-200'
+                            }`}
+                          >
+                            {itemIsPos ? (
+                              <TrendingUp className="w-3 h-3" />
+                            ) : (
+                              <TrendingDown className="w-3 h-3" />
+                            )}
+                            {formatPercent(item.growth)}
+                          </span>
+                        </td>
 
-                        {/* Total Current & Growth */}
-                        {(viewFilter === 'all' || viewFilter === 'focus' || viewFilter === 'new') && (
-                          <>
-                            <td className="py-3 px-3 text-right font-mono font-bold text-slate-900 tabular-nums">
-                              {formatRupiah(item.current)}
-                            </td>
-                            <td className="py-3 px-3 text-right">
-                              <span
-                                className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded-md font-mono font-bold text-xs tabular-nums ${
-                                  itemIsPos
-                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                    : 'bg-rose-50 text-rose-700 border border-rose-200'
-                                }`}
-                              >
-                                {itemIsPos ? (
-                                  <TrendingUp className="w-3 h-3" />
-                                ) : (
-                                  <TrendingDown className="w-3 h-3" />
-                                )}
-                                {formatPercent(item.growth)}
-                              </span>
-                            </td>
-                          </>
-                        )}
-
-                        {/* PRODUK FOKUS METRICS */}
+                        {/* PRODUK FOKUS METRICS: Periode Sebelumnya, Periode Sekarang, Growth, Penetrasi % */}
                         {(viewFilter === 'all' || viewFilter === 'focus') && (
                           <>
-                            <td className="py-3 px-3 text-right bg-amber-50/30 border-x border-amber-100 font-mono font-bold text-amber-950 tabular-nums">
-                              {formatRupiah(item.currentFocus)}
+                            <td className="py-2.5 px-2.5 text-right bg-amber-50/20 border-r border-amber-100/80 whitespace-nowrap">
+                              <div className="font-mono font-semibold text-amber-900/75 tabular-nums">
+                                {formatRupiah(item.previousFocus)}
+                              </div>
+                              <div className="text-[10px] text-amber-800/60 font-mono tabular-nums">
+                                {formatNumber(item.focusQtyPrevious)} pcs
+                              </div>
                             </td>
-                            <td className="py-3 px-3 text-right bg-amber-50/30 border-r border-amber-100">
+                            <td className="py-2.5 px-2.5 text-right bg-amber-50/40 border-r border-amber-100/80 whitespace-nowrap">
+                              <div className="font-mono font-bold text-amber-950 tabular-nums">
+                                {formatRupiah(item.currentFocus)}
+                              </div>
+                              <div className="text-[10px] text-amber-800/80 font-mono tabular-nums">
+                                {formatNumber(item.focusQtyCurrent)} pcs
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-2.5 text-right bg-amber-50/25 border-r border-amber-100/80 whitespace-nowrap">
                               <span
                                 className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded font-mono font-bold text-[11px] tabular-nums ${
                                   itemFocusIsPos
@@ -813,25 +1031,40 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
                                     : 'text-rose-700 bg-rose-50 border border-rose-200'
                                 }`}
                               >
-                                {itemFocusIsPos ? '+' : ''}
                                 {formatPercent(item.focusGrowth)}
                               </span>
                             </td>
-                            <td className="py-3 px-3 text-right bg-amber-50/30 border-r border-amber-100 font-mono font-semibold text-amber-900 tabular-nums">
-                              <div className="flex items-center justify-end gap-1">
-                                <span>{formatPercent(item.focusShareCurrent)}</span>
+                            <td className="py-2.5 px-2.5 text-right bg-amber-50/25 border-r border-amber-200/70 whitespace-nowrap">
+                              <div className="font-mono font-semibold text-amber-900 tabular-nums">
+                                {formatPercent(item.focusShareCurrent, false)}
+                              </div>
+                              <div className="text-[10px] text-amber-800/60 font-mono tabular-nums">
+                                Prev: {formatPercent(item.focusSharePrevious, false)}
                               </div>
                             </td>
                           </>
                         )}
 
-                        {/* PRODUK NEW METRICS */}
+                        {/* PRODUK NEW METRICS: Periode Sebelumnya, Periode Sekarang, Growth, Adopsi % */}
                         {(viewFilter === 'all' || viewFilter === 'new') && (
                           <>
-                            <td className="py-3 px-3 text-right bg-teal-50/30 border-x border-teal-100 font-mono font-bold text-teal-950 tabular-nums">
-                              {formatRupiah(item.currentNew)}
+                            <td className="py-2.5 px-2.5 text-right bg-teal-50/20 border-r border-teal-100/80 whitespace-nowrap">
+                              <div className="font-mono font-semibold text-teal-900/75 tabular-nums">
+                                {formatRupiah(item.previousNew)}
+                              </div>
+                              <div className="text-[10px] text-teal-800/60 font-mono tabular-nums">
+                                {formatNumber(item.newQtyPrevious)} pcs
+                              </div>
                             </td>
-                            <td className="py-3 px-3 text-right bg-teal-50/30 border-r border-teal-100">
+                            <td className="py-2.5 px-2.5 text-right bg-teal-50/40 border-r border-teal-100/80 whitespace-nowrap">
+                              <div className="font-mono font-bold text-teal-950 tabular-nums">
+                                {formatRupiah(item.currentNew)}
+                              </div>
+                              <div className="text-[10px] text-teal-800/80 font-mono tabular-nums">
+                                {formatNumber(item.newQtyCurrent)} pcs
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-2.5 text-right bg-teal-50/25 border-r border-teal-100/80 whitespace-nowrap">
                               <span
                                 className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded font-mono font-bold text-[11px] tabular-nums ${
                                   itemNewIsPos
@@ -839,23 +1072,25 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
                                     : 'text-rose-700 bg-rose-50 border border-rose-200'
                                 }`}
                               >
-                                {itemNewIsPos ? '+' : ''}
                                 {formatPercent(item.newGrowth)}
                               </span>
                             </td>
-                            <td className="py-3 px-3 text-right bg-teal-50/30 border-r border-teal-100 font-mono font-semibold text-teal-900 tabular-nums">
-                              <div className="flex items-center justify-end gap-1">
-                                <span>{formatPercent(item.newShareCurrent)}</span>
+                            <td className="py-2.5 px-2.5 text-right bg-teal-50/25 border-r border-teal-200/70 whitespace-nowrap">
+                              <div className="font-mono font-semibold text-teal-900 tabular-nums">
+                                {formatPercent(item.newShareCurrent, false)}
+                              </div>
+                              <div className="text-[10px] text-teal-800/60 font-mono tabular-nums">
+                                Prev: {formatPercent(item.newSharePrevious, false)}
                               </div>
                             </td>
                           </>
                         )}
 
                         {/* Stacked Composition Bar */}
-                        <td className="py-3 px-3">
+                        <td className="py-2.5 px-3 border-r border-slate-100">
                           <div className="space-y-1">
                             {/* Stacked Bar */}
-                            <div className="w-full bg-slate-100 h-3 rounded-full overflow-hidden flex border border-slate-200/80 shadow-2xs">
+                            <div className="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden flex border border-slate-200/80 shadow-2xs">
                               {focusPct > 0 && (
                                 <div
                                   title={`Produk Fokus: ${formatPercent(focusPct)} (${formatRupiah(item.currentFocus)})`}
@@ -878,7 +1113,7 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
                                 />
                               )}
                             </div>
-                            <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                            <div className="flex items-center justify-between text-[10px] text-slate-500 font-mono tabular-nums">
                               <span>Fokus: {Math.round(focusPct)}%</span>
                               <span>New: {Math.round(newPct)}%</span>
                             </div>
@@ -886,7 +1121,7 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
                         </td>
 
                         {/* Expand Button */}
-                        <td className="py-3 px-3 text-center">
+                        <td className="py-2.5 px-2.5 text-center">
                           <button
                             type="button"
                             className="p-1 rounded-lg text-slate-400 hover:text-slate-800 hover:bg-slate-200/60 transition-colors"
@@ -903,7 +1138,7 @@ export const ComparisonView: React.FC<ComparisonViewProps> = ({
                       {/* EXPANDABLE ROW DETAILS: TOP SKUS BREAKDOWN */}
                       {isExpanded && (
                         <tr className="bg-slate-50/90 border-b border-slate-200">
-                          <td colSpan={10} className="p-4 sm:p-5">
+                          <td colSpan={tableColSpan} className="p-4 sm:p-5">
                             <div className="bg-white rounded-xl border border-slate-200/90 p-4 shadow-xs">
                               <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-100">
                                 <div className="flex items-center gap-2">
