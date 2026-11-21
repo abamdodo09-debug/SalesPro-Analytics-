@@ -1,4 +1,14 @@
-import { TransactionRecord, ProfitAreaSummary, ProfitItemBreakdown, ProfitStoreItem, BaFocusProductOverride } from '../types/dashboard';
+import {
+  TransactionRecord,
+  ProfitAreaSummary,
+  ProfitItemBreakdown,
+  ProfitStoreItem,
+  BaFocusProductOverride,
+  AreaCostSummary,
+  SalesSalaryItem,
+  BaSalaryItem,
+  TrainerSalaryItem,
+} from '../types/dashboard';
 import { aggregateAreaCost, TrainerCostConfigInput } from './costCalculations';
 import { DEFAULT_FOCUS_TARGET_PCS } from '../services/focusProductService';
 
@@ -444,3 +454,363 @@ export function calculateProfitArea(
     profitByStore,
   };
 }
+
+export interface MonthlyProfitOverrideInput {
+  sellIn?: number;
+  margin?: number;
+  opsCost?: number;
+  salaryCost?: number;
+  netProfit?: number;
+}
+
+export interface MonthlyProfitSummaryEntry {
+  monthKey: string;
+  summary: ProfitAreaSummary | null;
+  override?: MonthlyProfitOverrideInput;
+}
+
+const resolveProfitStatus = (pctVsSellIn: number): 'excellent' | 'healthy' | 'warning' | 'deficit' => {
+  if (pctVsSellIn >= 10) return 'excellent';
+  if (pctVsSellIn >= 5) return 'healthy';
+  if (pctVsSellIn >= 0) return 'warning';
+  return 'deficit';
+};
+
+export function combineMonthlyProfitAreaSummaries(
+  entries: MonthlyProfitSummaryEntry[],
+  marginRate: number = 0.55,
+  operatingCostRate: number = 0.33
+): ProfitAreaSummary {
+  const marginPercent = marginRate * 100;
+  const operatingCostPercent = operatingCostRate * 100;
+  const netMarginDiffPercent = (marginRate - operatingCostRate) * 100;
+  const netSpreadRate = marginRate - operatingCostRate;
+
+  let sellInActual = 0;
+  let marginValue = 0;
+  let operatingCostValue = 0;
+  let salaryCost = 0;
+  let totalExpense = 0;
+  let remainingProfitValue = 0;
+
+  let totalSalesSalary = 0;
+  let totalBaSalary = 0;
+  let totalTrainerSalary = 0;
+
+  let totalSalesBase = 0;
+  let totalSalesIncentive = 0;
+  let totalBaBase = 0;
+  let totalBaIncentive = 0;
+  let totalBaFocusIncentive = 0;
+  let totalBaFocusPenalty = 0;
+  let totalBaFocusNetBonus = 0;
+  let totalTrainerBase = 0;
+  let totalTrainerTransport = 0;
+  let totalTrainerFocusIncentive = 0;
+  let totalTrainerFocusPenalty = 0;
+  let totalTrainerKpiIncentive = 0;
+  let totalTrainerKpiPenalty = 0;
+
+  const salesBreakdownMap = new Map<string, ProfitItemBreakdown>();
+  const areaBreakdownMap = new Map<string, ProfitItemBreakdown>();
+  const regionBreakdownMap = new Map<string, ProfitItemBreakdown>();
+  const storeBreakdownMap = new Map<string, ProfitStoreItem>();
+
+  const salesSalaryMap = new Map<string, SalesSalaryItem>();
+  const baSalaryMap = new Map<string, BaSalaryItem>();
+  const trainerSalaryMap = new Map<string, TrainerSalaryItem & { _months: number; _kpiSum: number }>();
+
+  const mergeItemBreakdown = (
+    map: Map<string, ProfitItemBreakdown>,
+    item: ProfitItemBreakdown
+  ) => {
+    const key = (item.id || item.name || '').trim().toUpperCase();
+    if (!key) return;
+    const prev = map.get(key);
+    if (!prev) {
+      map.set(key, { ...item });
+    } else {
+      prev.sellInActual += item.sellInActual;
+      prev.marginValue += item.marginValue;
+      prev.operatingCostValue += item.operatingCostValue;
+      prev.salaryCost += item.salaryCost;
+      prev.totalExpense += item.totalExpense;
+      prev.remainingProfitValue += item.remainingProfitValue;
+      if ((prev.coverArea === '-' || !prev.coverArea) && item.coverArea && item.coverArea !== '-') {
+        prev.coverArea = item.coverArea;
+      }
+      if ((prev.spvOrRegion === '-' || !prev.spvOrRegion) && item.spvOrRegion && item.spvOrRegion !== '-') {
+        prev.spvOrRegion = item.spvOrRegion;
+      }
+    }
+  };
+
+  for (let i = 0; i < entries.length; i++) {
+    const { summary: s, override: ovRaw } = entries[i];
+    const ov = ovRaw || {};
+    const hasOv =
+      ov.sellIn !== undefined ||
+      ov.margin !== undefined ||
+      ov.opsCost !== undefined ||
+      ov.salaryCost !== undefined ||
+      ov.netProfit !== undefined;
+    if (!s && !hasOv) continue;
+
+    const mSellIn = ov.sellIn !== undefined ? ov.sellIn : s ? s.sellInActual : 0;
+    const mMargin = ov.margin !== undefined ? ov.margin : Math.round(mSellIn * marginRate);
+    const mOpsCost = ov.opsCost !== undefined ? ov.opsCost : Math.round(mSellIn * operatingCostRate);
+    const mSalary = ov.salaryCost !== undefined ? ov.salaryCost : s ? s.salaryCost : 0;
+    const mTotalExp = mOpsCost + mSalary;
+    const mNetProfit = ov.netProfit !== undefined ? ov.netProfit : mMargin - mTotalExp;
+
+    sellInActual += mSellIn;
+    marginValue += mMargin;
+    operatingCostValue += mOpsCost;
+    salaryCost += mSalary;
+    totalExpense += mTotalExp;
+    remainingProfitValue += mNetProfit;
+
+    if (!s) continue;
+
+    totalSalesSalary += s.totalSalesSalary || 0;
+    totalBaSalary += s.totalBaSalary || 0;
+    totalTrainerSalary += s.totalTrainerSalary || 0;
+
+    for (const item of s.profitBySales) mergeItemBreakdown(salesBreakdownMap, item);
+    for (const item of s.profitByArea) mergeItemBreakdown(areaBreakdownMap, item);
+    for (const item of s.profitByRegion) mergeItemBreakdown(regionBreakdownMap, item);
+
+    for (const st of s.profitByStore) {
+      const sKey = (st.storeName || st.id || '').trim().toUpperCase();
+      if (!sKey) continue;
+      const prev = storeBreakdownMap.get(sKey);
+      if (!prev) {
+        storeBreakdownMap.set(sKey, { ...st });
+      } else {
+        prev.sellInActual += st.sellInActual;
+        prev.marginValue += st.marginValue;
+        prev.operatingCostValue += st.operatingCostValue;
+        prev.baSalaryCost += st.baSalaryCost;
+        prev.totalExpense += st.totalExpense;
+        prev.remainingProfitValue += st.remainingProfitValue;
+        if (st.hasBa) prev.hasBa = true;
+        if ((prev.baName === '-' || !prev.baName) && st.baName && st.baName !== '-') {
+          prev.baName = st.baName;
+        }
+        if ((prev.coverArea === '-' || !prev.coverArea) && st.coverArea && st.coverArea !== '-') {
+          prev.coverArea = st.coverArea;
+        }
+        if ((prev.region === '-' || !prev.region) && st.region && st.region !== '-') {
+          prev.region = st.region;
+        }
+        if ((prev.salesName === '-' || !prev.salesName) && st.salesName && st.salesName !== '-') {
+          prev.salesName = st.salesName;
+        }
+      }
+    }
+
+    const cb = s.costBreakdown;
+    if (cb) {
+      totalSalesBase += cb.totalSalesBase || 0;
+      totalSalesIncentive += cb.totalSalesIncentive || 0;
+      totalBaBase += cb.totalBaBase || 0;
+      totalBaIncentive += cb.totalBaIncentive || 0;
+      totalBaFocusIncentive += cb.totalBaFocusIncentive || 0;
+      totalBaFocusPenalty += cb.totalBaFocusPenalty || 0;
+      totalBaFocusNetBonus += cb.totalBaFocusNetBonus || 0;
+      totalTrainerBase += cb.totalTrainerBase || 0;
+      totalTrainerTransport += cb.totalTrainerTransport || 0;
+      totalTrainerFocusIncentive += cb.totalTrainerFocusIncentive || 0;
+      totalTrainerFocusPenalty += cb.totalTrainerFocusPenalty || 0;
+      totalTrainerKpiIncentive += cb.totalTrainerKpiIncentive || 0;
+      totalTrainerKpiPenalty += cb.totalTrainerKpiPenalty || 0;
+
+      for (const sal of cb.salesList || []) {
+        const key = (sal.salesName || '').trim().toUpperCase();
+        if (!key) continue;
+        const prev = salesSalaryMap.get(key);
+        if (!prev) {
+          salesSalaryMap.set(key, {
+            ...sal,
+            coveredStores: [...sal.coveredStores],
+            coveredBaList: sal.coveredBaList.map((b) => ({ ...b })),
+          });
+        } else {
+          prev.sellInActual += sal.sellInActual;
+          prev.sellInTarget += sal.sellInTarget;
+          prev.baseSalary += sal.baseSalary;
+          prev.incentiveNominal += sal.incentiveNominal;
+          prev.coveredBaTotalSellOut += sal.coveredBaTotalSellOut;
+          prev.baProductivityBonus += sal.baProductivityBonus;
+          prev.baProductivityPenalty += sal.baProductivityPenalty;
+          prev.baProductivitySpCount += sal.baProductivitySpCount;
+          prev.totalSalary += sal.totalSalary;
+          prev.achievementPercent =
+            prev.sellInTarget > 0 ? (prev.sellInActual / prev.sellInTarget) * 100 : 0;
+        }
+      }
+
+      for (const ba of cb.baList || []) {
+        const baUpper = (ba.baName || '').trim().toUpperCase();
+        const isGeneric =
+          !baUpper ||
+          baUpper === '-' ||
+          baUpper === 'BA COUNTER' ||
+          baUpper === 'NON BA' ||
+          baUpper === 'NON-BA';
+        const key = isGeneric
+          ? `__STORE__${(ba.storeName || '').trim().toUpperCase()}`
+          : baUpper;
+        const prev = baSalaryMap.get(key);
+        if (!prev) {
+          baSalaryMap.set(key, {
+            ...ba,
+            storeDetails: ba.storeDetails ? ba.storeDetails.map((d) => ({ ...d })) : undefined,
+          });
+        } else {
+          prev.sellOutNonLavojoy += ba.sellOutNonLavojoy;
+          prev.targetNonLavojoy += ba.targetNonLavojoy;
+          prev.baseSalary += ba.baseSalary;
+          prev.incentiveNonLavojoyNominal += ba.incentiveNonLavojoyNominal;
+          prev.sellOutLavojoy += ba.sellOutLavojoy;
+          prev.targetLavojoy += ba.targetLavojoy;
+          prev.incentiveLavojoyNominal += ba.incentiveLavojoyNominal;
+          prev.focusTargetPcs = (prev.focusTargetPcs || 0) + (ba.focusTargetPcs || 0);
+          prev.focusActualPcs = (prev.focusActualPcs || 0) + (ba.focusActualPcs || 0);
+          prev.focusIncentive = (prev.focusIncentive || 0) + (ba.focusIncentive || 0);
+          prev.focusPenalty = (prev.focusPenalty || 0) + (ba.focusPenalty || 0);
+          prev.focusNetBonus = (prev.focusNetBonus || 0) + (ba.focusNetBonus || 0);
+          prev.sellOutActual += ba.sellOutActual;
+          prev.sellOutTarget += ba.sellOutTarget;
+          prev.totalIncentiveNominal += ba.totalIncentiveNominal;
+          prev.incentiveNominal += ba.incentiveNominal;
+          prev.totalSalary += ba.totalSalary;
+          prev.achievementNonLavojoyPercent =
+            prev.targetNonLavojoy > 0 ? (prev.sellOutNonLavojoy / prev.targetNonLavojoy) * 100 : 0;
+          prev.achievementPercent =
+            prev.sellOutTarget > 0 ? (prev.sellOutActual / prev.sellOutTarget) * 100 : 0;
+        }
+      }
+
+      for (const tr of cb.trainerList || []) {
+        const key = (tr.trainerName || '').trim().toUpperCase();
+        if (!key) continue;
+        const prev = trainerSalaryMap.get(key);
+        if (!prev) {
+          trainerSalaryMap.set(key, {
+            ...tr,
+            _months: 1,
+            _kpiSum: tr.kpiScore || 0,
+          });
+        } else {
+          prev.baseSalary += tr.baseSalary;
+          prev.transportAllowance += tr.transportAllowance;
+          prev.focusTargetPcs += tr.focusTargetPcs;
+          prev.focusActualPcs += tr.focusActualPcs;
+          prev.focusIncentive += tr.focusIncentive;
+          prev.focusPenalty += tr.focusPenalty;
+          prev.kpiIncentive += tr.kpiIncentive;
+          prev.kpiPenalty += tr.kpiPenalty;
+          prev.totalSalary += tr.totalSalary;
+          prev.sellOutActual += tr.sellOutActual;
+          prev.sellOutTarget += tr.sellOutTarget;
+          prev._months += 1;
+          prev._kpiSum += tr.kpiScore || 0;
+          prev.kpiScore = Math.round(prev._kpiSum / prev._months);
+          prev.focusAchievementPct =
+            prev.focusTargetPcs > 0 ? (prev.focusActualPcs / prev.focusTargetPcs) * 100 : 0;
+        }
+      }
+    }
+  }
+
+  const finalizeBreakdowns = (map: Map<string, ProfitItemBreakdown>): ProfitItemBreakdown[] =>
+    Array.from(map.values())
+      .map((item) => {
+        const pctSellIn = item.sellInActual > 0 ? (item.remainingProfitValue / item.sellInActual) * 100 : 0;
+        const pctMargin = item.marginValue > 0 ? (item.remainingProfitValue / item.marginValue) * 100 : 0;
+        return {
+          ...item,
+          remainingProfitPercentSellIn: pctSellIn,
+          remainingProfitPercentMargin: pctMargin,
+          profitStatus: resolveProfitStatus(pctSellIn),
+        };
+      })
+      .sort((a, b) => b.sellInActual - a.sellInActual);
+
+  const profitByStore: ProfitStoreItem[] = Array.from(storeBreakdownMap.values())
+    .map((st) => {
+      const pctSellIn = st.sellInActual > 0 ? (st.remainingProfitValue / st.sellInActual) * 100 : 0;
+      const pctMargin = st.marginValue > 0 ? (st.remainingProfitValue / st.marginValue) * 100 : 0;
+      return {
+        ...st,
+        remainingProfitPercentSellIn: pctSellIn,
+        remainingProfitPercentMargin: pctMargin,
+        profitStatus: resolveProfitStatus(pctSellIn),
+      };
+    })
+    .sort((a, b) => b.sellInActual - a.sellInActual);
+
+  const salesList = Array.from(salesSalaryMap.values()).sort((a, b) => b.sellInActual - a.sellInActual);
+  const baList = Array.from(baSalaryMap.values()).sort((a, b) => b.sellOutActual - a.sellOutActual);
+  const trainerList: TrainerSalaryItem[] = Array.from(trainerSalaryMap.values())
+    .map(({ _months: _m, _kpiSum: _ks, ...rest }) => rest)
+    .sort((a, b) => b.totalSalary - a.totalSalary);
+
+  const costBreakdown: AreaCostSummary = {
+    totalCost: salaryCost,
+    totalSalesCost: totalSalesSalary,
+    totalSalesBase,
+    totalSalesIncentive,
+    totalBaCost: totalBaSalary,
+    totalBaBase,
+    totalBaIncentive,
+    totalBaFocusIncentive,
+    totalBaFocusPenalty,
+    totalBaFocusNetBonus,
+    totalTrainerCost: totalTrainerSalary,
+    totalTrainerBase,
+    totalTrainerTransport,
+    totalTrainerFocusIncentive,
+    totalTrainerFocusPenalty,
+    totalTrainerKpiIncentive,
+    totalTrainerKpiPenalty,
+    totalAreaRevenue: sellInActual,
+    costToRevenueRatio: sellInActual > 0 ? (salaryCost / sellInActual) * 100 : 0,
+    salesCount: salesList.length,
+    baCount: baList.length,
+    trainerCount: trainerList.length,
+    salesList,
+    baList,
+    trainerList,
+  };
+
+  const remainingProfitPercentSellIn = sellInActual > 0 ? (remainingProfitValue / sellInActual) * 100 : 0;
+  const remainingProfitPercentMargin = marginValue > 0 ? (remainingProfitValue / marginValue) * 100 : 0;
+  const breakEvenPointSellIn = netSpreadRate > 0 ? Math.round(salaryCost / netSpreadRate) : 0;
+
+  return {
+    sellInActual,
+    marginPercent,
+    marginValue,
+    operatingCostPercent,
+    operatingCostValue,
+    salaryCost,
+    totalSalesSalary,
+    totalBaSalary,
+    totalTrainerSalary,
+    costBreakdown,
+    totalExpense,
+    remainingProfitValue,
+    remainingProfitPercentSellIn,
+    remainingProfitPercentMargin,
+    breakEvenPointSellIn,
+    netMarginDiffPercent,
+    profitStatus: resolveProfitStatus(remainingProfitPercentSellIn),
+    profitBySales: finalizeBreakdowns(salesBreakdownMap),
+    profitByArea: finalizeBreakdowns(areaBreakdownMap),
+    profitByRegion: finalizeBreakdowns(regionBreakdownMap),
+    profitByStore,
+  };
+}
+

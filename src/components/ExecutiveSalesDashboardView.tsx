@@ -1,9 +1,13 @@
-import React, { useMemo, useState, useTransition, useDeferredValue } from 'react';
+import React, { useMemo, useState, useEffect, useTransition, useDeferredValue } from 'react';
 import {
   TransactionRecord,
   DashboardFilters,
   ActiveTab,
   StoreGapDetailItem,
+  QuarterPeriodKey,
+  SalesQuarterlySummaryItem,
+  BaQuarterlySummaryItem,
+  TrainerQuarterlySummaryItem,
 } from '../types/dashboard';
 import {
   buildExecutiveCoreSnapshot,
@@ -13,12 +17,15 @@ import {
   buildPromoBaLensData,
   buildMonthlyProfitHrSummary,
   buildTargetsAlertsLensData,
+  filterRecordsByDayRange,
   ExecutiveDayRange,
   MonthlyTrajectoryPoint,
   MonthlyProfitHrSummary,
 } from '../services/executiveDashboardService';
+import { calculateQuarterlySummary } from '../services/quarterlySummaryService';
+import { SALES_MASTER_6_CONFIG } from '../services/kpiSalesData';
 import { MonthlyOnlinePromoRecapRow } from '../services/onlinePromoService';
-import { formatRupiah, formatNumber, formatPercent } from '../utils/analytics';
+import { formatRupiah, formatNumber, formatPercent, filterRecords } from '../utils/analytics';
 import {
   LayoutDashboard,
   MapPin,
@@ -46,6 +53,9 @@ import {
   Award,
   PanelTopOpen,
   PanelTopClose,
+  Edit3,
+  Crown,
+  Medal,
 } from 'lucide-react';
 
 interface ExecutiveSalesDashboardViewProps {
@@ -78,7 +88,8 @@ type SidebarLens =
   | 'channel_growth'
   | 'promo_ba'
   | 'finance_bills'
-  | 'targets_alerts';
+  | 'targets_alerts'
+  | 'achieve_quartal';
 
 function formatCompactIdr(val: number): string {
   if (!Number.isFinite(val)) return 'Rp 0';
@@ -1630,8 +1641,8 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
 
   const monthlyProfitHrSummary = useMemo(() => {
     if (activeLens !== 'finance_bills') return null;
-    return buildMonthlyProfitHrSummary(allRecords, filters, snap.selectedYear);
-  }, [activeLens, allRecords, filters, snap.selectedYear]);
+    return buildMonthlyProfitHrSummary(allRecords, filters, snap.selectedYear, deferredDayRange);
+  }, [activeLens, allRecords, filters, snap.selectedYear, deferredDayRange]);
 
   const targetsAlertsData = useMemo(() => {
     if (activeLens !== 'targets_alerts') return null;
@@ -1643,6 +1654,206 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
       deferredDayRange
     );
   }, [activeLens, allRecords, filteredRecords, filters, snap.gapDiagnosis, deferredDayRange]);
+
+  const [selectedQuarter, setSelectedQuarter] = useState<QuarterPeriodKey>('Q4');
+  const [hallOfFameTab, setHallOfFameTab] = useState<'sales' | 'ba' | 'trainer'>('sales');
+  const [quartalSearch, setQuartalSearch] = useState<string>('');
+
+  useEffect(() => {
+    if (filters.BULAN && filters.BULAN !== 'ALL') {
+      const b = filters.BULAN.trim().toUpperCase();
+      if (['JANUARI', 'FEBRUARI', 'MARET'].includes(b)) setSelectedQuarter('Q1');
+      else if (['APRIL', 'MEI', 'JUNI'].includes(b)) setSelectedQuarter('Q2');
+      else if (['JULI', 'AGUSTUS', 'SEPTEMBER'].includes(b)) setSelectedQuarter('Q3');
+      else if (['OKTOBER', 'NOVEMBER', 'DESEMBER'].includes(b)) setSelectedQuarter('Q4');
+    }
+  }, [filters.BULAN]);
+
+  const achieveQuartalData = useMemo(() => {
+    if (activeLens !== 'achieve_quartal') return null;
+
+    const hasProductSubFilters =
+      filters.BRAND !== 'ALL' ||
+      (filters.KATEGORI && filters.KATEGORI !== 'ALL') ||
+      (filters.STATUS_PRODUK && filters.STATUS_PRODUK !== 'ALL') ||
+      filters.SKU !== 'ALL';
+
+    let baseQuarterRecords = allRecords;
+    if (hasProductSubFilters) {
+      baseQuarterRecords = filterRecords(allRecords, {
+        ...filters,
+        BULAN: 'ALL',
+        TAHUN: 'ALL',
+        SALES: 'ALL',
+        TRAINER: 'ALL',
+        SPV: 'ALL',
+        REGION: 'ALL',
+        NAMA_STORE: 'ALL',
+        KET: 'ALL',
+        searchQuery: '',
+      });
+    }
+    if (deferredDayRange && (deferredDayRange.startDay || deferredDayRange.endDay)) {
+      baseQuarterRecords = filterRecordsByDayRange(baseQuarterRecords, deferredDayRange);
+    }
+
+    const activeKet = (filters.KET || 'ALL').toUpperCase().trim();
+    const rawQuarter = calculateQuarterlySummary(
+      baseQuarterRecords,
+      selectedQuarter,
+      snap.selectedYear,
+      filters.REGION,
+      filters.SPV,
+      activeKet
+    );
+
+    const effSearch = (quartalSearch || filters.searchQuery || '').trim().toLowerCase();
+
+    const filteredSales: SalesQuarterlySummaryItem[] = rawQuarter.salesList
+      .filter((s) => {
+        if (filters.SALES && filters.SALES !== 'ALL') {
+          const fSales = filters.SALES.trim().toUpperCase();
+          const canonical = fSales === 'ALBERT' ? 'ALBERT FERNANDO' : fSales;
+          if (s.salesName.toUpperCase() !== canonical) return false;
+        }
+        if (filters.TRAINER && filters.TRAINER !== 'ALL') {
+          const cfg = SALES_MASTER_6_CONFIG[s.salesName];
+          if (cfg && !cfg.trainerCovered.toUpperCase().includes(filters.TRAINER.toUpperCase())) {
+            return false;
+          }
+        }
+        if (filters.SPV && filters.SPV !== 'ALL' && s.spvName.toUpperCase() !== filters.SPV.toUpperCase()) {
+          return false;
+        }
+        if (
+          filters.REGION &&
+          filters.REGION !== 'ALL' &&
+          (s.region || '').toUpperCase() !== filters.REGION.toUpperCase() &&
+          (s.coverArea || '').toUpperCase() !== filters.REGION.toUpperCase()
+        ) {
+          return false;
+        }
+        if (!effSearch) return true;
+        return (
+          s.salesName.toLowerCase().includes(effSearch) ||
+          s.coverArea.toLowerCase().includes(effSearch) ||
+          s.spvName.toLowerCase().includes(effSearch) ||
+          (s.region && s.region.toLowerCase().includes(effSearch))
+        );
+      })
+      .sort((a, b) => {
+        const diff = b.quarterAchievementPercent - a.quarterAchievementPercent;
+        if (Math.abs(diff) > 0.0001) return diff;
+        return b.quarterActual - a.quarterActual;
+      });
+
+    const filteredBa: BaQuarterlySummaryItem[] = rawQuarter.baList
+      .filter((b) => {
+        if (filters.SPV && filters.SPV !== 'ALL' && b.spvName && b.spvName.toUpperCase() !== filters.SPV.toUpperCase()) {
+          return false;
+        }
+        if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL' && b.storeName.toUpperCase() !== filters.NAMA_STORE.toUpperCase()) {
+          return false;
+        }
+        if (
+          filters.REGION &&
+          filters.REGION !== 'ALL' &&
+          (b.region || '').toUpperCase() !== filters.REGION.toUpperCase() &&
+          (b.coverArea || '').toUpperCase() !== filters.REGION.toUpperCase()
+        ) {
+          return false;
+        }
+        if (!effSearch) return true;
+        return (
+          b.baName.toLowerCase().includes(effSearch) ||
+          b.storeName.toLowerCase().includes(effSearch) ||
+          b.coverArea.toLowerCase().includes(effSearch) ||
+          b.baNumber.toLowerCase().includes(effSearch) ||
+          (b.spvName && b.spvName.toLowerCase().includes(effSearch))
+        );
+      })
+      .sort((a, b) => {
+        const diff = b.quarterAchievementPercent - a.quarterAchievementPercent;
+        if (Math.abs(diff) > 0.0001) return diff;
+        return b.quarterActual - a.quarterActual;
+      });
+
+    const filteredTrainer: TrainerQuarterlySummaryItem[] = rawQuarter.trainerList
+      .filter((t) => {
+        if (filters.TRAINER && filters.TRAINER !== 'ALL' && t.trainerName.toUpperCase() !== filters.TRAINER.toUpperCase()) {
+          return false;
+        }
+        if (
+          filters.REGION &&
+          filters.REGION !== 'ALL' &&
+          (t.areaCovered || '').toUpperCase() !== filters.REGION.toUpperCase() &&
+          (t.region || '').toUpperCase() !== filters.REGION.toUpperCase()
+        ) {
+          return false;
+        }
+        if (!effSearch) return true;
+        return (
+          t.trainerName.toLowerCase().includes(effSearch) ||
+          t.areaCovered.toLowerCase().includes(effSearch)
+        );
+      })
+      .sort((a, b) => {
+        const diff = b.quarterAchievementPercent - a.quarterAchievementPercent;
+        if (Math.abs(diff) > 0.0001) return diff;
+        return b.quarterActual - a.quarterActual;
+      });
+
+    const isKetSellIn = activeKet === 'SELL IN';
+    const isKetSellOut = activeKet === 'SELL OUT';
+    const activeKetDisplayLabel = isKetSellIn
+      ? 'SELL IN (Pencapaian Sell In)'
+      : isKetSellOut
+      ? 'SELL OUT (Pencapaian Sell Out)'
+      : activeKet === 'ALL'
+      ? 'SEMUA KET (Sell In & Sell Out)'
+      : activeKet;
+
+    const topSales = filteredSales[0]
+      ? {
+          name: filteredSales[0].salesName,
+          actual: filteredSales[0].quarterActual,
+          target: filteredSales[0].quarterTarget,
+          percent: filteredSales[0].quarterAchievementPercent,
+        }
+      : null;
+
+    const topBa = filteredBa[0]
+      ? {
+          name: filteredBa[0].baName,
+          store: filteredBa[0].storeName,
+          actual: filteredBa[0].quarterActual,
+          target: filteredBa[0].quarterTarget,
+          percent: filteredBa[0].quarterAchievementPercent,
+        }
+      : null;
+
+    const topTrainer = filteredTrainer[0]
+      ? {
+          name: filteredTrainer[0].trainerName,
+          actual: filteredTrainer[0].quarterActual,
+          score: filteredTrainer[0].avgKpiScore,
+          percent: filteredTrainer[0].quarterAchievementPercent,
+        }
+      : null;
+
+    return {
+      overall: rawQuarter.overall,
+      filteredSales,
+      filteredBa,
+      filteredTrainer,
+      topSales,
+      topBa,
+      topTrainer,
+      isKetSellIn,
+      isKetSellOut,
+      activeKetDisplayLabel,
+    };
+  }, [activeLens, allRecords, filters, selectedQuarter, snap.selectedYear, deferredDayRange, quartalSearch]);
 
   const sidebarItems: Array<{
     id: SidebarLens;
@@ -1657,6 +1868,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     { id: 'promo_ba', label: 'Tim BA, Promo & Visit', icon: <Tag className="w-3.5 h-3.5" /> },
     { id: 'finance_bills', label: 'Profit, Cost & Tagihan', icon: <Wallet className="w-3.5 h-3.5" /> },
     { id: 'targets_alerts', label: 'Target & Analisa Gap', icon: <Target className="w-3.5 h-3.5" /> },
+    { id: 'achieve_quartal', label: 'Achieve Quartal', icon: <Crown className="w-3.5 h-3.5" /> },
   ];
 
   const maxRegionalBar = useMemo(() => {
@@ -3422,20 +3634,115 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 font-mono tabular-nums">
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
-                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Defisit Gap Target</span>
-                  <span className="text-base xl:text-lg font-black text-rose-400 mt-1 block whitespace-nowrap">-{formatRupiah(snap.gapDiagnosis.gapDeficit)}</span>
-                  <span className="text-[11px] text-slate-400 whitespace-nowrap">{snap.gapDiagnosis.lostStoresCount} Toko Pasif</span>
+                <div className="bg-[#121926] border border-[#1F293B] hover:border-rose-500/40 transition-colors rounded-xl p-3 flex flex-col justify-between gap-2.5">
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-sans font-bold uppercase text-slate-400">Defisit Gap Target</span>
+                      <button
+                        type="button"
+                        onClick={() => onNavigateTab('gap')}
+                        title="Buka & Edit Kuota Target Gap di Menu Awal"
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-sans font-bold transition-colors cursor-pointer"
+                      >
+                        <Edit3 className="w-2.5 h-2.5" />
+                        <span>Edit</span>
+                      </button>
+                    </div>
+                    <span className="text-base xl:text-lg font-black text-rose-400 mt-1 block whitespace-nowrap">-{formatRupiah(snap.gapDiagnosis.gapDeficit)}</span>
+                    <span className="text-[11px] text-slate-400 whitespace-nowrap">{snap.gapDiagnosis.lostStoresCount} Toko Pasif</span>
+                  </div>
+                  <div className="pt-2 border-t border-[#1F293B] flex flex-wrap items-center gap-1.5 font-sans">
+                    <button
+                      type="button"
+                      onClick={() => onNavigateTab('gap')}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 border border-rose-500/30 text-[11px] font-bold transition-colors cursor-pointer"
+                    >
+                      <span>Edit Kuota &amp; Gap</span>
+                      <ArrowUpRight className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onNavigateTab('target_mgmt')}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#192234] hover:bg-[#233049] text-slate-200 border border-[#2A3952] text-[11px] font-bold transition-colors cursor-pointer"
+                    >
+                      <span>Edit Target</span>
+                      <ChevronRight className="w-3 h-3" />
+                    </button>
+                  </div>
                 </div>
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
-                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Total BA Terdaftar</span>
-                  <span className="text-base xl:text-lg font-black text-[#FF6B00] mt-1 block whitespace-nowrap">{snap.targetMatrix.bas.length} BA</span>
-                  <span className="text-[11px] text-slate-400 whitespace-nowrap">{snap.targetMatrix.trainers.length} Trainer Aktif</span>
+
+                <div className="bg-[#121926] border border-[#1F293B] hover:border-[#FF6B00]/40 transition-colors rounded-xl p-3 flex flex-col justify-between gap-2.5">
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-sans font-bold uppercase text-slate-400">Total BA Terdaftar</span>
+                      <button
+                        type="button"
+                        onClick={() => onNavigateTab('pengaturan_master')}
+                        title="Buka & Edit Master BA, Trainer & Toko di Menu Awal"
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#FF6B00]/15 hover:bg-[#FF6B00]/25 text-[#FFA04D] border border-[#FF6B00]/30 text-[10px] font-sans font-bold transition-colors cursor-pointer"
+                      >
+                        <Edit3 className="w-2.5 h-2.5" />
+                        <span>Edit</span>
+                      </button>
+                    </div>
+                    <span className="text-base xl:text-lg font-black text-[#FF6B00] mt-1 block whitespace-nowrap">{snap.targetMatrix.bas.length} BA</span>
+                    <span className="text-[11px] text-slate-400 whitespace-nowrap">{snap.targetMatrix.trainers.length} Trainer Aktif</span>
+                  </div>
+                  <div className="pt-2 border-t border-[#1F293B] flex flex-wrap items-center gap-1.5 font-sans">
+                    <button
+                      type="button"
+                      onClick={() => onNavigateTab('target_mgmt')}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#FF6B00]/15 hover:bg-[#FF6B00]/25 text-[#FFB067] border border-[#FF6B00]/30 text-[11px] font-bold transition-colors cursor-pointer"
+                    >
+                      <span>Edit Target BA &amp; Trainer</span>
+                      <ArrowUpRight className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onNavigateTab('pengaturan_master')}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#192234] hover:bg-[#233049] text-slate-200 border border-[#2A3952] text-[11px] font-bold transition-colors cursor-pointer"
+                    >
+                      <span>Edit Master BA &amp; Toko</span>
+                      <ChevronRight className="w-3 h-3" />
+                    </button>
+                  </div>
                 </div>
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
-                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Kesiapan Status Produk</span>
-                  <span className="text-base xl:text-lg font-black text-[#00D2FF] mt-1 block whitespace-nowrap">{targetsAlertsData.productStatusSummary.totalSkuCount} SKU</span>
-                  <span className="text-[11px] text-slate-400 whitespace-nowrap">Clearance/Risk: {targetsAlertsData.productStatusSummary.clearanceObsoleteShare.toFixed(1)}%</span>
+
+                <div className="bg-[#121926] border border-[#1F293B] hover:border-[#00D2FF]/40 transition-colors rounded-xl p-3 flex flex-col justify-between gap-2.5">
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-sans font-bold uppercase text-slate-400">Kesiapan Status Produk</span>
+                      <button
+                        type="button"
+                        onClick={() => onNavigateTab('produk_fokus')}
+                        title="Buka & Edit Pengaturan Produk Fokus & Status SKU di Menu Awal"
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#00D2FF]/15 hover:bg-[#00D2FF]/25 text-[#67E8F9] border border-[#00D2FF]/30 text-[10px] font-sans font-bold transition-colors cursor-pointer"
+                      >
+                        <Edit3 className="w-2.5 h-2.5" />
+                        <span>Edit</span>
+                      </button>
+                    </div>
+                    <span className="text-base xl:text-lg font-black text-[#00D2FF] mt-1 block whitespace-nowrap">{targetsAlertsData.productStatusSummary.totalSkuCount} SKU</span>
+                    <span className="text-[11px] text-slate-400 whitespace-nowrap">Clearance/Risk: {targetsAlertsData.productStatusSummary.clearanceObsoleteShare.toFixed(1)}%</span>
+                  </div>
+                  <div className="pt-2 border-t border-[#1F293B] flex flex-wrap items-center gap-1.5 font-sans">
+                    <button
+                      type="button"
+                      onClick={() => onNavigateTab('produk_fokus')}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#00D2FF]/15 hover:bg-[#00D2FF]/25 text-[#67E8F9] border border-[#00D2FF]/30 text-[11px] font-bold transition-colors cursor-pointer"
+                    >
+                      <span>Edit Produk Fokus</span>
+                      <ArrowUpRight className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onNavigateTab('sku')}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#192234] hover:bg-[#233049] text-slate-200 border border-[#2A3952] text-[11px] font-bold transition-colors cursor-pointer"
+                    >
+                      <span>Lihat Semua SKU</span>
+                      <ChevronRight className="w-3 h-3" />
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -3445,6 +3752,436 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                 gapPreviousPeriodName={targetsAlertsData.gapPreviousPeriodName}
                 gapCurrentPeriodName={targetsAlertsData.gapCurrentPeriodName}
               />
+            </div>
+          )}
+
+          {/* SUB-LENS: ACHIEVE QUARTAL — HALL OF FAME */}
+          {activeLens === 'achieve_quartal' && achieveQuartalData && (
+            <div className="flex-1 flex flex-col gap-3">
+              <div className="bg-gradient-to-r from-[#0E1525] via-[#171E38] to-[#0E1525] text-white rounded-2xl p-4 sm:p-5 border border-[#24314D] shadow-lg">
+                {/* Header Hall of Fame */}
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-4 border-b border-[#24314D]">
+                  <div className="flex items-start gap-2.5">
+                    <div className="p-2 rounded-xl bg-amber-500/15 border border-amber-400/30 shrink-0">
+                      <Crown className="w-5 h-5 text-amber-400" />
+                    </div>
+                    <div>
+                      <h2 className="text-sm sm:text-base font-extrabold text-white tracking-wide uppercase">
+                        Hall of Fame • Juara Terhebat {achieveQuartalData.overall.quarterLabel}
+                      </h2>
+                      <p className="text-[11px] sm:text-xs text-slate-300 mt-0.5">
+                        Peringkat diurutkan dari pencapaian persentase (%) tertinggi • Mengikuti Filter Terintegrasi ({achieveQuartalData.activeKetDisplayLabel})
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-1 p-1 rounded-xl bg-[#0B101C] border border-[#24314D]">
+                      {(['Q1', 'Q2', 'Q3', 'Q4'] as QuarterPeriodKey[]).map((q) => (
+                        <button
+                          key={q}
+                          type="button"
+                          onClick={() => setSelectedQuarter(q)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold transition-colors cursor-pointer ${
+                            selectedQuarter === q
+                              ? 'bg-[#FF6B00] text-white shadow-xs'
+                              : 'text-slate-300 hover:bg-white/10'
+                          }`}
+                        >
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+
+                    <span
+                      className={`text-[11px] font-extrabold px-3 py-1 rounded-full border ${
+                        achieveQuartalData.isKetSellIn
+                          ? 'bg-blue-500/20 text-blue-200 border-blue-400/40'
+                          : achieveQuartalData.isKetSellOut
+                          ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40'
+                          : 'bg-indigo-500/20 text-indigo-200 border-indigo-400/40'
+                      }`}
+                    >
+                      Filter KET: {achieveQuartalData.activeKetDisplayLabel}
+                    </span>
+
+                    <span className="text-[11px] font-semibold px-3 py-1 rounded-full bg-amber-400/10 text-amber-300 border border-amber-400/30">
+                      {achieveQuartalData.overall.dateRangeLabel}
+                    </span>
+
+                    <button
+                      type="button"
+                      onClick={() => onNavigateTab('rangkuman_kuartal')}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#FF6B00] hover:bg-[#EA580C] text-white text-xs font-bold transition-colors cursor-pointer"
+                    >
+                      <span>Buka Menu Achieve Quartal</span>
+                      <ArrowUpRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* 3 Champion Podium Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 mt-4">
+                  {/* Top Sales */}
+                  <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
+                        <Medal className="w-4 h-4 text-blue-400" />
+                        Top Sales Champion
+                      </span>
+                      <span className="text-[11px] font-black px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-400/30">
+                        Peringkat 1
+                      </span>
+                    </div>
+                    <div className="mt-3">
+                      <h4 className="text-base font-extrabold text-white truncate">
+                        {achieveQuartalData.topSales?.name || 'Tidak ada data'}
+                      </h4>
+                      <p className="text-xs text-slate-300 mt-0.5">
+                        {achieveQuartalData.isKetSellIn
+                          ? 'Realisasi Sell In:'
+                          : achieveQuartalData.isKetSellOut
+                          ? 'Realisasi Sell Out:'
+                          : 'Omset Kuartal:'}{' '}
+                        <span className="font-bold text-amber-300 font-mono">
+                          {formatRupiah(achieveQuartalData.topSales?.actual || 0, true)}
+                        </span>
+                      </p>
+                      <div className="mt-2 flex items-center justify-between text-xs font-mono tabular-nums">
+                        <span className="text-slate-400 font-sans">
+                          Target: {formatRupiah(achieveQuartalData.topSales?.target || 0, true)}
+                        </span>
+                        <span className="font-black text-emerald-400">
+                          {formatPercent(achieveQuartalData.topSales?.percent || 0)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Top BA */}
+                  <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-pink-400 flex items-center gap-1.5">
+                        <Medal className="w-4 h-4 text-pink-400" />
+                        Top Beauty Advisor Star
+                      </span>
+                      <span className="text-[11px] font-black px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 border border-pink-400/30">
+                        Peringkat 1
+                      </span>
+                    </div>
+                    <div className="mt-3">
+                      <h4 className="text-base font-extrabold text-white truncate">
+                        {achieveQuartalData.topBa?.name || 'Tidak ada data'}
+                      </h4>
+                      <p className="text-xs text-slate-300 mt-0.5 truncate">
+                        Outlet:{' '}
+                        <span className="font-bold text-pink-300">
+                          {achieveQuartalData.topBa?.store || '-'}
+                        </span>
+                      </p>
+                      <p className="text-xs text-slate-300 mt-0.5">
+                        {achieveQuartalData.isKetSellIn
+                          ? 'Realisasi Sell In:'
+                          : achieveQuartalData.isKetSellOut
+                          ? 'Realisasi Sell Out:'
+                          : 'Omset Kuartal:'}{' '}
+                        <span className="font-bold text-amber-300 font-mono">
+                          {formatRupiah(achieveQuartalData.topBa?.actual || 0, true)}
+                        </span>
+                      </p>
+                      <div className="mt-1.5 flex items-center justify-between text-xs font-mono tabular-nums">
+                        <span className="text-slate-400 font-sans">
+                          Target: {formatRupiah(achieveQuartalData.topBa?.target || 0, true)}
+                        </span>
+                        <span className="font-black text-emerald-400">
+                          {formatPercent(achieveQuartalData.topBa?.percent || 0)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Top Trainer */}
+                  <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
+                        <Medal className="w-4 h-4 text-purple-400" />
+                        Top Trainer of The Quarter
+                      </span>
+                      <span className="text-[11px] font-black px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-400/30">
+                        Peringkat 1
+                      </span>
+                    </div>
+                    <div className="mt-3">
+                      <h4 className="text-base font-extrabold text-white truncate">
+                        {achieveQuartalData.topTrainer?.name || 'Tidak ada data'}
+                      </h4>
+                      <p className="text-xs text-slate-300 mt-0.5">
+                        {achieveQuartalData.isKetSellIn
+                          ? 'Realisasi Sell In:'
+                          : achieveQuartalData.isKetSellOut
+                          ? 'Realisasi Sell Out:'
+                          : 'Realisasi Area:'}{' '}
+                        <span className="font-bold text-purple-300 font-mono">
+                          {formatRupiah(achieveQuartalData.topTrainer?.actual || 0, true)}
+                        </span>
+                      </p>
+                      <div className="mt-2 flex items-center justify-between text-xs font-mono tabular-nums">
+                        <span className="text-slate-400 font-sans">
+                          KPI: {achieveQuartalData.topTrainer?.score || 0} Poin
+                        </span>
+                        <span className="font-black text-emerald-400">
+                          {formatPercent(achieveQuartalData.topTrainer?.percent || 0)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Leaderboard Table Mengikuti Filter Terintegrasi */}
+                <div className="mt-5 pt-4 border-t border-[#24314D]">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+                    <div>
+                      <h4 className="text-xs font-extrabold text-amber-300 uppercase tracking-wider">
+                        Rincian Pencapaian {achieveQuartalData.overall.quarterLabel} —{' '}
+                        {achieveQuartalData.isKetSellIn
+                          ? 'Semua Pencapaian SELL IN'
+                          : achieveQuartalData.isKetSellOut
+                          ? 'Semua Pencapaian SELL OUT'
+                          : 'Semua Pencapaian SELL IN & SELL OUT'}
+                      </h4>
+                      <p className="text-[11px] text-slate-400">
+                        Urutan peringkat berdasarkan persentase pencapaian (%) tertinggi • Filter KET ({achieveQuartalData.activeKetDisplayLabel})
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="relative">
+                        <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          type="text"
+                          value={quartalSearch}
+                          onChange={(e) => setQuartalSearch(e.target.value)}
+                          placeholder="Cari nama / area / toko..."
+                          className="pl-8 pr-7 py-1.5 rounded-lg bg-[#0B101C] border border-[#24314D] focus:border-amber-400 text-xs text-white placeholder:text-slate-500 outline-none w-44 sm:w-52"
+                        />
+                        {quartalSearch && (
+                          <button
+                            type="button"
+                            onClick={() => setQuartalSearch('')}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white cursor-pointer"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1 p-1 bg-white/10 rounded-xl border border-white/10">
+                        {([
+                          { id: 'sales', label: `Sales (${achieveQuartalData.filteredSales.length})` },
+                          { id: 'ba', label: `BA (${achieveQuartalData.filteredBa.length})` },
+                          { id: 'trainer', label: `Trainer (${achieveQuartalData.filteredTrainer.length})` },
+                        ] as const).map((tab) => (
+                          <button
+                            key={tab.id}
+                            type="button"
+                            onClick={() => setHallOfFameTab(tab.id)}
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                              hallOfFameTab === tab.id
+                                ? 'bg-amber-400 text-slate-950 shadow-xs'
+                                : 'text-slate-300 hover:bg-white/10'
+                            }`}
+                          >
+                            {tab.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-[#090E1A]/80 border border-white/10 rounded-xl overflow-x-auto max-h-[430px] overflow-y-auto">
+                    <table className="w-full text-xs text-left border-collapse">
+                      <thead className="sticky top-0 z-10 bg-[#0F172A]">
+                        <tr className="border-b border-white/10 text-slate-300 font-bold">
+                          <th className="py-2.5 px-3 w-12 text-center">Rank</th>
+                          <th className="py-2.5 px-3">
+                            {hallOfFameTab === 'sales'
+                              ? 'Personil Sales'
+                              : hallOfFameTab === 'ba'
+                              ? 'Nama BA & Toko'
+                              : 'Nama Trainer'}
+                          </th>
+                          <th className="py-2.5 px-3">Area</th>
+                          {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
+                            <>
+                              <th className="py-2.5 px-3 text-right">Target Sell In</th>
+                              <th className="py-2.5 px-3 text-right">Realisasi Sell In</th>
+                              <th className="py-2.5 px-3 text-center">% Sell In</th>
+                            </>
+                          )}
+                          {(achieveQuartalData.isKetSellOut || !achieveQuartalData.isKetSellIn) && (
+                            <>
+                              <th className="py-2.5 px-3 text-right">Target Sell Out</th>
+                              <th className="py-2.5 px-3 text-right">Realisasi Sell Out</th>
+                              <th className="py-2.5 px-3 text-center">% Sell Out</th>
+                            </>
+                          )}
+                          {!achieveQuartalData.isKetSellIn && !achieveQuartalData.isKetSellOut && (
+                            <th className="py-2.5 px-3 text-center">% Peringkat</th>
+                          )}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/5 font-mono tabular-nums">
+                        {hallOfFameTab === 'sales' &&
+                          (achieveQuartalData.filteredSales.length > 0 ? (
+                            achieveQuartalData.filteredSales.map((s, idx) => (
+                              <tr key={s.salesName} className="hover:bg-white/5 transition-colors">
+                                <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
+                                <td className="py-2 px-3 font-sans font-bold text-white">{s.salesName}</td>
+                                <td className="py-2 px-3 font-sans text-slate-400">{s.coverArea}</td>
+                                {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
+                                  <>
+                                    <td className="py-2 px-3 text-right text-slate-300">
+                                      {formatRupiah(s.quarterTargetSellIn, true)}
+                                    </td>
+                                    <td className="py-2 px-3 text-right font-bold text-sky-300">
+                                      {formatRupiah(s.quarterActualSellIn, true)}
+                                    </td>
+                                    <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                                      {formatPercent(s.quarterAchievementSellInPercent, false)}
+                                    </td>
+                                  </>
+                                )}
+                                {(achieveQuartalData.isKetSellOut || !achieveQuartalData.isKetSellIn) && (
+                                  <>
+                                    <td className="py-2 px-3 text-right text-slate-300">
+                                      {formatRupiah(s.quarterTargetSellOut, true)}
+                                    </td>
+                                    <td className="py-2 px-3 text-right font-bold text-emerald-300">
+                                      {formatRupiah(s.quarterActualSellOut, true)}
+                                    </td>
+                                    <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                                      {formatPercent(s.quarterAchievementSellOutPercent, false)}
+                                    </td>
+                                  </>
+                                )}
+                                {!achieveQuartalData.isKetSellIn && !achieveQuartalData.isKetSellOut && (
+                                  <td className="py-2 px-3 text-center font-extrabold text-amber-300">
+                                    {formatPercent(s.quarterAchievementPercent, false)}
+                                  </td>
+                                )}
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan={10} className="py-8 text-center font-sans text-slate-400">
+                                Tidak ada data Sales pada filter yang dipilih.
+                              </td>
+                            </tr>
+                          ))}
+
+                        {hallOfFameTab === 'ba' &&
+                          (achieveQuartalData.filteredBa.length > 0 ? (
+                            achieveQuartalData.filteredBa.map((b, idx) => (
+                              <tr key={`${b.baName}-${b.storeName}`} className="hover:bg-white/5 transition-colors">
+                                <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
+                                <td className="py-2 px-3 font-sans">
+                                  <span className="font-bold text-white block">{b.baName}</span>
+                                  <span className="text-[10px] text-slate-400">{b.storeName}</span>
+                                </td>
+                                <td className="py-2 px-3 font-sans text-slate-400">{b.coverArea}</td>
+                                {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
+                                  <>
+                                    <td className="py-2 px-3 text-right text-slate-300">
+                                      {formatRupiah(b.quarterTargetSellIn, true)}
+                                    </td>
+                                    <td className="py-2 px-3 text-right font-bold text-sky-300">
+                                      {formatRupiah(b.quarterActualSellIn, true)}
+                                    </td>
+                                    <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                                      {formatPercent(b.quarterAchievementSellInPercent, false)}
+                                    </td>
+                                  </>
+                                )}
+                                {(achieveQuartalData.isKetSellOut || !achieveQuartalData.isKetSellIn) && (
+                                  <>
+                                    <td className="py-2 px-3 text-right text-slate-300">
+                                      {formatRupiah(b.quarterTargetSellOut, true)}
+                                    </td>
+                                    <td className="py-2 px-3 text-right font-bold text-emerald-300">
+                                      {formatRupiah(b.quarterActualSellOut, true)}
+                                    </td>
+                                    <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                                      {formatPercent(b.quarterAchievementSellOutPercent, false)}
+                                    </td>
+                                  </>
+                                )}
+                                {!achieveQuartalData.isKetSellIn && !achieveQuartalData.isKetSellOut && (
+                                  <td className="py-2 px-3 text-center font-extrabold text-amber-300">
+                                    {formatPercent(b.quarterAchievementPercent, false)}
+                                  </td>
+                                )}
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan={10} className="py-8 text-center font-sans text-slate-400">
+                                Tidak ada data BA pada filter yang dipilih.
+                              </td>
+                            </tr>
+                          ))}
+
+                        {hallOfFameTab === 'trainer' &&
+                          (achieveQuartalData.filteredTrainer.length > 0 ? (
+                            achieveQuartalData.filteredTrainer.map((t, idx) => (
+                              <tr key={t.trainerName} className="hover:bg-white/5 transition-colors">
+                                <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
+                                <td className="py-2 px-3 font-sans font-bold text-white">{t.trainerName}</td>
+                                <td className="py-2 px-3 font-sans text-slate-400">{t.areaCovered}</td>
+                                {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
+                                  <>
+                                    <td className="py-2 px-3 text-right text-slate-300">
+                                      {formatRupiah(t.quarterTargetSellIn, true)}
+                                    </td>
+                                    <td className="py-2 px-3 text-right font-bold text-sky-300">
+                                      {formatRupiah(t.quarterActualSellIn, true)}
+                                    </td>
+                                    <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                                      {formatPercent(t.quarterAchievementSellInPercent, false)}
+                                    </td>
+                                  </>
+                                )}
+                                {(achieveQuartalData.isKetSellOut || !achieveQuartalData.isKetSellIn) && (
+                                  <>
+                                    <td className="py-2 px-3 text-right text-slate-300">
+                                      {formatRupiah(t.quarterTargetSellOut, true)}
+                                    </td>
+                                    <td className="py-2 px-3 text-right font-bold text-emerald-300">
+                                      {formatRupiah(t.quarterActualSellOut, true)}
+                                    </td>
+                                    <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                                      {formatPercent(t.quarterAchievementSellOutPercent, false)}
+                                    </td>
+                                  </>
+                                )}
+                                {!achieveQuartalData.isKetSellIn && !achieveQuartalData.isKetSellOut && (
+                                  <td className="py-2 px-3 text-center font-extrabold text-amber-300">
+                                    {formatPercent(t.quarterAchievementPercent, false)}
+                                  </td>
+                                )}
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan={10} className="py-8 text-center font-sans text-slate-400">
+                                Tidak ada data Trainer pada filter yang dipilih.
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 

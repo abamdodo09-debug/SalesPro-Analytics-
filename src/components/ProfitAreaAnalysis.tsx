@@ -37,7 +37,12 @@ import {
 } from 'lucide-react';
 import { TransactionRecord, DashboardFilters, ProfitItemBreakdown, ProfitStoreItem } from '../types/dashboard';
 import { formatRupiah, formatPercent, filterRecords } from '../utils/analytics';
-import { calculateProfitArea } from '../utils/profitCalculations';
+import {
+  calculateProfitArea,
+  combineMonthlyProfitAreaSummaries,
+  MonthlyProfitSummaryEntry,
+} from '../utils/profitCalculations';
+import { resolveRecordMonthAndYear } from '../services/sellInSellOutService';
 import { SalaryBreakdownModal } from './SalaryBreakdownModal';
 import * as XLSX from 'xlsx';
 import {
@@ -324,28 +329,6 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
     return `${bLabel} (${tLabel})`;
   }, [isCustomDateRangeActive, dateRangeStart, dateRangeEnd, filters.BULAN, filters.TAHUN]);
 
-  // Calculate Profit Area Summary using synchronized targets for active month / custom date range
-  const profitSummary = useMemo(() => {
-    return calculateProfitArea(
-      scopedRecords,
-      marginPercent / 100,
-      operatingCostPercent / 100,
-      loadSalesTargets(activeTargetMonth),
-      loadBaNonLavojoyTargets(activeTargetMonth),
-      loadBaLavojoyTargets(activeTargetMonth),
-      undefined,
-      undefined,
-      DEFAULT_SALES_TARGET,
-      DEFAULT_BA_NON_LAVOJOY_TARGET,
-      DEFAULT_BA_LAVOJOY_TARGET,
-      undefined,
-      loadTrainerConfigs(),
-      loadTrainerTargets(activeTargetMonth),
-      activeTrainerMonthPeriod,
-      loadBaFocusTargets(activeTargetMonth)
-    );
-  }, [scopedRecords, marginPercent, operatingCostPercent, activeTargetMonth, activeTrainerMonthPeriod, targetSyncVersion]);
-
   // Selected Month for 12-Month Graphic Inspection (synced with integrated Month filter)
   const [selectedPnlMonth, setSelectedPnlMonth] = useState<string>(() => {
     return filters.BULAN && filters.BULAN !== 'ALL' ? filters.BULAN.toUpperCase() : 'OKTOBER';
@@ -381,7 +364,23 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
   const [editPnlSpvCount, setEditPnlSpvCount] = useState<number>(0);
   const [editPnlNote, setEditPnlNote] = useState<string>('');
 
-  // 12-Month P&L & Headcount Trend (Januari - Desember) - Realisasi Sell In HANYA dari data SELL IN Google Sheet terhubung + bisa diedit manual
+  const canApplyMonthlyOverrides = useMemo(() => {
+    return (
+      filters.SALES === 'ALL' &&
+      (!filters.TRAINER || filters.TRAINER === 'ALL') &&
+      filters.SPV === 'ALL' &&
+      filters.REGION === 'ALL' &&
+      filters.BRAND === 'ALL' &&
+      (!filters.KATEGORI || filters.KATEGORI === 'ALL') &&
+      (!filters.STATUS_PRODUK || filters.STATUS_PRODUK === 'ALL') &&
+      filters.NAMA_STORE === 'ALL' &&
+      filters.SKU === 'ALL' &&
+      (!filters.KET || filters.KET === 'ALL') &&
+      (!filters.searchQuery || !filters.searchQuery.trim())
+    );
+  }, [filters]);
+
+  // 12-Month P&L & Headcount Trend (Januari - Desember) - Realisasi Sell In dari data terhubung + bisa diedit manual
   const monthlyPnlData = useMemo(() => {
     const months = [
       { key: 'JANUARI', label: 'Jan', fullName: 'Januari' },
@@ -403,44 +402,61 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
     const activeYearStr = filters.TAHUN !== 'ALL' ? String(filters.TAHUN).trim() : 'ALL';
     const yearNumForPeriod = filters.TAHUN !== 'ALL' ? Number(filters.TAHUN) || resolvedYearForFilter : resolvedYearForFilter;
 
+    // Single pass bucketing across 12 months
+    const nonMonthFiltered = filterRecords(allRecs, {
+      ...filters,
+      BULAN: 'ALL',
+      TAHUN: activeYearStr,
+    });
+    const monthRecsBucket = new Map<string, TransactionRecord[]>();
+    months.forEach((m) => monthRecsBucket.set(m.key, []));
+    const unmappedRecs: TransactionRecord[] = [];
+    for (let i = 0; i < nonMonthFiltered.length; i++) {
+      const r = nonMonthFiltered[i];
+      const mKey = resolveRecordMonthAndYear(r).month || (r.BULAN || '').trim().toUpperCase();
+      const bucket = monthRecsBucket.get(mKey);
+      if (bucket) bucket.push(r);
+      else unmappedRecs.push(r);
+    }
+
+    const monthlyEntriesForCombine: MonthlyProfitSummaryEntry[] = [];
+
     const data = months.map((m) => {
-      // Ambil transaksi bulan m.key sesuai filter terintegrasi non-bulan (Region, Area, Sales, Brand, Store, dll) dan Tahun
-      const monthRecs = filterRecords(allRecs, {
-        ...filters,
-        BULAN: m.key,
-        TAHUN: activeYearStr,
-        KET: 'ALL',
+      const monthRecs = monthRecsBucket.get(m.key) || [];
+
+      const mSummary =
+        monthRecs.length > 0
+          ? calculateProfitArea(
+              monthRecs,
+              marginPercent / 100,
+              operatingCostPercent / 100,
+              loadSalesTargets(m.key),
+              loadBaNonLavojoyTargets(m.key),
+              loadBaLavojoyTargets(m.key),
+              undefined,
+              undefined,
+              DEFAULT_SALES_TARGET,
+              DEFAULT_BA_NON_LAVOJOY_TARGET,
+              DEFAULT_BA_LAVOJOY_TARGET,
+              undefined,
+              trainerConfigs,
+              loadTrainerTargets(m.key),
+              `${m.key} ${yearNumForPeriod}`,
+              loadBaFocusTargets(m.key)
+            )
+          : null;
+
+      const sheetSellIn = mSummary
+        ? mSummary.sellInActual
+        : monthRecs.filter(isSellInRecord).reduce((acc, r) => acc + (r.VALUE || 0), 0);
+
+      // Check User Override for this month (only when no sub-filters are active)
+      const ov = canApplyMonthlyOverrides ? (monthlyPnlOverrides[m.key] || {}) : {};
+      monthlyEntriesForCombine.push({
+        monthKey: m.key,
+        summary: mSummary,
+        override: canApplyMonthlyOverrides ? monthlyPnlOverrides[m.key] : undefined,
       });
-
-      // Pencapaian SELL IN asli dari Google Sheet yang terhubung (0 jika tidak ada data SELL IN di sheet)
-      const sheetSellIn = monthRecs
-        .filter(isSellInRecord)
-        .reduce((acc, r) => acc + (r.VALUE || 0), 0);
-
-      let mSummary;
-      if (monthRecs.length > 0) {
-        mSummary = calculateProfitArea(
-          monthRecs,
-          marginPercent / 100,
-          operatingCostPercent / 100,
-          loadSalesTargets(m.key),
-          loadBaNonLavojoyTargets(m.key),
-          loadBaLavojoyTargets(m.key),
-          undefined,
-          undefined,
-          DEFAULT_SALES_TARGET,
-          DEFAULT_BA_NON_LAVOJOY_TARGET,
-          DEFAULT_BA_LAVOJOY_TARGET,
-          undefined,
-          trainerConfigs,
-          loadTrainerTargets(m.key),
-          `${m.key} ${yearNumForPeriod}`,
-          loadBaFocusTargets(m.key)
-        );
-      }
-
-      // Check User Override for this month
-      const ov = monthlyPnlOverrides[m.key] || {};
 
       // Realisasi Sell In murni dari Google Sheet SELL IN (atau override manual user)
       const sellIn = ov.sellIn !== undefined ? ov.sellIn : sheetSellIn;
@@ -523,6 +539,30 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
       };
     });
 
+    if (unmappedRecs.length > 0) {
+      monthlyEntriesForCombine.push({
+        monthKey: 'LAINNYA',
+        summary: calculateProfitArea(
+          unmappedRecs,
+          marginPercent / 100,
+          operatingCostPercent / 100,
+          loadSalesTargets('ALL'),
+          loadBaNonLavojoyTargets('ALL'),
+          loadBaLavojoyTargets('ALL'),
+          undefined,
+          undefined,
+          DEFAULT_SALES_TARGET,
+          DEFAULT_BA_NON_LAVOJOY_TARGET,
+          DEFAULT_BA_LAVOJOY_TARGET,
+          undefined,
+          trainerConfigs,
+          loadTrainerTargets('ALL'),
+          `OKTOBER ${yearNumForPeriod}`,
+          loadBaFocusTargets('ALL')
+        ),
+      });
+    }
+
     const activeMonths = data.filter((d) => d.sellIn > 0 || d.salaryCost > 0 || d.hasData || d.isCustomEdited);
     const poolForMax = activeMonths.length > 0 ? activeMonths : data;
 
@@ -558,6 +598,7 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
 
     return {
       monthlyList: data,
+      monthlyEntriesForCombine,
       maxProfitItem,
       maxSalaryItem,
       maxSellIn,
@@ -571,7 +612,48 @@ export const ProfitAreaAnalysis: React.FC<ProfitAreaAnalysisProps> = ({
       avgNetMarginPct,
       activeMonthCount: activeMonths.length,
     };
-  }, [records, allRecords, filters, marginPercent, operatingCostPercent, monthlyPnlOverrides, targetSyncVersion, resolvedYearForFilter]);
+  }, [records, allRecords, filters, marginPercent, operatingCostPercent, monthlyPnlOverrides, canApplyMonthlyOverrides, targetSyncVersion, resolvedYearForFilter]);
+
+  // Calculate Profit Area Summary using synchronized targets for active month / custom date range.
+  // Ketika filter Bulan === 'ALL' (Semua Bulan) dan tidak menggunakan custom date range,
+  // Sisa Profit Bersih diakumulasikan per bulan (Jan-Des) sehingga 100% sama dengan Total Profit Tahunan.
+  const profitSummary = useMemo(() => {
+    if (!isCustomDateRangeActive && filters.BULAN === 'ALL') {
+      return combineMonthlyProfitAreaSummaries(
+        monthlyPnlData.monthlyEntriesForCombine,
+        marginPercent / 100,
+        operatingCostPercent / 100
+      );
+    }
+    return calculateProfitArea(
+      scopedRecords,
+      marginPercent / 100,
+      operatingCostPercent / 100,
+      loadSalesTargets(activeTargetMonth),
+      loadBaNonLavojoyTargets(activeTargetMonth),
+      loadBaLavojoyTargets(activeTargetMonth),
+      undefined,
+      undefined,
+      DEFAULT_SALES_TARGET,
+      DEFAULT_BA_NON_LAVOJOY_TARGET,
+      DEFAULT_BA_LAVOJOY_TARGET,
+      undefined,
+      loadTrainerConfigs(),
+      loadTrainerTargets(activeTargetMonth),
+      activeTrainerMonthPeriod,
+      loadBaFocusTargets(activeTargetMonth)
+    );
+  }, [
+    isCustomDateRangeActive,
+    filters.BULAN,
+    monthlyPnlData,
+    scopedRecords,
+    marginPercent,
+    operatingCostPercent,
+    activeTargetMonth,
+    activeTrainerMonthPeriod,
+    targetSyncVersion,
+  ]);
 
   // Handlers for Inline Sell In Editing
   const startInlineEditSellIn = (monthKey: string, currentSellIn: number) => {

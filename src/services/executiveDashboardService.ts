@@ -47,7 +47,12 @@ import {
   calculateStoreBaContribution,
   calculateMonthlyStoreBaSellInContribution,
 } from './storeBaContributionService';
-import { calculateProfitArea } from '../utils/profitCalculations';
+import {
+  calculateProfitArea,
+  combineMonthlyProfitAreaSummaries,
+  MonthlyProfitOverrideInput,
+  MonthlyProfitSummaryEntry,
+} from '../utils/profitCalculations';
 import { loadStoreBillsWithRecords, loadBaIncidents } from './agingAndKpiService';
 import {
   loadOnlinePromoReports,
@@ -725,27 +730,104 @@ export function buildExecutiveCoreSnapshot(
     filters
   );
 
-  // 9. Profit Area Summary (single call for active scope — 12-mo P&L chart is lazy-loaded)
+  // 9. Profit Area Summary
+  // Jika filter BULAN === 'ALL' (Semua Bulan), akumulasikan P&L + Gaji SDM per bulan (Jan-Des)
+  // agar total beban gaji bulanan dan Sisa Profit Bersih tepat & sama persis dengan Total Profit Tahunan.
   const normMonthKey =
     filters.BULAN && filters.BULAN !== 'ALL' ? filters.BULAN.toUpperCase() : 'ALL';
-  const profitSummary = calculateProfitArea(
-    effectiveFilteredRecords,
-    0.55,
-    0.33,
-    loadSalesTargets(normMonthKey),
-    loadBaNonLavojoyTargets(normMonthKey),
-    loadBaLavojoyTargets(normMonthKey),
-    {},
-    {},
-    DEFAULT_SALES_TARGET,
-    DEFAULT_BA_NON_LAVOJOY_TARGET,
-    DEFAULT_BA_LAVOJOY_TARGET,
-    undefined,
-    loadTrainerConfigs(),
-    loadTrainerTargets(normMonthKey),
-    normMonthKey === 'ALL' ? `NOVEMBER ${selectedYear}` : `${normMonthKey} ${selectedYear}`,
-    loadBaFocusTargets(normMonthKey)
-  );
+  const trainerConfigs = loadTrainerConfigs();
+  let profitSummary: ProfitAreaSummary;
+
+  if (normMonthKey === 'ALL') {
+    const canApplyOverrides = canApplyMonthlyPnlOverrides(filters, dayRange);
+    const savedPnlOverrides = canApplyOverrides ? loadSavedMonthlyPnlOverrides() : {};
+    const monthBuckets = new Map<string, TransactionRecord[]>();
+    MONTHS_12.forEach((m) => monthBuckets.set(m, []));
+    const unmappedRecs: TransactionRecord[] = [];
+
+    for (let i = 0; i < effectiveFilteredRecords.length; i++) {
+      const r = effectiveFilteredRecords[i];
+      const mKey = resolveRecordMonthAndYear(r).month || (r.BULAN || '').trim().toUpperCase();
+      const arr = monthBuckets.get(mKey);
+      if (arr) arr.push(r);
+      else unmappedRecs.push(r);
+    }
+
+    const entries: MonthlyProfitSummaryEntry[] = MONTHS_12.map((mKey) => {
+      const mRecs = monthBuckets.get(mKey) || [];
+      const summaryForMonth =
+        mRecs.length > 0
+          ? calculateProfitArea(
+              mRecs,
+              0.55,
+              0.33,
+              loadSalesTargets(mKey),
+              loadBaNonLavojoyTargets(mKey),
+              loadBaLavojoyTargets(mKey),
+              {},
+              {},
+              DEFAULT_SALES_TARGET,
+              DEFAULT_BA_NON_LAVOJOY_TARGET,
+              DEFAULT_BA_LAVOJOY_TARGET,
+              undefined,
+              trainerConfigs,
+              loadTrainerTargets(mKey),
+              `${mKey} ${selectedYear}`,
+              loadBaFocusTargets(mKey)
+            )
+          : null;
+      return {
+        monthKey: mKey,
+        summary: summaryForMonth,
+        override: canApplyOverrides ? savedPnlOverrides[mKey] : undefined,
+      };
+    });
+
+    if (unmappedRecs.length > 0) {
+      entries.push({
+        monthKey: 'LAINNYA',
+        summary: calculateProfitArea(
+          unmappedRecs,
+          0.55,
+          0.33,
+          loadSalesTargets('ALL'),
+          loadBaNonLavojoyTargets('ALL'),
+          loadBaLavojoyTargets('ALL'),
+          {},
+          {},
+          DEFAULT_SALES_TARGET,
+          DEFAULT_BA_NON_LAVOJOY_TARGET,
+          DEFAULT_BA_LAVOJOY_TARGET,
+          undefined,
+          trainerConfigs,
+          loadTrainerTargets('ALL'),
+          `NOVEMBER ${selectedYear}`,
+          loadBaFocusTargets('ALL')
+        ),
+      });
+    }
+
+    profitSummary = combineMonthlyProfitAreaSummaries(entries, 0.55, 0.33);
+  } else {
+    profitSummary = calculateProfitArea(
+      effectiveFilteredRecords,
+      0.55,
+      0.33,
+      loadSalesTargets(normMonthKey),
+      loadBaNonLavojoyTargets(normMonthKey),
+      loadBaLavojoyTargets(normMonthKey),
+      {},
+      {},
+      DEFAULT_SALES_TARGET,
+      DEFAULT_BA_NON_LAVOJOY_TARGET,
+      DEFAULT_BA_LAVOJOY_TARGET,
+      undefined,
+      trainerConfigs,
+      loadTrainerTargets(normMonthKey),
+      `${normMonthKey} ${selectedYear}`,
+      loadBaFocusTargets(normMonthKey)
+    );
+  }
 
   // 10. Aging Piutang & Tagihan (lightweight summary scalars)
   const billsList = loadStoreBillsWithRecords(allRecords);
@@ -1019,44 +1101,66 @@ export function buildPromoBaLensData(): PromoBaLensData {
   };
 }
 
+type StoredMonthlyPnlOverride = MonthlyProfitOverrideInput & {
+  salesCount?: number;
+  baCount?: number;
+  trainerCount?: number;
+  spvCount?: number;
+  sdmCount?: number;
+};
+
+function loadSavedMonthlyPnlOverrides(): Record<string, StoredMonthlyPnlOverride> {
+  try {
+    const rawOv = localStorage.getItem('salespro_monthly_pnl_overrides_v2');
+    return rawOv ? JSON.parse(rawOv) : {};
+  } catch {
+    return {};
+  }
+}
+
+function canApplyMonthlyPnlOverrides(
+  filters: DashboardFilters,
+  dayRange?: ExecutiveDayRange
+): boolean {
+  if (normalizeDayRange(dayRange).active) return false;
+  return (
+    filters.SALES === 'ALL' &&
+    (!filters.TRAINER || filters.TRAINER === 'ALL') &&
+    filters.SPV === 'ALL' &&
+    filters.REGION === 'ALL' &&
+    filters.BRAND === 'ALL' &&
+    (!filters.KATEGORI || filters.KATEGORI === 'ALL') &&
+    (!filters.STATUS_PRODUK || filters.STATUS_PRODUK === 'ALL') &&
+    filters.NAMA_STORE === 'ALL' &&
+    filters.SKU === 'ALL' &&
+    (!filters.KET || filters.KET === 'ALL') &&
+    (!filters.searchQuery || !filters.searchQuery.trim())
+  );
+}
+
 export function buildMonthlyProfitHrSummary(
   allRecords: TransactionRecord[],
   filters: DashboardFilters,
-  selectedYear: number
+  selectedYear: number,
+  dayRange?: ExecutiveDayRange
 ): MonthlyProfitHrSummary {
-  let savedPnlOverrides: Record<
-    string,
-    {
-      sellIn?: number;
-      margin?: number;
-      opsCost?: number;
-      salaryCost?: number;
-      netProfit?: number;
-      salesCount?: number;
-      baCount?: number;
-      trainerCount?: number;
-      spvCount?: number;
-      sdmCount?: number;
-    }
-  > = {};
-  try {
-    const rawOv = localStorage.getItem('salespro_monthly_pnl_overrides_v2');
-    if (rawOv) savedPnlOverrides = JSON.parse(rawOv);
-  } catch {
-    savedPnlOverrides = {};
-  }
+  const canApplyOverrides = canApplyMonthlyPnlOverrides(filters, dayRange);
+  const savedPnlOverrides = canApplyOverrides ? loadSavedMonthlyPnlOverrides() : {};
 
-  const profitNonMonthFiltered = filterRecords(allRecords, {
+  const nonMonthBase = filterRecords(allRecords, {
     ...filters,
     BULAN: 'ALL',
     TAHUN: filters.TAHUN !== 'ALL' ? String(filters.TAHUN).trim() : 'ALL',
-    KET: 'ALL',
   });
+  const profitNonMonthFiltered = normalizeDayRange(dayRange).active
+    ? filterRecordsByDayRange(nonMonthBase, dayRange)
+    : nonMonthBase;
+
   const monthRecsBucket = new Map<string, TransactionRecord[]>();
   MONTHS_12.forEach((m) => monthRecsBucket.set(m, []));
   for (let i = 0; i < profitNonMonthFiltered.length; i++) {
     const r = profitNonMonthFiltered[i];
-    const mKey = (r.BULAN || '').trim().toUpperCase() || resolveRecordMonthAndYear(r).month;
+    const mKey = resolveRecordMonthAndYear(r).month || (r.BULAN || '').trim().toUpperCase();
     const arr = monthRecsBucket.get(mKey);
     if (arr) arr.push(r);
   }
@@ -1065,13 +1169,6 @@ export function buildMonthlyProfitHrSummary(
 
   const monthlyProfitList: MonthlyProfitHrBarItem[] = MONTHS_12.map((mKey, idx) => {
     const mRecs = monthRecsBucket.get(mKey) || [];
-    let sheetSellIn = 0;
-    for (let i = 0; i < mRecs.length; i++) {
-      if (classifyRecordKet(mRecs[i].KET) === 'SELL IN') {
-        sheetSellIn += Number(mRecs[i].VALUE) || 0;
-      }
-    }
-
     const mSummary =
       mRecs.length > 0
         ? calculateProfitArea(
@@ -1094,7 +1191,8 @@ export function buildMonthlyProfitHrSummary(
           )
         : null;
 
-    const ov = savedPnlOverrides[mKey] || {};
+    const sheetSellIn = mSummary ? mSummary.sellInActual : 0;
+    const ov = canApplyOverrides ? savedPnlOverrides[mKey] || {} : {};
     const sellIn = ov.sellIn !== undefined ? ov.sellIn : sheetSellIn;
     const margin = ov.margin !== undefined ? ov.margin : Math.round(sellIn * 0.55);
     const opsCost = ov.opsCost !== undefined ? ov.opsCost : Math.round(sellIn * 0.33);
@@ -1224,7 +1322,7 @@ export function buildSalesProExecutiveSnapshot(
   const mg = buildMarketShareLensData();
   const promo = buildPromoBaLensData();
   const channelRows = buildChannelGrowthLensData(allRecords, core.selectedYear, filters, dayRange);
-  const monthlyProfitHrSummary = buildMonthlyProfitHrSummary(allRecords, filters, core.selectedYear);
+  const monthlyProfitHrSummary = buildMonthlyProfitHrSummary(allRecords, filters, core.selectedYear, dayRange);
   const targetsGap = buildTargetsAlertsLensData(allRecords, filteredRecords, filters, core.gapDiagnosis, dayRange);
 
   return {
