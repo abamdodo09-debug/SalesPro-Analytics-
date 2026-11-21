@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   FileSpreadsheet,
   RefreshCw,
@@ -30,6 +30,7 @@ import {
   MapPin,
   Tag,
   PieChart,
+  LayoutDashboard,
 } from 'lucide-react';
 import { ActiveTab, GasConfig, DashboardFilters } from '../types/dashboard';
 
@@ -64,10 +65,11 @@ interface HeaderProps {
   onExportPdf?: () => void;
   onSyncGas: () => void;
   isSyncing: boolean;
+  isPendingTab?: boolean;
   filters?: DashboardFilters;
 }
 
-export const Header: React.FC<HeaderProps> = ({
+export const Header: React.FC<HeaderProps> = React.memo(({
   activeTab,
   onTabChange,
   gasConfig,
@@ -80,6 +82,7 @@ export const Header: React.FC<HeaderProps> = ({
   onExportPdf,
   onSyncGas,
   isSyncing,
+  isPendingTab = false,
   filters,
 }) => {
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
@@ -87,8 +90,8 @@ export const Header: React.FC<HeaderProps> = ({
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const navContainerRef = useRef<HTMLDivElement>(null);
 
-  // Grouped Menu and Sub-Menu structure
-  const menuCategories: MainMenuCategory[] = [
+  // Grouped Menu and Sub-Menu structure (memoized once)
+  const menuCategories: MainMenuCategory[] = useMemo(() => [
     {
       id: 'sales_analytics',
       label: 'Analisis Penjualan',
@@ -96,6 +99,14 @@ export const Header: React.FC<HeaderProps> = ({
       activeColor: 'from-blue-600 via-indigo-600 to-teal-600',
       badgeColor: 'bg-blue-100 text-blue-800 border-blue-200',
       subMenus: [
+        {
+          id: 'executive_dashboard',
+          label: 'Dashboard',
+          shortLabel: 'Dashboard',
+          description: 'Dashboard eksekutif lengkap seluruh data SalesPro Analytics',
+          icon: <LayoutDashboard className="w-4 h-4 text-orange-600" />,
+          badge: 'Eksekutif',
+        },
         {
           id: 'overview',
           label: 'Ringkasan Eksekutif',
@@ -348,7 +359,7 @@ export const Header: React.FC<HeaderProps> = ({
         },
       ],
     },
-  ];
+  ], []);
 
   // Determine which category the current activeTab belongs to
   const activeCategory = menuCategories.find((cat) =>
@@ -708,6 +719,12 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* Sync with Filter Terintegrasi Indicator Badge */}
           <div className="flex items-center gap-2 text-xs shrink-0 font-medium text-slate-600">
+            {isPendingTab && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200 font-bold text-[10px]">
+                <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                <span>Membuka...</span>
+              </span>
+            )}
             <span className="flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold text-[10px] shadow-2xs">
               <CheckCircle2 className="w-3 h-3 text-emerald-600" />
               <span>Sinkron Filter Terintegrasi</span>
@@ -727,4 +744,4 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
     </header>
   );
-};
+});

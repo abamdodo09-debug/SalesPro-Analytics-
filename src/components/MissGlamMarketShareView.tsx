@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
+  BarChart3,
   Calendar,
   Check,
   CheckCircle2,
@@ -12,7 +13,10 @@ import {
   PlusCircle,
   Search,
   Store,
+  Target,
   Trash2,
+  TrendingDown,
+  TrendingUp,
   X,
 } from 'lucide-react';
 import {
@@ -26,6 +30,7 @@ import {
   addMgStoreOption,
   aggregateMonthlyMgRecap,
   aggregatePerStoreMgRecap,
+  analyzeMgStoreMarketShare,
   clearAllMgMarketShareItems,
   computeMarketSharePct,
   DEFAULT_MG_STORES,
@@ -39,6 +44,58 @@ import {
 interface MissGlamMarketShareViewProps {
   filters: DashboardFilters;
   onNotify?: (message: string, type?: 'success' | 'error') => void;
+}
+
+function parseFreeNumericInput(
+  raw: string,
+  allowThousandDotGrouping: boolean = true
+): number | null {
+  const cleaned = raw
+    .trim()
+    .replace(/^rp\s*/i, '')
+    .replace(/%$/g, '')
+    .replace(/\s+/g, '');
+  if (!cleaned) return null;
+
+  const signMatch = cleaned.match(/^([+-])?(.*)$/);
+  const sign = signMatch?.[1] === '-' ? -1 : 1;
+  const body = signMatch?.[2] ?? '';
+  if (!body) return null;
+
+  if (allowThousandDotGrouping) {
+    if (/^\d{1,3}(\.\d{3})+$/.test(body)) {
+      const val = Number(body.replace(/\./g, ''));
+      return Number.isFinite(val) ? sign * val : null;
+    }
+    if (/^\d{1,3}(,\d{3})+$/.test(body)) {
+      const val = Number(body.replace(/,/g, ''));
+      return Number.isFinite(val) ? sign * val : null;
+    }
+  } else {
+    if (/^\d{1,3}(\.\d{3}){2,}$/.test(body)) {
+      const val = Number(body.replace(/\./g, ''));
+      return Number.isFinite(val) ? sign * val : null;
+    }
+    if (/^\d{1,3}(,\d{3}){2,}$/.test(body)) {
+      const val = Number(body.replace(/,/g, ''));
+      return Number.isFinite(val) ? sign * val : null;
+    }
+  }
+
+  if (/^\d{1,3}(\.\d{3})+,\d+$/.test(body)) {
+    const val = Number(body.replace(/\./g, '').replace(',', '.'));
+    return Number.isFinite(val) ? sign * val : null;
+  }
+
+  if (/^\d{1,3}(,\d{3})+\.\d+$/.test(body)) {
+    const val = Number(body.replace(/,/g, ''));
+    return Number.isFinite(val) ? sign * val : null;
+  }
+
+  const normalized = body.replace(',', '.');
+  if (!/^\d+(\.\d+)?$/.test(normalized)) return null;
+  const val = Number(normalized);
+  return Number.isFinite(val) ? sign * val : null;
 }
 
 export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = ({
@@ -93,6 +150,7 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
   const [filterMonth, setFilterMonth] = useState<string>('ALL');
   const [filterStore, setFilterStore] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [hoveredChartMonthIdx, setHoveredChartMonthIdx] = useState<number | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmClearAll, setConfirmClearAll] = useState<boolean>(false);
 
@@ -108,9 +166,9 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
     setFormOmsetStr(nextOmset);
     setFormError(null);
     if (!isFormManualShare) {
-      const a = Number(nextActual);
-      const o = Number(nextOmset);
-      if (nextActual !== '' && nextOmset !== '' && Number.isFinite(a) && Number.isFinite(o) && o > 0) {
+      const a = parseFreeNumericInput(nextActual, true);
+      const o = parseFreeNumericInput(nextOmset, true);
+      if (a !== null && o !== null && o > 0) {
         setFormShareStr(String(computeMarketSharePct(a, o)));
       } else {
         setFormShareStr('');
@@ -122,9 +180,9 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
     setEditActualStr(nextActual);
     setEditOmsetStr(nextOmset);
     if (!isEditManualShare) {
-      const a = Number(nextActual);
-      const o = Number(nextOmset);
-      if (nextActual !== '' && nextOmset !== '' && Number.isFinite(a) && Number.isFinite(o) && o > 0) {
+      const a = parseFreeNumericInput(nextActual, true);
+      const o = parseFreeNumericInput(nextOmset, true);
+      if (a !== null && o !== null && o > 0) {
         setEditShareStr(String(computeMarketSharePct(a, o)));
       } else {
         setEditShareStr('');
@@ -169,9 +227,9 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
     e.preventDefault();
     setFormError(null);
 
-    const parsedActual = Number(formActualStr);
-    const parsedOmset = Number(formOmsetStr);
-    const parsedShare = Number(formShareStr);
+    const parsedActual = parseFreeNumericInput(formActualStr, true);
+    const parsedOmset = parseFreeNumericInput(formOmsetStr, true);
+    const parsedShare = parseFreeNumericInput(formShareStr, false);
 
     if (!formStoreName.trim()) {
       setFormError('Nama Toko MissGlam wajib dipilih.');
@@ -181,26 +239,30 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
       setFormError('Bulan wajib dipilih.');
       return;
     }
-    if (formActualStr.trim() === '' || !Number.isFinite(parsedActual) || parsedActual < 0) {
-      setFormError('Actual (Rp) wajib diisi dengan angka valid.');
+    if (parsedActual === null) {
+      setFormError('Actual (Rp) wajib diisi dengan angka yang valid.');
       return;
     }
-    if (formOmsetStr.trim() === '' || !Number.isFinite(parsedOmset) || parsedOmset < 0) {
-      setFormError('Omset Toko (Rp) wajib diisi dengan angka valid.');
+    if (parsedOmset === null) {
+      setFormError('Omset Toko (Rp) wajib diisi dengan angka yang valid.');
+      return;
+    }
+    if (isFormManualShare && formShareStr.trim() !== '' && parsedShare === null) {
+      setFormError('Market Share (%) harus berupa angka yang valid.');
       return;
     }
 
     const finalShare =
-      isFormManualShare && formShareStr.trim() !== '' && Number.isFinite(parsedShare)
-        ? Number(parsedShare.toFixed(2))
+      isFormManualShare && parsedShare !== null
+        ? parsedShare
         : computeMarketSharePct(parsedActual, parsedOmset);
 
     const newItem: MissGlamMarketShareItem = {
       id: `mg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       storeName: formStoreName.trim().toUpperCase(),
       monthPeriod: formMonthPeriod.trim().toUpperCase(),
-      actual: Math.round(parsedActual),
-      storeOmset: Math.round(parsedOmset),
+      actual: parsedActual,
+      storeOmset: parsedOmset,
       marketSharePercent: finalShare,
       isManualShareOverride: isFormManualShare,
       createdAt: new Date().toISOString(),
@@ -213,7 +275,7 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
     setFormShareStr('');
     setIsFormManualShare(false);
     onNotify?.(
-      `Market Share ${newItem.storeName} (${newItem.monthPeriod}) sebesar ${newItem.marketSharePercent.toFixed(1).replace('.', ',')}% berhasil disimpan.`,
+      `Market Share ${newItem.storeName} (${newItem.monthPeriod}) sebesar ${formatSharePct(newItem.marketSharePercent)} berhasil disimpan.`,
       'success'
     );
   };
@@ -234,33 +296,36 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
     const existing = items.find((i) => i.id === id);
     if (!existing) return;
 
-    const parsedActual = Number(editActualStr);
-    const parsedOmset = Number(editOmsetStr);
-    const parsedShare = Number(editShareStr);
+    const parsedActual = parseFreeNumericInput(editActualStr, true);
+    const parsedOmset = parseFreeNumericInput(editOmsetStr, true);
+    const parsedShare = parseFreeNumericInput(editShareStr, false);
 
     if (
       !editStoreName.trim() ||
       !editMonthPeriod.trim() ||
-      !Number.isFinite(parsedActual) ||
-      parsedActual < 0 ||
-      !Number.isFinite(parsedOmset) ||
-      parsedOmset < 0
+      parsedActual === null ||
+      parsedOmset === null
     ) {
-      onNotify?.('Nama Toko, Bulan, Actual, dan Omset Toko wajib diisi dengan benar.', 'error');
+      onNotify?.('Nama Toko, Bulan, Actual, dan Omset Toko wajib diisi dengan angka yang valid.', 'error');
+      return;
+    }
+
+    if (isEditManualShare && editShareStr.trim() !== '' && parsedShare === null) {
+      onNotify?.('Market Share (%) harus berupa angka yang valid.', 'error');
       return;
     }
 
     const finalShare =
-      isEditManualShare && editShareStr.trim() !== '' && Number.isFinite(parsedShare)
-        ? Number(parsedShare.toFixed(2))
+      isEditManualShare && parsedShare !== null
+        ? parsedShare
         : computeMarketSharePct(parsedActual, parsedOmset);
 
     const updated: MissGlamMarketShareItem = {
       ...existing,
       storeName: editStoreName.trim().toUpperCase(),
       monthPeriod: editMonthPeriod.trim().toUpperCase(),
-      actual: Math.round(parsedActual),
-      storeOmset: Math.round(parsedOmset),
+      actual: parsedActual,
+      storeOmset: parsedOmset,
       marketSharePercent: finalShare,
       isManualShareOverride: isEditManualShare,
       updatedAt: new Date().toISOString(),
@@ -317,7 +382,7 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
       });
   }, [items, filterMonth, filterStore, searchQuery]);
 
-  // Recap Per Bulan (Semua Toko) & Recap Per Toko
+  // Recap Per Bulan (Semua Toko), Per Toko, & Analisa Naik/Turun/Potensi
   const monthlyRecapAllStores = useMemo(
     () => aggregateMonthlyMgRecap(items),
     [items]
@@ -328,12 +393,31 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
     [items, storeOptions, filterMonth]
   );
 
+  const storeAnalytics = useMemo(
+    () => analyzeMgStoreMarketShare(items, storeOptions),
+    [items, storeOptions]
+  );
+
+  const maxChartSharePct = useMemo(() => {
+    const vals = [
+      ...storeAnalytics.monthlyTrendChartData.map((m) => Math.max(0, m.marketSharePercent)),
+      ...storeAnalytics.allActiveStores.map((s) => Math.max(0, s.latestShare)),
+      storeAnalytics.networkAvgShare,
+    ];
+    return Math.max(...vals, 10);
+  }, [storeAnalytics]);
+
   // Grand Totals for KPI Strip & Recap Footers
   const grandTotals = useMemo(() => {
     const scopeItems = filteredItems;
     const totalActual = scopeItems.reduce((acc, c) => acc + c.actual, 0);
     const totalOmset = scopeItems.reduce((acc, c) => acc + c.storeOmset, 0);
-    const totalSharePct = computeMarketSharePct(totalActual, totalOmset);
+    const totalSharePct =
+      totalOmset > 0
+        ? computeMarketSharePct(totalActual, totalOmset)
+        : scopeItems.length > 0
+        ? scopeItems.reduce((acc, c) => acc + c.marketSharePercent, 0) / scopeItems.length
+        : 0;
     const activeStoresSet: Record<string, boolean> = {};
     scopeItems.forEach((i) => {
       activeStoresSet[i.storeName.toUpperCase()] = true;
@@ -360,7 +444,11 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
     [allMonthsTotalActual, allMonthsTotalOmset]
   );
 
-  const formatSharePct = (pct: number) => `${pct.toFixed(1).replace('.', ',')}%`;
+  const formatSharePct = (pct: number) => {
+    if (!Number.isFinite(pct)) return '0,0%';
+    const hasSecondDecimal = Math.abs(pct * 10 - Math.round(pct * 10)) > 1e-4;
+    return `${(hasSecondDecimal ? pct.toFixed(2) : pct.toFixed(1)).replace('.', ',')}%`;
+  };
 
   return (
     <div className="space-y-6">
@@ -641,12 +729,11 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
                 Actual (Rp) <span className="text-rose-600">*</span>
               </label>
               <input
-                type="number"
-                min={0}
-                step="1000"
+                type="text"
+                inputMode="decimal"
                 value={formActualStr}
                 onChange={(e) => handleActualOrOmsetChange(e.target.value, formOmsetStr)}
-                placeholder="Contoh: 45000000"
+                placeholder="Angka bebas: 45250500"
                 className="w-full px-3 py-2 text-xs font-mono font-bold tabular-nums rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-pink-500"
               />
             </div>
@@ -657,12 +744,11 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
                 Omset Toko (Rp) <span className="text-rose-600">*</span>
               </label>
               <input
-                type="number"
-                min={0}
-                step="1000"
+                type="text"
+                inputMode="decimal"
                 value={formOmsetStr}
                 onChange={(e) => handleActualOrOmsetChange(formActualStr, e.target.value)}
-                placeholder="Contoh: 200000000"
+                placeholder="Angka bebas: 200150000"
                 className="w-full px-3 py-2 text-xs font-mono font-bold tabular-nums rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-pink-500"
               />
             </div>
@@ -678,10 +764,12 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
                     type="button"
                     onClick={() => {
                       setIsFormManualShare(false);
-                      const a = Number(formActualStr);
-                      const o = Number(formOmsetStr);
-                      if (o > 0 && Number.isFinite(a)) {
+                      const a = parseFreeNumericInput(formActualStr, true);
+                      const o = parseFreeNumericInput(formOmsetStr, true);
+                      if (a !== null && o !== null && o > 0) {
                         setFormShareStr(String(computeMarketSharePct(a, o)));
+                      } else {
+                        setFormShareStr('');
                       }
                     }}
                     className="text-[10px] font-bold text-pink-700 hover:underline cursor-pointer"
@@ -693,16 +781,15 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
               <div className="relative">
                 <Percent className="w-3.5 h-3.5 text-pink-600 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  step="0.1"
+                  type="text"
+                  inputMode="decimal"
                   value={formShareStr}
                   onChange={(e) => {
                     setIsFormManualShare(true);
                     setFormShareStr(e.target.value);
+                    setFormError(null);
                   }}
-                  placeholder="Otomatis / edit"
+                  placeholder="Bebas / otomatis"
                   className="w-full pl-3 pr-7 py-2 text-xs font-mono font-extrabold text-pink-900 tabular-nums rounded-xl border border-pink-300 bg-pink-50/40 focus:bg-white focus:outline-none focus:ring-2 focus:ring-pink-500"
                 />
               </div>
@@ -721,6 +808,476 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
           </div>
         </form>
       </div>
+
+      {/* ======================================================= */}
+      {/* GRAFIK & ANALISA PENINGKATAN / PENURUNAN / POTENSI TOKO */}
+      {/* ======================================================= */}
+      {items.length > 0 && (
+        <>
+          {/* Grafik Market Share (Tren Bulanan & Perbandingan Per Toko) */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-200 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-pink-600 text-white shrink-0">
+                  <BarChart3 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold text-slate-900">
+                    Grafik Pergerakan &amp; Perbandingan Market Share MissGlam
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Tren Market Share (%) antar bulan serta posisi &amp; perubahan setiap cabang terhadap rata-rata toko ({formatSharePct(storeAnalytics.networkAvgShare)}).
+                  </p>
+                </div>
+              </div>
+              {(filterMonth !== 'ALL' || filterStore !== 'ALL') && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilterMonth('ALL');
+                    setFilterStore('ALL');
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-bold whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Reset Filter Grafik
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-12 divide-y xl:divide-y-0 xl:divide-x divide-slate-200">
+              {/* Left Chart: Monthly Market Share (%) Trend */}
+              <div className="xl:col-span-5 p-5 flex flex-col justify-between space-y-4">
+                <div>
+                  <h4 className="text-xs font-extrabold text-slate-900">
+                    Tren Market Share Bulanan (%)
+                  </h4>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Klik batang bulan untuk memfilter tabel. Angka di atas batang menunjukkan selisih poin % MoM.
+                  </p>
+                </div>
+
+                <div className="relative pt-7">
+                  {hoveredChartMonthIdx !== null &&
+                    storeAnalytics.monthlyTrendChartData[hoveredChartMonthIdx] &&
+                    (() => {
+                      const hm = storeAnalytics.monthlyTrendChartData[hoveredChartMonthIdx];
+                      return (
+                        <div className="absolute top-0 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-3.5 py-2 rounded-lg shadow-lg text-xs z-20 pointer-events-none border border-slate-700 whitespace-nowrap">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold">{hm.monthPeriod}</span>
+                            <span className="text-slate-400">·</span>
+                            <span className="text-pink-300 font-mono font-extrabold">
+                              {formatSharePct(hm.marketSharePercent)}
+                            </span>
+                          </div>
+                          <div className="text-[11px] font-mono text-slate-300 tabular-nums mt-0.5">
+                            Actual {formatRupiah(hm.totalActual, true)} / Omset{' '}
+                            {formatRupiah(hm.totalStoreOmset, true)} ({hm.storeCount} toko)
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                  <div className="flex items-stretch gap-2.5">
+                    <div className="flex flex-col justify-between text-right font-mono text-[10px] text-slate-400 tabular-nums py-7 pr-2 border-r border-slate-100 shrink-0 w-12">
+                      <span>{formatSharePct(maxChartSharePct)}</span>
+                      <span>{formatSharePct(maxChartSharePct * 0.5)}</span>
+                      <span>0%</span>
+                    </div>
+
+                    <div className="flex-1 flex items-end gap-2.5 h-56 pt-8 pb-2 overflow-x-auto">
+                      {storeAnalytics.monthlyTrendChartData.map((pt, idx) => {
+                        const heightPct =
+                          maxChartSharePct > 0
+                            ? Math.max(6, (Math.max(0, pt.marketSharePercent) / maxChartSharePct) * 100)
+                            : 6;
+                        const isSelected = filterMonth.toUpperCase() === pt.monthPeriod.toUpperCase();
+                        const isUp = pt.deltaSharePercent !== null && pt.deltaSharePercent > 0;
+                        const isDown = pt.deltaSharePercent !== null && pt.deltaSharePercent < 0;
+
+                        return (
+                          <button
+                            key={pt.monthPeriod}
+                            type="button"
+                            onClick={() =>
+                              setFilterMonth(isSelected ? 'ALL' : pt.monthPeriod)
+                            }
+                            onMouseEnter={() => setHoveredChartMonthIdx(idx)}
+                            onMouseLeave={() => setHoveredChartMonthIdx(null)}
+                            className="flex-1 min-w-[58px] max-w-[96px] flex flex-col items-center h-full justify-end group cursor-pointer focus:outline-none"
+                          >
+                            <div className="mb-1 flex flex-col items-center">
+                              {pt.deltaSharePercent !== null ? (
+                                <span
+                                  className={`text-[10px] font-mono font-bold tabular-nums leading-none ${
+                                    isUp
+                                      ? 'text-emerald-700'
+                                      : isDown
+                                      ? 'text-rose-700'
+                                      : 'text-slate-500'
+                                  }`}
+                                >
+                                  {pt.deltaSharePercent > 0 ? '+' : ''}
+                                  {pt.deltaSharePercent.toFixed(1).replace('.', ',')}%
+                                </span>
+                              ) : (
+                                <span className="text-[10px] font-mono text-slate-400 leading-none">
+                                  Awal
+                                </span>
+                              )}
+                              <span className="text-[11px] font-mono font-extrabold text-pink-900 tabular-nums mt-0.5">
+                                {formatSharePct(pt.marketSharePercent)}
+                              </span>
+                            </div>
+
+                            <div className="w-full relative flex items-end justify-center h-full px-1.5">
+                              <div
+                                style={{ height: `${heightPct}%` }}
+                                className={`w-full max-w-[44px] rounded-t-md transition-all duration-200 ${
+                                  isSelected
+                                    ? 'bg-pink-700 ring-2 ring-pink-300'
+                                    : isUp
+                                    ? 'bg-emerald-600 group-hover:bg-emerald-700'
+                                    : isDown
+                                    ? 'bg-rose-500 group-hover:bg-rose-600'
+                                    : 'bg-pink-500 group-hover:bg-pink-600'
+                                }`}
+                              />
+                            </div>
+
+                            <div className="mt-2 text-center w-full">
+                              <span className="block text-[10px] font-bold text-slate-800 truncate">
+                                {pt.monthPeriod}
+                              </span>
+                              <span className="block text-[10px] font-mono text-slate-500 tabular-nums">
+                                {formatRupiah(pt.totalActual, true)}
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Right Chart: Per-Store Market Share (%) & Movement Comparison */}
+              <div className="xl:col-span-7 p-5 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="text-xs font-extrabold text-slate-900">
+                      Perbandingan &amp; Perubahan Market Share per Toko
+                    </h4>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Garis putus-putus menandai rata-rata jaringan ({formatSharePct(storeAnalytics.networkAvgShare)}). Klik baris toko untuk filter tabel.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-600">
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 rounded-xs bg-emerald-600 inline-block" />
+                      Naik
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 rounded-xs bg-rose-500 inline-block" />
+                      Turun
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 rounded-xs bg-pink-500 inline-block" />
+                      Stabil / 1 Bln
+                    </span>
+                  </div>
+                </div>
+
+                <div className="space-y-2.5">
+                  {storeAnalytics.allActiveStores.map((st) => {
+                    const barPct =
+                      maxChartSharePct > 0
+                        ? Math.min(100, Math.max(2, (Math.max(0, st.latestShare) / maxChartSharePct) * 100))
+                        : 0;
+                    const avgLinePct =
+                      maxChartSharePct > 0
+                        ? Math.min(100, Math.max(0, (storeAnalytics.networkAvgShare / maxChartSharePct) * 100))
+                        : 0;
+                    const isSelected = filterStore.toUpperCase() === st.storeName.toUpperCase();
+                    const barColor =
+                      st.trend === 'up'
+                        ? 'bg-emerald-600'
+                        : st.trend === 'down'
+                        ? 'bg-rose-500'
+                        : 'bg-pink-500';
+
+                    return (
+                      <button
+                        key={st.storeName}
+                        type="button"
+                        onClick={() =>
+                          setFilterStore(isSelected ? 'ALL' : st.storeName)
+                        }
+                        className={`w-full text-left px-2.5 py-2 rounded-lg transition-colors cursor-pointer ${
+                          isSelected ? 'bg-pink-50/80' : 'hover:bg-slate-50'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-1">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-extrabold text-slate-900 truncate">
+                              {st.storeName}
+                            </span>
+                            <span className="text-[11px] font-mono text-slate-400">
+                              {st.latestMonth}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2.5 font-mono tabular-nums shrink-0">
+                            {st.deltaShare !== null ? (
+                              <span
+                                className={`text-[11px] font-bold ${
+                                  st.trend === 'up'
+                                    ? 'text-emerald-700'
+                                    : st.trend === 'down'
+                                    ? 'text-rose-700'
+                                    : 'text-slate-500'
+                                }`}
+                              >
+                                {st.trend === 'up'
+                                  ? `▲ +${st.deltaShare.toFixed(1).replace('.', ',')}%`
+                                  : st.trend === 'down'
+                                  ? `▼ ${st.deltaShare.toFixed(1).replace('.', ',')}%`
+                                  : 'Stabil (0,0%)'}
+                              </span>
+                            ) : (
+                              <span className="text-[11px] text-slate-400">1 Bulan</span>
+                            )}
+                            <span className="font-extrabold text-slate-900 min-w-[52px] text-right">
+                              {formatSharePct(st.latestShare)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="relative h-2.5 w-full rounded-full bg-slate-100 overflow-visible">
+                          <div
+                            className={`h-full rounded-full transition-all duration-300 ${barColor}`}
+                            style={{ width: `${barPct}%` }}
+                          />
+                          {storeAnalytics.networkAvgShare > 0 && (
+                            <div
+                              title={`Rata-rata: ${formatSharePct(storeAnalytics.networkAvgShare)}`}
+                              className="absolute top-[-3px] bottom-[-3px] w-0.5 border-l-2 border-dashed border-slate-700/70 pointer-events-none"
+                              style={{ left: `${avgLinePct}%` }}
+                            />
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Analisa Toko Peningkatan, Penurunan, & Potensi Market Share */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-200 bg-slate-50/70 flex flex-col lg:flex-row lg:items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-extrabold text-slate-900">
+                  Analisa Perubahan &amp; Potensi Market Share Toko MissGlam
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Pemetaan otomatis cabang yang mengalami peningkatan, penurunan antar bulan, serta peluang terbesar untuk ditingkatkan.
+                </p>
+              </div>
+              <div className="text-xs font-mono text-slate-600 tabular-nums">
+                Rata-rata jaringan:{' '}
+                <strong className="text-pink-900">
+                  {formatSharePct(storeAnalytics.networkAvgShare)}
+                </strong>
+                {storeAnalytics.topStoreName && (
+                  <>
+                    <span className="mx-1.5 text-slate-300">·</span>
+                    Tertinggi:{' '}
+                    <strong className="text-emerald-800">
+                      {storeAnalytics.topStoreName} ({formatSharePct(storeAnalytics.topShare)})
+                    </strong>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 divide-y lg:divide-y-0 lg:divide-x divide-slate-200">
+              {/* Column 1: Increasing Market Share */}
+              <div className="p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <TrendingUp className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <h4 className="text-xs font-extrabold text-slate-900">
+                      Toko Mengalami Peningkatan
+                    </h4>
+                  </div>
+                  <span className="text-xs font-mono font-bold text-emerald-700 tabular-nums">
+                    {storeAnalytics.increasingStores.length} Toko
+                  </span>
+                </div>
+
+                {storeAnalytics.increasingStores.length === 0 ? (
+                  <p className="text-xs text-slate-500 leading-relaxed pt-1">
+                    {storeAnalytics.allActiveStores.some((s) => s.monthsCount >= 2)
+                      ? 'Belum ada toko yang mencatat kenaikan market share dibanding bulan sebelumnya.'
+                      : 'Perbandingan kenaikan akan otomatis tampil setelah minimal 2 bulan data diinput untuk toko yang sama.'}
+                  </p>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {storeAnalytics.increasingStores.map((st) => (
+                      <button
+                        key={st.storeName}
+                        type="button"
+                        onClick={() =>
+                          setFilterStore(
+                            filterStore === st.storeName ? 'ALL' : st.storeName
+                          )
+                        }
+                        className="w-full text-left py-2.5 first:pt-1 last:pb-0 hover:bg-slate-50/80 transition-colors cursor-pointer"
+                      >
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="font-extrabold text-slate-900">
+                            {st.storeName}
+                          </span>
+                          <span className="font-mono font-extrabold text-emerald-700 tabular-nums">
+                            ▲ +{st.deltaShare?.toFixed(1).replace('.', ',')}%
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono text-slate-600 tabular-nums mt-0.5">
+                          {st.prevMonth}: {formatSharePct(st.prevShare ?? 0)} → {st.latestMonth}:{' '}
+                          <strong className="text-slate-900">
+                            {formatSharePct(st.latestShare)}
+                          </strong>
+                        </div>
+                        {st.deltaActual !== null && (
+                          <div className="text-[11px] text-slate-500 font-mono tabular-nums mt-0.5">
+                            Actual {st.deltaActual >= 0 ? '+' : ''}
+                            {formatRupiah(st.deltaActual, true)} vs bulan lalu
+                          </div>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Column 2: Decreasing Market Share */}
+              <div className="p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <TrendingDown className="w-4 h-4 text-rose-600 shrink-0" />
+                    <h4 className="text-xs font-extrabold text-slate-900">
+                      Toko Mengalami Penurunan
+                    </h4>
+                  </div>
+                  <span className="text-xs font-mono font-bold text-rose-700 tabular-nums">
+                    {storeAnalytics.decreasingStores.length} Toko
+                  </span>
+                </div>
+
+                {storeAnalytics.decreasingStores.length === 0 ? (
+                  <p className="text-xs text-slate-500 leading-relaxed pt-1">
+                    {storeAnalytics.allActiveStores.some((s) => s.monthsCount >= 2)
+                      ? 'Tidak ada toko yang mengalami penurunan market share pada periode terbaru.'
+                      : 'Perbandingan penurunan akan otomatis tampil setelah minimal 2 bulan data diinput untuk toko yang sama.'}
+                  </p>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {storeAnalytics.decreasingStores.map((st) => (
+                      <button
+                        key={st.storeName}
+                        type="button"
+                        onClick={() =>
+                          setFilterStore(
+                            filterStore === st.storeName ? 'ALL' : st.storeName
+                          )
+                        }
+                        className="w-full text-left py-2.5 first:pt-1 last:pb-0 hover:bg-slate-50/80 transition-colors cursor-pointer"
+                      >
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="font-extrabold text-slate-900">
+                            {st.storeName}
+                          </span>
+                          <span className="font-mono font-extrabold text-rose-700 tabular-nums">
+                            ▼ {st.deltaShare?.toFixed(1).replace('.', ',')}%
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono text-slate-600 tabular-nums mt-0.5">
+                          {st.prevMonth}: {formatSharePct(st.prevShare ?? 0)} → {st.latestMonth}:{' '}
+                          <strong className="text-slate-900">
+                            {formatSharePct(st.latestShare)}
+                          </strong>
+                        </div>
+                        <div className="text-[11px] text-slate-500 font-mono tabular-nums mt-0.5">
+                          Puncak: {formatSharePct(st.peakShare)} ({st.peakMonth})
+                          {st.deltaActual !== null
+                            ? ` · Actual ${st.deltaActual >= 0 ? '+' : ''}${formatRupiah(st.deltaActual, true)}`
+                            : ''}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Column 3: High Potential Stores */}
+              <div className="p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Target className="w-4 h-4 text-pink-600 shrink-0" />
+                    <h4 className="text-xs font-extrabold text-slate-900">
+                      Toko Berpotensi Ditingkatkan
+                    </h4>
+                  </div>
+                  <span className="text-xs font-mono font-bold text-pink-700 tabular-nums">
+                    {storeAnalytics.potentialStores.length} Toko
+                  </span>
+                </div>
+
+                {storeAnalytics.potentialStores.length === 0 ? (
+                  <p className="text-xs text-slate-500 leading-relaxed pt-1">
+                    Semua toko aktif telah mencapai performa optimal terhadap tolok ukur saat ini.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {storeAnalytics.potentialStores.map((st) => (
+                      <button
+                        key={st.storeName}
+                        type="button"
+                        onClick={() =>
+                          setFilterStore(
+                            filterStore === st.storeName ? 'ALL' : st.storeName
+                          )
+                        }
+                        className="w-full text-left py-2.5 first:pt-1 last:pb-0 hover:bg-slate-50/80 transition-colors cursor-pointer"
+                      >
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="font-extrabold text-slate-900">
+                            {st.storeName}
+                          </span>
+                          <span className="font-mono font-extrabold text-pink-700 tabular-nums">
+                            {st.upsideActualRp > 0
+                              ? `+${formatRupiah(st.upsideActualRp, true)}`
+                              : `Target ${formatSharePct(st.targetBenchmarkShare)}`}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono text-slate-600 tabular-nums mt-0.5">
+                          Share {formatSharePct(st.latestShare)} → Target{' '}
+                          {formatSharePct(st.targetBenchmarkShare)} · Omset{' '}
+                          {formatRupiah(st.latestOmset, true)}
+                        </div>
+                        <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
+                          {st.potentialReason}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* ======================================================= */}
       {/* REKAPAN TOTAL MARKET SHARE PER BULAN & PER TOKO         */}
@@ -1051,9 +1608,8 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
                         </td>
                         <td className="px-3 py-2.5 min-w-[140px]">
                           <input
-                            type="number"
-                            min={0}
-                            step="1000"
+                            type="text"
+                            inputMode="decimal"
                             value={editActualStr}
                             onChange={(e) =>
                               handleEditActualOrOmsetChange(e.target.value, editOmsetStr)
@@ -1063,9 +1619,8 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
                         </td>
                         <td className="px-3 py-2.5 min-w-[140px]">
                           <input
-                            type="number"
-                            min={0}
-                            step="1000"
+                            type="text"
+                            inputMode="decimal"
                             value={editOmsetStr}
                             onChange={(e) =>
                               handleEditActualOrOmsetChange(editActualStr, e.target.value)
@@ -1075,10 +1630,8 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
                         </td>
                         <td className="px-3 py-2.5 min-w-[120px]">
                           <input
-                            type="number"
-                            min={0}
-                            max={100}
-                            step="0.1"
+                            type="text"
+                            inputMode="decimal"
                             value={editShareStr}
                             onChange={(e) => {
                               setIsEditManualShare(true);
@@ -1091,9 +1644,13 @@ export const MissGlamMarketShareView: React.FC<MissGlamMarketShareViewProps> = (
                               type="button"
                               onClick={() => {
                                 setIsEditManualShare(false);
-                                const a = Number(editActualStr);
-                                const o = Number(editOmsetStr);
-                                setEditShareStr(String(computeMarketSharePct(a, o)));
+                                const a = parseFreeNumericInput(editActualStr, true);
+                                const o = parseFreeNumericInput(editOmsetStr, true);
+                                if (a !== null && o !== null && o > 0) {
+                                  setEditShareStr(String(computeMarketSharePct(a, o)));
+                                } else {
+                                  setEditShareStr('');
+                                }
                               }}
                               className="text-[10px] font-bold text-pink-700 hover:underline mt-0.5 block ml-auto cursor-pointer"
                             >

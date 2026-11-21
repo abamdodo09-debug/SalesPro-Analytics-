@@ -4,43 +4,30 @@ import {
   FilterState,
   StoreBaContributionItem,
   StoreBaContributionSummary,
+  MonthlyStoreBaSellInRow,
 } from '../types/dashboard';
 import {
   calculateStoreBaContribution,
+  calculateMonthlyStoreBaSellInContribution,
+  summarizeStoreItems,
   exportStoreBaContributionToExcel,
 } from '../services/storeBaContributionService';
-import { MONTH_NAMES_LIST } from '../services/sellInSellOutService';
-import { formatRupiah, formatPercent } from '../utils/analytics';
+import { MONTH_NAMES_LIST, resolveRecordMonthAndYear } from '../services/sellInSellOutService';
+import { formatRupiah } from '../utils/analytics';
 import {
   Store,
-  Sparkles,
-  TrendingUp,
-  Award,
   Users,
   Building2,
   Calendar,
   Search,
-  Filter,
   FileSpreadsheet,
   Printer,
-  ChevronRight,
   X,
-  Target,
-  ArrowUpRight,
-  Layers,
-  Zap,
-  CheckCircle2,
-  HelpCircle,
   Sliders,
-  Edit2,
-  Save,
-  RotateCcw,
+  BarChart3,
+  CheckCircle2,
+  TrendingUp,
 } from 'lucide-react';
-import {
-  loadKaMgSalesOverride,
-  saveKaMgSalesOverride,
-  resetKaMgSalesOverride,
-} from '../services/masterStoreService';
 
 interface StoreBaContributionViewProps {
   records: TransactionRecord[];
@@ -51,6 +38,34 @@ interface StoreBaContributionViewProps {
 
 type StoreFilterType = 'all' | 'ba_only' | 'non_ba_only';
 
+const SHORT_MONTH_MAP: Record<string, string> = {
+  JANUARI: 'Jan',
+  FEBRUARI: 'Feb',
+  MARET: 'Mar',
+  APRIL: 'Apr',
+  MEI: 'Mei',
+  JUNI: 'Jun',
+  JULI: 'Jul',
+  AGUSTUS: 'Agu',
+  SEPTEMBER: 'Sep',
+  OKTOBER: 'Okt',
+  NOVEMBER: 'Nov',
+  DESEMBER: 'Des',
+};
+
+function formatCompactRupiah(val: number): string {
+  if (val >= 1_000_000_000) {
+    return `Rp ${(val / 1_000_000_000).toFixed(2).replace('.', ',')} M`;
+  }
+  if (val >= 1_000_000) {
+    return `Rp ${(val / 1_000_000).toFixed(1).replace('.', ',')} Jt`;
+  }
+  if (val >= 1_000) {
+    return `Rp ${Math.round(val / 1_000)} Rb`;
+  }
+  return `Rp ${Math.round(val)}`;
+}
+
 export const StoreBaContributionView: React.FC<StoreBaContributionViewProps> = ({
   records,
   allRecords,
@@ -59,26 +74,37 @@ export const StoreBaContributionView: React.FC<StoreBaContributionViewProps> = (
 }) => {
   const sourceRecords = allRecords && allRecords.length > 0 ? allRecords : records;
 
-  // State for filters
-  const [selectedMonth, setSelectedMonth] = useState<string>('SEPTEMBER');
-  const [selectedYear, setSelectedYear] = useState<number>(2026);
-  const [selectedArea, setSelectedArea] = useState<string>('ALL');
-  const [selectedKet, setSelectedKet] = useState<'ALL' | 'SELL IN' | 'SELL OUT'>(() => {
-    if (filters.KET && filters.KET !== 'ALL') return filters.KET as 'SELL IN' | 'SELL OUT';
+  // Determine available years dynamically from Sell In records
+  const availableYears = useMemo(() => {
+    const yearSet = new Set<number>([2026, 2025]);
+    sourceRecords.forEach((r) => {
+      const { year } = resolveRecordMonthAndYear(r);
+      if (year >= 2020 && year <= 2035) yearSet.add(year);
+    });
+    return Array.from(yearSet).sort((a, b) => b - a);
+  }, [sourceRecords]);
+
+  // State for local filters synced with global filters
+  const [selectedMonth, setSelectedMonth] = useState<string>(() => {
+    if (filters.BULAN && filters.BULAN !== 'ALL') return filters.BULAN.toUpperCase();
+    return 'ALL';
+  });
+  const [selectedYear, setSelectedYear] = useState<number>(() => {
+    if (filters.TAHUN && filters.TAHUN !== 'ALL') {
+      const parsed = parseInt(filters.TAHUN, 10);
+      if (!isNaN(parsed)) return parsed;
+    }
+    return 2026;
+  });
+  const [selectedArea, setSelectedArea] = useState<string>(() => {
+    if (filters.REGION && filters.REGION !== 'ALL') return filters.REGION;
     return 'ALL';
   });
   const [storeFilterType, setStoreFilterType] = useState<StoreFilterType>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [chartMode, setChartMode] = useState<'stacked' | 'grouped'>('stacked');
+  const [hoveredMonth, setHoveredMonth] = useState<MonthlyStoreBaSellInRow | null>(null);
   const [selectedStoreModal, setSelectedStoreModal] = useState<StoreBaContributionItem | null>(null);
-
-  // State for Manual KA & DAZZLE ME MG Sales Override + SPV
-  const [isKaMgModalOpen, setIsKaMgModalOpen] = useState<boolean>(false);
-  const [editSpvSales, setEditSpvSales] = useState<number>(0);
-  const [editKaSales, setEditKaSales] = useState<number>(0);
-  const [editMgSales, setEditMgSales] = useState<number>(0);
-  const [editKaMgNotes, setEditKaMgNotes] = useState<string>('');
-  const [isManualActive, setIsManualActive] = useState<boolean>(false);
-  const [refreshVersion, setRefreshVersion] = useState<number>(0);
 
   // Sync with global Filter Terintegrasi
   useEffect(() => {
@@ -104,171 +130,107 @@ export const StoreBaContributionView: React.FC<StoreBaContributionViewProps> = (
     }
   }, [filters.REGION]);
 
-  useEffect(() => {
-    if (filters.KET && filters.KET !== 'ALL') {
-      setSelectedKet(filters.KET as 'SELL IN' | 'SELL OUT');
-    }
-  }, [filters.KET]);
-
   // Available Areas from records
   const availableAreas = useMemo(() => {
     const set = new Set<string>();
     sourceRecords.forEach((r) => {
-      if (r.COVER_AREA) set.add(r.COVER_AREA);
-      if (r.REGION) set.add(r.REGION);
+      if (r.COVER_AREA && r.COVER_AREA !== '-') set.add(r.COVER_AREA.trim());
+      if (r.REGION && r.REGION !== '-') set.add(r.REGION.trim());
     });
     return Array.from(set).sort();
   }, [sourceRecords]);
 
-  // Compute contribution analytics
-  const { stores: rawStores, summary: baseSummary } = useMemo(() => {
+  const effectiveSearch = (searchQuery || filters.searchQuery || '').trim().toLowerCase();
+
+  // 1. Store-level Sell In computation for selected period
+  const { stores: rawStores } = useMemo(() => {
     return calculateStoreBaContribution(
       sourceRecords,
       selectedMonth,
       selectedYear,
       selectedArea,
-      selectedKet
+      filters
     );
-  }, [sourceRecords, selectedMonth, selectedYear, selectedArea, selectedKet, refreshVersion]);
+  }, [sourceRecords, selectedMonth, selectedYear, selectedArea, filters]);
 
-  const effectiveSearch = (searchQuery || filters.searchQuery || '').trim().toLowerCase();
-
-  // Filter stores by tab, global filters, and search query
-  const filteredStores = useMemo(() => {
+  // Counts before storeFilterType tab split (respecting search & global filters)
+  const searchFilteredStoresAllTypes = useMemo(() => {
+    if (!effectiveSearch) return rawStores;
     return rawStores.filter((s) => {
+      return (
+        s.storeName.toLowerCase().includes(effectiveSearch) ||
+        s.baName.toLowerCase().includes(effectiveSearch) ||
+        s.salesName.toLowerCase().includes(effectiveSearch) ||
+        s.coverArea.toLowerCase().includes(effectiveSearch) ||
+        s.spvName.toLowerCase().includes(effectiveSearch) ||
+        s.region.toLowerCase().includes(effectiveSearch)
+      );
+    });
+  }, [rawStores, effectiveSearch]);
+
+  const filteredStores = useMemo(() => {
+    const list = searchFilteredStoresAllTypes.filter((s) => {
       if (storeFilterType === 'ba_only' && !s.hasBa) return false;
       if (storeFilterType === 'non_ba_only' && s.hasBa) return false;
-
-      // Global Sales Filter
-      if (filters.SALES && filters.SALES !== 'ALL' && s.salesName.toUpperCase() !== filters.SALES.toUpperCase()) {
-        return false;
-      }
-
-      // Global SPV Filter
-      if (filters.SPV && filters.SPV !== 'ALL' && s.spvName.toUpperCase() !== filters.SPV.toUpperCase()) {
-        return false;
-      }
-
-      // Global Store Filter
-      if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL' && s.storeName.toUpperCase() !== filters.NAMA_STORE.toUpperCase()) {
-        return false;
-      }
-
-      // Global Region Filter
-      if (filters.REGION && filters.REGION !== 'ALL') {
-        const targetRegion = filters.REGION.toUpperCase();
-        if (s.region.toUpperCase() !== targetRegion && s.coverArea.toUpperCase() !== targetRegion) {
-          return false;
-        }
-      }
-
-      // Free Search
-      if (effectiveSearch) {
-        const match =
-          s.storeName.toLowerCase().includes(effectiveSearch) ||
-          s.baName.toLowerCase().includes(effectiveSearch) ||
-          s.salesName.toLowerCase().includes(effectiveSearch) ||
-          s.coverArea.toLowerCase().includes(effectiveSearch) ||
-          s.spvName.toLowerCase().includes(effectiveSearch) ||
-          s.region.toLowerCase().includes(effectiveSearch);
-        if (!match) return false;
-      }
-
       return true;
     });
-  }, [rawStores, storeFilterType, effectiveSearch, filters]);
 
-  // Recalculated summary metrics from filteredStores
-  const summary: StoreBaContributionSummary = useMemo(() => {
-    const hasActiveFilter =
-      storeFilterType !== 'all' ||
-      (filters.SALES && filters.SALES !== 'ALL') ||
-      (filters.SPV && filters.SPV !== 'ALL') ||
-      (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL') ||
-      (filters.REGION && filters.REGION !== 'ALL') ||
-      Boolean(effectiveSearch);
+    // Recompute share against filtered total if tabbed/searched
+    const total = list.reduce((sum, s) => sum + s.totalRevenue, 0);
+    if (total <= 0) return list;
+    return list.map((s) => ({
+      ...s,
+      contributionPercent: Math.round((s.totalRevenue / total) * 10000) / 100,
+    }));
+  }, [searchFilteredStoresAllTypes, storeFilterType]);
 
-    if (!hasActiveFilter) return baseSummary;
-
-    const totalStoresCount = filteredStores.length;
-    const tokoBaList = filteredStores.filter((s) => s.hasBa);
-    const tokoNonBaList = filteredStores.filter((s) => !s.hasBa);
-
-    const tokoBaCount = tokoBaList.length;
-    const tokoNonBaCount = tokoNonBaList.length;
-
-    const totalAreaRevenue = filteredStores.reduce((acc, s) => acc + s.totalRevenue, 0);
-    const totalAreaQty = filteredStores.reduce((acc, s) => acc + s.totalQtySold, 0);
-
-    const tokoBaTotalRevenue = tokoBaList.reduce((sum, s) => sum + s.totalRevenue, 0);
-    const tokoNonBaTotalRevenue = tokoNonBaList.reduce((sum, s) => sum + s.totalRevenue, 0);
-
-    const tokoBaRevenuePercent =
-      totalAreaRevenue > 0 ? Math.round((tokoBaTotalRevenue / totalAreaRevenue) * 1000) / 10 : 0;
-    const tokoNonBaRevenuePercent =
-      totalAreaRevenue > 0 ? Math.round((tokoNonBaTotalRevenue / totalAreaRevenue) * 1000) / 10 : 0;
-
-    const tokoBaStorePercent =
-      totalStoresCount > 0 ? Math.round((tokoBaCount / totalStoresCount) * 1000) / 10 : 0;
-    const tokoNonBaStorePercent =
-      totalStoresCount > 0 ? Math.round((tokoNonBaCount / totalStoresCount) * 1000) / 10 : 0;
-
-    const tokoBaAvgRevenuePerStore =
-      tokoBaCount > 0 ? Math.round(tokoBaTotalRevenue / tokoBaCount) : 0;
-    const tokoNonBaAvgRevenuePerStore =
-      tokoNonBaCount > 0 ? Math.round(tokoNonBaTotalRevenue / tokoNonBaCount) : 0;
-
-    const tokoBaTotalQty = tokoBaList.reduce((sum, s) => sum + s.totalQtySold, 0);
-    const tokoNonBaTotalQty = tokoNonBaList.reduce((sum, s) => sum + s.totalQtySold, 0);
-
-    const tokoBaFocusPcs = tokoBaList.reduce((sum, s) => sum + s.focusProductPcs, 0);
-    const tokoNonBaFocusPcs = tokoNonBaList.reduce((sum, s) => sum + s.focusProductPcs, 0);
-
-    const productivityMultiplier =
-      tokoNonBaAvgRevenuePerStore > 0
-        ? Math.round((tokoBaAvgRevenuePerStore / tokoNonBaAvgRevenuePerStore) * 10) / 10
-        : 1;
-
-    const potentialBaCandidateStoresCount = tokoNonBaList.filter(
-      (s) => s.performanceClass && s.performanceClass.includes('Pasang BA')
-    ).length;
-
+  // Tab badge counts from full Sell In set (regardless of active storeFilterType tab)
+  const tabCounts = useMemo(() => {
+    const ba = searchFilteredStoresAllTypes.filter((s) => s.hasBa).length;
+    const nonBa = searchFilteredStoresAllTypes.filter((s) => !s.hasBa).length;
     return {
-      periodMonth: selectedMonth,
-      periodYear: selectedYear,
-      totalAreaRevenue,
-      totalAreaQty,
-      totalStoresCount,
-      tokoBaCount,
-      tokoBaStorePercent,
-      tokoBaTotalRevenue,
-      tokoBaRevenuePercent,
-      tokoBaAvgRevenuePerStore,
-      tokoBaTotalQty,
-      tokoBaFocusPcs,
-      tokoNonBaCount,
-      tokoNonBaStorePercent,
-      tokoNonBaTotalRevenue,
-      tokoNonBaRevenuePercent,
-      tokoNonBaAvgRevenuePerStore,
-      tokoNonBaTotalQty,
-      tokoNonBaFocusPcs,
-      productivityMultiplier,
-      potentialBaCandidateStoresCount,
-      kaRevenue: baseSummary.kaRevenue,
-      mgRevenue: baseSummary.mgRevenue,
-      kaRevenuePercent: baseSummary.kaRevenuePercent,
-      mgRevenuePercent: baseSummary.mgRevenuePercent,
-      isManualKaMg: baseSummary.isManualKaMg,
-      kaMgNotes: baseSummary.kaMgNotes,
+      all: searchFilteredStoresAllTypes.length,
+      ba,
+      nonBa,
     };
-  }, [baseSummary, filteredStores, storeFilterType, filters, effectiveSearch, selectedMonth, selectedYear]);
+  }, [searchFilteredStoresAllTypes]);
 
-  // Handle Excel Export
+  // Summary metrics for top 4 KPI cards
+  const summary: StoreBaContributionSummary = useMemo(() => {
+    return summarizeStoreItems(filteredStores, selectedMonth, selectedYear);
+  }, [filteredStores, selectedMonth, selectedYear]);
+
+  // 2. Monthly Per-Month Breakdown (JANUARI - DESEMBER) strictly for OMSET SELL IN
+  const { months: monthlyRows, yearlyTotals } = useMemo(() => {
+    return calculateMonthlyStoreBaSellInContribution(
+      sourceRecords,
+      selectedYear,
+      selectedArea,
+      filters,
+      storeFilterType,
+      effectiveSearch
+    );
+  }, [sourceRecords, selectedYear, selectedArea, filters, storeFilterType, effectiveSearch]);
+
+  // Max value for chart scaling
+  const chartMaxVal = useMemo(() => {
+    if (monthlyRows.length === 0) return 100_000_000;
+    const rawMax = Math.max(
+      ...monthlyRows.map((m) =>
+        chartMode === 'stacked' ? m.totalSellIn : Math.max(m.tokoBaSellIn, m.tokoNonBaSellIn)
+      )
+    );
+    return Math.max(1, rawMax * 1.15);
+  }, [monthlyRows, chartMode]);
+
+  const periodDisplayLabel =
+    selectedMonth === 'ALL' ? `Semua Bulan ${selectedYear}` : `${selectedMonth} ${selectedYear}`;
+
   const handleExport = () => {
     exportStoreBaContributionToExcel(
       filteredStores,
       summary,
+      monthlyRows,
       selectedMonth,
       selectedYear
     );
@@ -276,73 +238,80 @@ export const StoreBaContributionView: React.FC<StoreBaContributionViewProps> = (
 
   return (
     <div className="space-y-6 pb-12 print:p-0">
-      {/* 1. Header Toolbar */}
-      <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-xs transition-all">
+      {/* 1. Header & Filter Toolbar */}
+      <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-xs">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-pink-600 via-rose-600 to-amber-500 text-white flex items-center justify-center shadow-md shadow-pink-500/20">
+          <div className="flex items-start sm:items-center gap-3.5">
+            <div className="w-10 h-10 rounded-xl bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-xs">
               <Store className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-xl font-extrabold text-slate-900 tracking-tight">
-                  Analisa Kontribusi Toko BA vs Non-BA
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 tracking-tight">
+                  Analisa Toko Ada BA vs Toko Non-BA
                 </h1>
-                <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-pink-50 text-pink-800 border border-pink-200">
-                  Hitung Kontribusi &amp; Jumlah Toko
+                <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-md bg-rose-50 text-rose-700 border border-rose-200">
+                  Khusus Omset Sell In
                 </span>
               </div>
-              <p className="text-xs text-slate-500 font-medium mt-0.5">
-                Perbandingan porsi omset penjualan, produktivitas per gerai, dan penetrasi produk fokus antara Toko dengan BA vs Toko Tanpa BA
+              <p className="text-xs text-slate-500 mt-0.5">
+                Rekapitulasi jumlah toko, total BA, omset Sell In, serta persentase kontribusi per bulan ({periodDisplayLabel})
               </p>
             </div>
           </div>
 
-          {/* Action buttons */}
           <div className="flex items-center gap-2 flex-wrap">
+            {onNavigateToSettings && (
+              <button
+                onClick={onNavigateToSettings}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                title="Kelola daftar Toko & Penugasan BA"
+              >
+                <Sliders className="w-3.5 h-3.5 text-slate-600" />
+                <span>Pengaturan Toko &amp; BA</span>
+              </button>
+            )}
             <button
               onClick={handleExport}
-              className="flex items-center gap-2 px-3.5 py-2 text-xs font-bold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-all cursor-pointer"
-              title="Download File Excel (.xlsx)"
+              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
               <FileSpreadsheet className="w-4 h-4" />
-              <span>Export Excel (.xlsx)</span>
+              <span>Export Excel</span>
             </button>
             <button
               onClick={() => window.print()}
-              className="flex items-center gap-2 px-3.5 py-2 text-xs font-bold rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition-all cursor-pointer"
-              title="Cetak Laporan"
+              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-xl bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
-              <Printer className="w-4 h-4 text-slate-600" />
+              <Printer className="w-4 h-4 text-slate-500" />
               <span>Cetak / PDF</span>
             </button>
           </div>
         </div>
 
-        {/* Filter Controls Bar */}
-        <div className="mt-5 pt-4 border-t border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
-          {/* Store Type Filter Pills */}
-          <div className="flex items-center gap-1.5 p-1 bg-slate-100/90 rounded-xl border border-slate-200/80 overflow-x-auto">
+        {/* Filter Bar */}
+        <div className="mt-5 pt-4 border-t border-slate-100 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          {/* Segmented Store Type Filter */}
+          <div className="inline-flex items-center gap-1 p-1 bg-slate-100 rounded-xl border border-slate-200/80 overflow-x-auto">
             {[
-              { id: 'all' as StoreFilterType, label: 'Semua Toko', count: summary.totalStoresCount },
-              { id: 'ba_only' as StoreFilterType, label: '💄 Toko dengan BA', count: summary.tokoBaCount },
-              { id: 'non_ba_only' as StoreFilterType, label: '🏪 Toko Non-BA', count: summary.tokoNonBaCount },
+              { id: 'all' as StoreFilterType, label: 'Semua Toko', count: tabCounts.all },
+              { id: 'ba_only' as StoreFilterType, label: 'Toko Ada BA', count: tabCounts.ba },
+              { id: 'non_ba_only' as StoreFilterType, label: 'Toko Non-BA', count: tabCounts.nonBa },
             ].map((tab) => {
-              const isSelected = storeFilterType === tab.id;
+              const active = storeFilterType === tab.id;
               return (
                 <button
                   key={tab.id}
                   onClick={() => setStoreFilterType(tab.id)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
-                    isSelected
-                      ? 'bg-white text-slate-900 shadow-xs border border-slate-200/90'
-                      : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+                    active
+                      ? 'bg-white text-slate-900 shadow-xs border border-slate-200/80'
+                      : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
                   <span>{tab.label}</span>
                   <span
-                    className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
-                      isSelected ? 'bg-slate-900 text-white' : 'bg-slate-200 text-slate-700'
+                    className={`font-mono tabular-nums text-[11px] px-1.5 py-0.5 rounded-md ${
+                      active ? 'bg-slate-900 text-white' : 'bg-slate-200/80 text-slate-700'
                     }`}
                   >
                     {tab.count}
@@ -352,12 +321,11 @@ export const StoreBaContributionView: React.FC<StoreBaContributionViewProps> = (
             })}
           </div>
 
-          {/* Secondary Dropdown Filters (Month, Year, Area) */}
-          <div className="flex items-center gap-2.5 flex-wrap text-xs">
-            {/* Month Filter */}
+          {/* Period & Area Filters */}
+          <div className="flex items-center gap-2 flex-wrap text-xs">
             <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
               <Calendar className="w-3.5 h-3.5 text-slate-500" />
-              <span className="font-semibold text-slate-600">Bulan:</span>
+              <span className="font-semibold text-slate-500">Bulan:</span>
               <select
                 value={selectedMonth}
                 onChange={(e) => setSelectedMonth(e.target.value)}
@@ -371,27 +339,28 @@ export const StoreBaContributionView: React.FC<StoreBaContributionViewProps> = (
               </select>
             </div>
 
-            {/* Year Filter */}
             <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
-              <span className="font-semibold text-slate-600">Tahun:</span>
+              <span className="font-semibold text-slate-500">Tahun:</span>
               <select
                 value={selectedYear}
                 onChange={(e) => setSelectedYear(Number(e.target.value))}
                 className="bg-transparent font-bold text-slate-800 outline-none cursor-pointer"
               >
-                <option value={2026}>2026</option>
-                <option value={2025}>2025</option>
+                {availableYears.map((y) => (
+                  <option key={y} value={y}>
+                    {y}
+                  </option>
+                ))}
               </select>
             </div>
 
-            {/* Area Filter */}
             <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
               <Building2 className="w-3.5 h-3.5 text-slate-500" />
-              <span className="font-semibold text-slate-600">Area:</span>
+              <span className="font-semibold text-slate-500">Area:</span>
               <select
                 value={selectedArea}
                 onChange={(e) => setSelectedArea(e.target.value)}
-                className="bg-transparent font-bold text-slate-800 outline-none cursor-pointer max-w-[120px] truncate"
+                className="bg-transparent font-bold text-slate-800 outline-none cursor-pointer max-w-[140px] truncate"
               >
                 <option value="ALL">Semua Area</option>
                 {availableAreas.map((area) => (
@@ -401,330 +370,542 @@ export const StoreBaContributionView: React.FC<StoreBaContributionViewProps> = (
                 ))}
               </select>
             </div>
-
-            {/* KET Filter: SELL IN / SELL OUT */}
-            <div className="flex items-center gap-1.5 bg-pink-50 border border-pink-200 rounded-lg px-2.5 py-1.5">
-              <span className="font-semibold text-pink-900">Filter KET:</span>
-              <select
-                value={selectedKet}
-                onChange={(e) => setSelectedKet(e.target.value as any)}
-                className="bg-transparent font-bold text-pink-950 outline-none cursor-pointer"
-              >
-                <option value="ALL">Semua (Konsolidasi)</option>
-                <option value="SELL IN">SELL IN (Distributor)</option>
-                <option value="SELL OUT">SELL OUT (Kasir BA)</option>
-              </select>
-            </div>
           </div>
         </div>
       </div>
 
-      {/* 2. Head-to-Head Comparison Card: Toko BA vs Toko Non-BA */}
-      <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-2xl p-6 shadow-md border border-slate-800">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-white/10 gap-2">
+      {/* 2. KPI Summary Cards (4 Kolom Seimbang - Khusus Omset Sell In) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        {/* Card 1: Total Semua Toko */}
+        <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-xs flex flex-col justify-between">
           <div>
-            <h2 className="text-base font-extrabold uppercase tracking-wide flex items-center gap-2">
-              <Sparkles className="w-4 h-4 text-pink-400" />
-              Komparasi Head-to-Head: Toko BA vs Toko Non-BA
-            </h2>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Periode Evaluasi: {selectedMonth} {selectedYear} • Total {summary.totalStoresCount} Gerai Aktif
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {summary.isManualKaMg && (
-              <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-400/30">
-                Manual KA &amp; DAZZLE ME MG
+            <div className="flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-wider">
+              <span>Total Semua Toko</span>
+              <Store className="w-4 h-4 text-slate-400" />
+            </div>
+            <div className="mt-2.5 flex items-baseline gap-2">
+              <span className="text-2xl font-black font-mono tabular-nums text-slate-900">
+                {summary.totalStoresCount}
               </span>
-            )}
-            <button
-              onClick={() => {
-                const cur = loadKaMgSalesOverride();
-                const spvEst = summary.spvTotalRevenue || Math.round(summary.totalAreaRevenue * 0.72);
-                setEditSpvSales(cur.spvSalesValue !== undefined ? cur.spvSalesValue : spvEst);
-                setEditKaSales(cur.isManual ? cur.kaSalesValue : summary.kaRevenue);
-                setEditMgSales(cur.isManual ? (cur.dazzleMeMgSalesValue !== undefined ? cur.dazzleMeMgSalesValue : cur.mgSalesValue) : summary.mgRevenue);
-                setEditKaMgNotes(cur.notes || '');
-                setIsManualActive(cur.isManual);
-                setIsKaMgModalOpen(true);
-              }}
-              className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold border border-white/20 transition-all cursor-pointer"
-              title="Ubah nilai Semua Penjualan SPV, Penjualan KA dan PENJUALAN DAZZLE ME MG secara manual"
-            >
-              <Edit2 className="w-3.5 h-3.5 text-pink-300" />
-              <span>Edit Penjualan SPV, KA &amp; DAZZLE ME MG</span>
-            </button>
-            {onNavigateToSettings && (
-              <button
-                onClick={onNavigateToSettings}
-                className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-indigo-500/30 hover:bg-indigo-500/50 text-indigo-200 text-xs font-bold border border-indigo-400/30 transition-all cursor-pointer"
-                title="Buka Pengaturan Master Toko, BA, Sales & Trainer"
-              >
-                <Sliders className="w-3.5 h-3.5" />
-                <span>Pengaturan Toko &amp; BA</span>
-              </button>
-            )}
-            <span className="text-xs font-bold px-3 py-1 rounded-full bg-pink-500/20 text-pink-300 border border-pink-400/30">
-              Total Penjualan: {formatRupiah(summary.totalAreaRevenue, true)}
+              <span className="text-xs font-semibold text-slate-500">
+                Toko Aktif Sell In
+              </span>
+            </div>
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-slate-100">
+            <span className="text-[11px] font-medium text-slate-500 block">
+              Total Omset Sell In ({periodDisplayLabel})
+            </span>
+            <span className="text-lg font-black font-mono tabular-nums text-slate-900 mt-0.5 block">
+              {formatRupiah(summary.totalAreaRevenue, true)}
+            </span>
+            <span className="text-[11px] font-mono tabular-nums text-slate-400 mt-0.5 block">
+              Volume: {summary.totalAreaQty.toLocaleString('id-ID')} pcs (100%)
             </span>
           </div>
         </div>
 
-        {/* Breakdown Komponen Penjualan: Penjualan Reguler Sales (SPV WIDODO) + Penjualan KA + PENJUALAN DAZZLE ME MG */}
-        <div className="mt-4 p-3.5 bg-white/5 rounded-xl border border-white/10 flex flex-col gap-2.5 text-xs">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <span className="px-2 py-0.5 rounded text-[10px] font-black uppercase bg-purple-500/20 text-purple-300 border border-purple-400/30">
-                Formula Pencapaian SPV WIDODO &amp; Area
-              </span>
-              <span className="font-extrabold text-slate-200">
-                Reguler Sales + Penjualan KA + PENJUALAN DAZZLE ME MG:
-              </span>
-            </div>
-            <span className="text-amber-300 font-mono font-bold text-xs">
-              Total Pencapaian = {formatRupiah(summary.totalAreaRevenue, true)}
-            </span>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 font-mono text-xs">
-            <div className="flex items-center justify-between bg-blue-950/40 px-3 py-1.5 rounded-lg border border-blue-500/30">
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-blue-400 inline-block" />
-                <span className="text-slate-300">Penjualan Reguler (SPV WIDODO):</span>
-              </div>
-              <span className="font-bold text-blue-200">{formatRupiah(summary.spvTotalRevenue || Math.round(summary.totalAreaRevenue * 0.72), true)}</span>
-            </div>
-            <div className="flex items-center justify-between bg-purple-950/40 px-3 py-1.5 rounded-lg border border-purple-500/30">
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-purple-400 inline-block" />
-                <span className="text-slate-300">Penjualan KA:</span>
-              </div>
-              <div className="text-right">
-                <span className="font-bold text-purple-200">{formatRupiah(summary.kaRevenue, true)}</span>
-                <span className="text-[10px] text-purple-300/80 ml-1">({summary.kaRevenuePercent}%)</span>
-              </div>
-            </div>
-            <div className="flex items-center justify-between bg-emerald-950/40 px-3 py-1.5 rounded-lg border border-emerald-500/30">
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" />
-                <span className="text-slate-300 font-bold">PENJUALAN DAZZLE ME MG:</span>
-              </div>
-              <div className="text-right">
-                <span className="font-bold text-emerald-200">{formatRupiah(summary.mgRevenue, true)}</span>
-                <span className="text-[10px] text-emerald-300/80 ml-1">({summary.mgRevenuePercent}%)</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* 3 Pillars Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-7 gap-5 mt-5 items-center">
-          {/* Left Column: Toko BA (3 Cols) */}
-          <div className="lg:col-span-3 bg-white/5 border border-pink-500/30 rounded-2xl p-5 backdrop-blur-xs relative overflow-hidden">
-            <div className="absolute top-0 right-0 w-24 h-24 bg-pink-500/10 rounded-full blur-xl -mr-6 -mt-6 pointer-events-none" />
-            <div className="flex items-center justify-between pb-3 border-b border-white/10">
-              <div className="flex items-center gap-2">
-                <span className="text-xl">💄</span>
-                <div>
-                  <h3 className="text-sm font-extrabold text-pink-300 uppercase tracking-wider">
-                    Toko dengan BA
-                  </h3>
-                  <span className="text-[11px] text-slate-400">
-                    {summary.tokoBaCount} Toko ({summary.tokoBaStorePercent}% dari total gerai)
-                  </span>
-                </div>
-              </div>
-              <span className="text-xs font-black px-2.5 py-1 rounded-lg bg-pink-500/20 text-pink-300 border border-pink-500/40">
+        {/* Card 2: Toko Ada BA + Total BA */}
+        <div className="bg-white rounded-2xl border border-rose-200/90 p-5 shadow-xs flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-xs font-bold text-rose-700 uppercase tracking-wider">
+              <span>Toko Ada BA</span>
+              <span className="font-mono tabular-nums text-xs font-black text-rose-700 bg-rose-50 px-2 py-0.5 rounded-md border border-rose-200">
                 Kontribusi {summary.tokoBaRevenuePercent}%
               </span>
             </div>
-
-            <div className="mt-4 space-y-3">
-              <div>
-                <span className="text-[11px] text-slate-400 block">
-                  Total Omset {selectedKet === 'SELL IN' ? 'SELL IN' : selectedKet === 'SELL OUT' ? 'SELL OUT' : 'Penjualan'}:
+            <div className="mt-2.5 flex items-baseline justify-between gap-2">
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-2xl font-black font-mono tabular-nums text-slate-900">
+                  {summary.tokoBaCount}
                 </span>
-                <span className="text-2xl font-black font-mono text-white tracking-tight">
-                  {formatRupiah(summary.tokoBaTotalRevenue, true)}
+                <span className="text-xs font-semibold text-slate-500">
+                  Toko ({summary.tokoBaStorePercent}%)
                 </span>
               </div>
-              <div className="grid grid-cols-2 gap-3 pt-2 border-t border-white/10 text-xs">
-                <div>
-                  <span className="text-slate-400 text-[10px] block">Rata-rata per Toko:</span>
-                  <span className="font-mono font-bold text-pink-200 text-sm">
-                    {formatRupiah(summary.tokoBaAvgRevenuePerStore, true)}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-slate-400 text-[10px] block">Produk Fokus Terjual:</span>
-                  <span className="font-mono font-bold text-emerald-300 text-sm">
-                    {summary.tokoBaFocusPcs} pcs
-                  </span>
-                </div>
+              <div className="flex items-center gap-1 text-xs font-extrabold text-rose-700 bg-rose-50/80 px-2 py-1 rounded-lg border border-rose-100">
+                <Users className="w-3.5 h-3.5" />
+                <span className="font-mono tabular-nums">{summary.totalBaCount} Total BA</span>
               </div>
             </div>
           </div>
 
-          {/* Middle Column: Productivity Lift Multiplier (1 Col) */}
-          <div className="lg:col-span-1 flex flex-col items-center justify-center text-center p-3">
-            <div className="w-14 h-14 rounded-full bg-gradient-to-tr from-amber-500 to-pink-500 flex items-center justify-center font-black text-xl text-white shadow-lg shadow-pink-500/30">
-              {summary.productivityMultiplier}x
-            </div>
-            <span className="text-xs font-extrabold text-amber-300 mt-2 block leading-tight">
-              Lebih Produktif
+          <div className="mt-4 pt-3 border-t border-slate-100">
+            <span className="text-[11px] font-medium text-slate-500 block">
+              Omset Sell In Toko Ada BA
             </span>
-            <span className="text-[10px] text-slate-400 mt-0.5 leading-snug">
-              Toko BA menghasilkan rata-rata {summary.productivityMultiplier}x omset dibanding Non-BA
+            <span className="text-lg font-black font-mono tabular-nums text-rose-700 mt-0.5 block">
+              {formatRupiah(summary.tokoBaTotalRevenue, true)}
             </span>
-          </div>
-
-          {/* Right Column: Toko Non-BA (3 Cols) */}
-          <div className="lg:col-span-3 bg-white/5 border border-blue-500/30 rounded-2xl p-5 backdrop-blur-xs relative overflow-hidden">
-            <div className="absolute top-0 right-0 w-24 h-24 bg-blue-500/10 rounded-full blur-xl -mr-6 -mt-6 pointer-events-none" />
-            <div className="flex items-center justify-between pb-3 border-b border-white/10">
-              <div className="flex items-center gap-2">
-                <span className="text-xl">🏪</span>
-                <div>
-                  <h3 className="text-sm font-extrabold text-blue-300 uppercase tracking-wider">
-                    Toko Non-BA (Tanpa BA)
-                  </h3>
-                  <span className="text-[11px] text-slate-400">
-                    {summary.tokoNonBaCount} Toko ({summary.tokoNonBaStorePercent}% dari total gerai)
-                  </span>
-                </div>
-              </div>
-              <span className="text-xs font-black px-2.5 py-1 rounded-lg bg-blue-500/20 text-blue-300 border border-blue-500/40">
-                Kontribusi {summary.tokoNonBaRevenuePercent}%
-              </span>
-            </div>
-
-            <div className="mt-4 space-y-3">
-              <div>
-                <span className="text-[11px] text-slate-400 block">
-                  Total Omset {selectedKet === 'SELL IN' ? 'SELL IN' : selectedKet === 'SELL OUT' ? 'SELL OUT' : 'Penjualan'}:
-                </span>
-                <span className="text-2xl font-black font-mono text-white tracking-tight">
-                  {selectedKet === 'SELL OUT' ? 'Rp 0' : formatRupiah(summary.tokoNonBaTotalRevenue, true)}
-                </span>
-                {selectedKet === 'SELL OUT' && (
-                  <span className="text-[10px] text-amber-300 font-medium block mt-0.5">
-                    *Non-BA tidak memiliki omset Sell Out (hanya dihitung untuk Toko Ber-BA)
-                  </span>
-                )}
-              </div>
-              <div className="grid grid-cols-2 gap-3 pt-2 border-t border-white/10 text-xs">
-                <div>
-                  <span className="text-slate-400 text-[10px] block">Rata-rata per Toko:</span>
-                  <span className="font-mono font-bold text-blue-200 text-sm">
-                    {formatRupiah(summary.tokoNonBaAvgRevenuePerStore, true)}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-slate-400 text-[10px] block">Produk Fokus Terjual:</span>
-                  <span className="font-mono font-bold text-slate-300 text-sm">
-                    {summary.tokoNonBaFocusPcs} pcs
-                  </span>
-                </div>
-              </div>
-            </div>
+            <span className="text-[11px] font-mono tabular-nums text-slate-500 mt-0.5 block">
+              Rata-rata / toko: {formatRupiah(summary.tokoBaAvgRevenuePerStore, true)}
+            </span>
           </div>
         </div>
 
-        {/* Visual Comparative Contribution Bars */}
-        <div className="mt-6 pt-4 border-t border-white/10 space-y-3">
-          {/* Bar 1: Porsi Omset */}
-          <div className="space-y-1">
-            <div className="flex justify-between items-center text-xs">
-              <span className="font-bold text-slate-300">
-                Porsi Kontribusi Nilai Omset (Sell Out):
-              </span>
-              <span className="font-mono font-bold text-white">
-                <span className="text-pink-400">Toko BA {summary.tokoBaRevenuePercent}%</span> vs{' '}
-                <span className="text-blue-400">Toko Non-BA {summary.tokoNonBaRevenuePercent}%</span>
+        {/* Card 3: Toko Non-BA */}
+        <div className="bg-white rounded-2xl border border-blue-200/90 p-5 shadow-xs flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-xs font-bold text-blue-700 uppercase tracking-wider">
+              <span>Toko Non-BA</span>
+              <span className="font-mono tabular-nums text-xs font-black text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-200">
+                Kontribusi {summary.tokoNonBaRevenuePercent}%
               </span>
             </div>
-            <div className="w-full bg-white/10 h-3 rounded-full overflow-hidden flex">
-              <div
-                className="bg-gradient-to-r from-pink-500 to-rose-500 h-full transition-all duration-500"
-                style={{ width: `${summary.tokoBaRevenuePercent}%` }}
-                title={`Toko BA: ${summary.tokoBaRevenuePercent}%`}
-              />
-              <div
-                className="bg-gradient-to-r from-blue-600 to-cyan-500 h-full transition-all duration-500"
-                style={{ width: `${summary.tokoNonBaRevenuePercent}%` }}
-                title={`Toko Non-BA: ${summary.tokoNonBaRevenuePercent}%`}
-              />
+            <div className="mt-2.5 flex items-baseline gap-1.5">
+              <span className="text-2xl font-black font-mono tabular-nums text-slate-900">
+                {summary.tokoNonBaCount}
+              </span>
+              <span className="text-xs font-semibold text-slate-500">
+                Toko Tanpa BA ({summary.tokoNonBaStorePercent}%)
+              </span>
             </div>
           </div>
 
-          {/* Bar 2: Porsi Jumlah Toko */}
-          <div className="space-y-1">
-            <div className="flex justify-between items-center text-xs">
-              <span className="font-bold text-slate-300">
-                Porsi Jumlah Gerai Toko:
-              </span>
-              <span className="font-mono font-bold text-white">
-                <span className="text-pink-400">Toko BA ({summary.tokoBaCount} Toko / {summary.tokoBaStorePercent}%)</span> vs{' '}
-                <span className="text-blue-400">Toko Non-BA ({summary.tokoNonBaCount} Toko / {summary.tokoNonBaStorePercent}%)</span>
-              </span>
+          <div className="mt-4 pt-3 border-t border-slate-100">
+            <span className="text-[11px] font-medium text-slate-500 block">
+              Omset Sell In Toko Non-BA
+            </span>
+            <span className="text-lg font-black font-mono tabular-nums text-blue-700 mt-0.5 block">
+              {formatRupiah(summary.tokoNonBaTotalRevenue, true)}
+            </span>
+            <span className="text-[11px] font-mono tabular-nums text-slate-500 mt-0.5 block">
+              Rata-rata / toko: {formatRupiah(summary.tokoNonBaAvgRevenuePerStore, true)}
+            </span>
+          </div>
+        </div>
+
+        {/* Card 4: Porsi Kontribusi & Produktivitas Sell In */}
+        <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-xs flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between text-xs font-bold text-slate-500 uppercase tracking-wider">
+              <span>Rasio Kontribusi Sell In</span>
+              <TrendingUp className="w-4 h-4 text-emerald-600" />
             </div>
-            <div className="w-full bg-white/10 h-3 rounded-full overflow-hidden flex">
-              <div
-                className="bg-pink-400 h-full transition-all duration-500"
-                style={{ width: `${summary.tokoBaStorePercent}%` }}
-              />
-              <div
-                className="bg-blue-400 h-full transition-all duration-500"
-                style={{ width: `${summary.tokoNonBaStorePercent}%` }}
-              />
+
+            {/* Porsi Omset Bar */}
+            <div className="mt-3 space-y-1.5">
+              <div className="flex justify-between text-[11px] font-bold font-mono tabular-nums">
+                <span className="text-rose-700">Ada BA {summary.tokoBaRevenuePercent}%</span>
+                <span className="text-blue-700">Non-BA {summary.tokoNonBaRevenuePercent}%</span>
+              </div>
+              <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden flex">
+                <div
+                  className="bg-rose-600 h-full transition-all duration-300"
+                  style={{ width: `${summary.tokoBaRevenuePercent}%` }}
+                />
+                <div
+                  className="bg-blue-600 h-full transition-all duration-300"
+                  style={{ width: `${summary.tokoNonBaRevenuePercent}%` }}
+                />
+              </div>
             </div>
+
+            {/* Porsi Jumlah Toko Bar */}
+            <div className="mt-3 space-y-1.5">
+              <div className="flex justify-between text-[11px] font-semibold font-mono tabular-nums text-slate-500">
+                <span>Porsi Gerai BA {summary.tokoBaStorePercent}%</span>
+                <span>Non-BA {summary.tokoNonBaStorePercent}%</span>
+              </div>
+              <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden flex">
+                <div
+                  className="bg-rose-400 h-full transition-all duration-300"
+                  style={{ width: `${summary.tokoBaStorePercent}%` }}
+                />
+                <div
+                  className="bg-blue-400 h-full transition-all duration-300"
+                  style={{ width: `${summary.tokoNonBaStorePercent}%` }}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+            <span className="text-slate-500 font-medium">Produktivitas Sell In BA:</span>
+            <span className="font-mono tabular-nums font-black text-slate-900">
+              {summary.productivityMultiplier}x Non-BA
+            </span>
           </div>
         </div>
       </div>
 
-      {/* 3. Strategic Opportunity Alert: Non-BA High-Performing Candidates */}
-      {summary.potentialBaCandidateStoresCount > 0 && (
-        <div className="bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200/90 rounded-2xl p-4 shadow-2xs flex items-start gap-3.5">
-          <Zap className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-          <div className="text-xs text-amber-900">
-            <span className="font-extrabold text-sm block">
-              Peluang Ekspansi: Ditemukan {summary.potentialBaCandidateStoresCount} Toko Non-BA Beromset Tinggi yang Sangat Potensial Dipasang BA!
-            </span>
-            <p className="mt-1 leading-relaxed text-amber-800">
-              Toko-toko ini telah mencatatkan omset mandiri di atas Rp 12.000.000 / bulan tanpa didampingi BA. Berdasarkan data komparasi, penempatan 1 Beauty Advisor baru di toko potensial ini berpeluang menaikkan omset sebesar <strong>2.8x lipat</strong> serta melipatgandakan serapan Produk Fokus.
+      {/* 3. Rekapitulasi Per Bulan (Grafik + Tabel Rapi) */}
+      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
+        <div className="p-5 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
+              <BarChart3 className="w-4 h-4 text-rose-600" />
+              <span>Rekap Per Bulan Kontribusi Omset Sell In ({selectedYear})</span>
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Rincian bulanan jumlah toko, omset Sell In, serta kontribusi Toko Ada BA vs Toko Non-BA. Klik bulan untuk memfilter detail toko.
             </p>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {selectedMonth !== 'ALL' && (
+              <button
+                onClick={() => setSelectedMonth('ALL')}
+                className="px-2.5 py-1.5 text-xs font-bold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                Tampilkan Semua Bulan
+              </button>
+            )}
+            <div className="inline-flex p-0.5 bg-slate-100 rounded-lg border border-slate-200 text-[11px] font-bold">
+              <button
+                onClick={() => setChartMode('stacked')}
+                className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors ${
+                  chartMode === 'stacked' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                Grafik Total (Stacked)
+              </button>
+              <button
+                onClick={() => setChartMode('grouped')}
+                className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors ${
+                  chartMode === 'grouped' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                Perbandingan (Side-by-Side)
+              </button>
+            </div>
           </div>
         </div>
-      )}
 
-      {/* 4. Main Store Contribution Table */}
+        {/* Interactive Monthly Bar Chart */}
+        {monthlyRows.length > 0 ? (
+          <div className="p-5 border-b border-slate-100 bg-slate-50/40">
+            {/* Legend + Hover Inspection Strip */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+              <div className="flex items-center gap-4 text-xs font-bold">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded-xs bg-rose-600 inline-block" />
+                  <span className="text-slate-700">Toko Ada BA (Omset Sell In)</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded-xs bg-blue-600 inline-block" />
+                  <span className="text-slate-700">Toko Non-BA (Omset Sell In)</span>
+                </div>
+              </div>
+
+              {hoveredMonth ? (
+                <div className="text-[11px] font-mono tabular-nums bg-white border border-slate-200 rounded-lg px-3 py-1.5 flex flex-wrap items-center gap-3 shadow-2xs">
+                  <span className="font-sans font-extrabold text-slate-900">
+                    {hoveredMonth.monthName} {hoveredMonth.year}:
+                  </span>
+                  <span className="text-slate-700">
+                    Total {hoveredMonth.totalStoresCount} Toko ({formatCompactRupiah(hoveredMonth.totalSellIn)})
+                  </span>
+                  <span className="text-rose-700 font-bold">
+                    Ada BA: {hoveredMonth.tokoBaCount} Toko ({hoveredMonth.tokoBaContributionPct}%)
+                  </span>
+                  <span className="text-blue-700 font-bold">
+                    Non-BA: {hoveredMonth.tokoNonBaCount} Toko ({hoveredMonth.tokoNonBaContributionPct}%)
+                  </span>
+                </div>
+              ) : (
+                <span className="text-[11px] text-slate-400">
+                  Arahkan kursor ke batang bulan untuk melihat rincian cepat
+                </span>
+              )}
+            </div>
+
+            {/* Chart Area */}
+            <div className="overflow-x-auto pb-1">
+              <div className="min-w-[640px]">
+                <div className="relative h-60 flex items-end gap-2 sm:gap-3 pt-8 pb-2 px-2 border-b border-slate-200">
+                  {/* Horizontal Grid Lines */}
+                  {[0.25, 0.5, 0.75, 1].map((ratio) => (
+                    <div
+                      key={ratio}
+                      className="absolute left-0 right-0 border-t border-dashed border-slate-200/80 pointer-events-none flex items-center"
+                      style={{ bottom: `${ratio * 100 * 0.85}%` }}
+                    >
+                      <span className="text-[10px] font-mono tabular-nums text-slate-400 bg-slate-50/90 pr-1.5 -mt-4">
+                        {formatCompactRupiah(chartMaxVal * ratio)}
+                      </span>
+                    </div>
+                  ))}
+
+                  {monthlyRows.map((m) => {
+                    const isActive = selectedMonth === m.monthName;
+                    const baHeightPct = Math.max(0, (m.tokoBaSellIn / chartMaxVal) * 100);
+                    const nonBaHeightPct = Math.max(0, (m.tokoNonBaSellIn / chartMaxVal) * 100);
+
+                    return (
+                      <button
+                        key={m.monthName}
+                        type="button"
+                        onClick={() =>
+                          setSelectedMonth((prev) =>
+                            prev === m.monthName ? 'ALL' : m.monthName
+                          )
+                        }
+                        onMouseEnter={() => setHoveredMonth(m)}
+                        onMouseLeave={() => setHoveredMonth(null)}
+                        className={`flex-1 h-full flex flex-col justify-end items-center group cursor-pointer rounded-lg px-1 transition-colors ${
+                          isActive ? 'bg-rose-50/80 ring-1 ring-rose-300' : 'hover:bg-slate-100/70'
+                        }`}
+                      >
+                        {/* Value Label Above Bar */}
+                        <div className="text-[10px] font-mono tabular-nums font-bold text-slate-600 mb-1 whitespace-nowrap">
+                          {formatCompactRupiah(m.totalSellIn)}
+                        </div>
+
+                        {/* Bar Column */}
+                        <div className="w-full max-w-[46px] h-[78%] flex items-end justify-center gap-1">
+                          {chartMode === 'stacked' ? (
+                            <div className="w-full h-full flex flex-col justify-end rounded-t-md overflow-hidden">
+                              <div
+                                className="w-full bg-blue-600 group-hover:bg-blue-500 transition-all duration-300"
+                                style={{ height: `${nonBaHeightPct}%` }}
+                                title={`Toko Non-BA: ${formatRupiah(m.tokoNonBaSellIn, true)} (${m.tokoNonBaContributionPct}%)`}
+                              />
+                              <div
+                                className="w-full bg-rose-600 group-hover:bg-rose-500 transition-all duration-300"
+                                style={{ height: `${baHeightPct}%` }}
+                                title={`Toko Ada BA: ${formatRupiah(m.tokoBaSellIn, true)} (${m.tokoBaContributionPct}%)`}
+                              />
+                            </div>
+                          ) : (
+                            <>
+                              <div
+                                className="w-1/2 bg-rose-600 group-hover:bg-rose-500 rounded-t-sm transition-all duration-300"
+                                style={{ height: `${baHeightPct}%` }}
+                                title={`Toko Ada BA: ${formatRupiah(m.tokoBaSellIn, true)} (${m.tokoBaContributionPct}%)`}
+                              />
+                              <div
+                                className="w-1/2 bg-blue-600 group-hover:bg-blue-500 rounded-t-sm transition-all duration-300"
+                                style={{ height: `${nonBaHeightPct}%` }}
+                                title={`Toko Non-BA: ${formatRupiah(m.tokoNonBaSellIn, true)} (${m.tokoNonBaContributionPct}%)`}
+                              />
+                            </>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* X-Axis Labels + Monthly Share Badges */}
+                <div className="flex items-start gap-2 sm:gap-3 px-2 pt-2">
+                  {monthlyRows.map((m) => {
+                    const isActive = selectedMonth === m.monthName;
+                    return (
+                      <div key={m.monthName} className="flex-1 text-center">
+                        <span
+                          className={`text-[11px] font-extrabold block ${
+                            isActive ? 'text-rose-700' : 'text-slate-700'
+                          }`}
+                        >
+                          {SHORT_MONTH_MAP[m.monthName] || m.monthName.slice(0, 3)}
+                        </span>
+                        <span className="text-[10px] font-mono tabular-nums text-rose-700 font-bold block">
+                          {m.tokoBaContributionPct}%
+                        </span>
+                        <span className="text-[10px] font-mono tabular-nums text-blue-700 block">
+                          {m.tokoNonBaContributionPct}%
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Monthly Breakdown Table */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs text-left border-collapse">
+            <thead>
+              <tr className="bg-slate-100/90 text-slate-600 text-[11px] font-bold uppercase tracking-wider border-b border-slate-200">
+                <th rowSpan={2} className="py-2.5 px-4 border-r border-slate-200/80">
+                  Bulan
+                </th>
+                <th colSpan={2} className="py-2 px-3 text-center border-r border-slate-200/80 bg-slate-100 text-slate-800">
+                  Total Semua Toko (Sell In)
+                </th>
+                <th colSpan={3} className="py-2 px-3 text-center border-r border-slate-200/80 bg-rose-50/80 text-rose-800">
+                  Toko Ada BA
+                </th>
+                <th colSpan={3} className="py-2 px-3 text-center border-r border-slate-200/80 bg-blue-50/80 text-blue-800">
+                  Toko Non-BA
+                </th>
+                <th rowSpan={2} className="py-2.5 px-3 text-center min-w-[130px]">
+                  Porsi Kontribusi
+                </th>
+              </tr>
+              <tr className="bg-slate-50 text-slate-600 text-[11px] font-bold border-b border-slate-200">
+                <th className="py-2 px-3 text-center">Jml Toko</th>
+                <th className="py-2 px-3 text-right border-r border-slate-200/80">Omset Sell In</th>
+                <th className="py-2 px-3 text-center bg-rose-50/40 text-rose-900">Jml Toko</th>
+                <th className="py-2 px-3 text-right bg-rose-50/40 text-rose-900">Omset Sell In</th>
+                <th className="py-2 px-3 text-center border-r border-slate-200/80 bg-rose-50/40 text-rose-900">
+                  Kontribusi
+                </th>
+                <th className="py-2 px-3 text-center bg-blue-50/40 text-blue-900">Jml Toko</th>
+                <th className="py-2 px-3 text-right bg-blue-50/40 text-blue-900">Omset Sell In</th>
+                <th className="py-2 px-3 text-center border-r border-slate-200/80 bg-blue-50/40 text-blue-900">
+                  Kontribusi
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {monthlyRows.map((m) => {
+                const isSelected = selectedMonth === m.monthName;
+                return (
+                  <tr
+                    key={m.monthName}
+                    onClick={() =>
+                      setSelectedMonth((prev) => (prev === m.monthName ? 'ALL' : m.monthName))
+                    }
+                    className={`cursor-pointer transition-colors ${
+                      isSelected ? 'bg-rose-50/70' : 'hover:bg-slate-50/90'
+                    }`}
+                  >
+                    <td className="py-3 px-4 border-r border-slate-100 font-extrabold text-slate-900 whitespace-nowrap">
+                      <span>{m.monthName}</span>
+                      {isSelected && (
+                        <span className="ml-2 text-[10px] font-bold text-rose-700">• Aktif</span>
+                      )}
+                    </td>
+
+                    {/* Total Semua Toko */}
+                    <td className="py-3 px-3 text-center font-mono tabular-nums font-bold text-slate-800">
+                      {m.totalStoresCount}
+                    </td>
+                    <td className="py-3 px-3 text-right font-mono tabular-nums font-black text-slate-900 border-r border-slate-100 whitespace-nowrap">
+                      {formatRupiah(m.totalSellIn, true)}
+                    </td>
+
+                    {/* Toko Ada BA */}
+                    <td className="py-3 px-3 text-center font-mono tabular-nums font-bold text-rose-800 bg-rose-50/20">
+                      {m.tokoBaCount}
+                    </td>
+                    <td className="py-3 px-3 text-right font-mono tabular-nums font-bold text-slate-900 bg-rose-50/20 whitespace-nowrap">
+                      {formatRupiah(m.tokoBaSellIn, true)}
+                    </td>
+                    <td className="py-3 px-3 text-center font-mono tabular-nums font-black text-rose-700 border-r border-slate-100 bg-rose-50/20">
+                      {m.tokoBaContributionPct}%
+                    </td>
+
+                    {/* Toko Non-BA */}
+                    <td className="py-3 px-3 text-center font-mono tabular-nums font-bold text-blue-800 bg-blue-50/20">
+                      {m.tokoNonBaCount}
+                    </td>
+                    <td className="py-3 px-3 text-right font-mono tabular-nums font-bold text-slate-900 bg-blue-50/20 whitespace-nowrap">
+                      {formatRupiah(m.tokoNonBaSellIn, true)}
+                    </td>
+                    <td className="py-3 px-3 text-center font-mono tabular-nums font-black text-blue-700 border-r border-slate-100 bg-blue-50/20">
+                      {m.tokoNonBaContributionPct}%
+                    </td>
+
+                    {/* Visual Share */}
+                    <td className="py-3 px-3">
+                      <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden flex">
+                        <div
+                          className="bg-rose-600 h-full"
+                          style={{ width: `${m.tokoBaContributionPct}%` }}
+                        />
+                        <div
+                          className="bg-blue-600 h-full"
+                          style={{ width: `${m.tokoNonBaContributionPct}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between text-[10px] font-mono tabular-nums text-slate-500 mt-1">
+                        <span>{m.tokoBaContributionPct}%</span>
+                        <span>{m.tokoNonBaContributionPct}%</span>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+
+              {monthlyRows.length === 0 && (
+                <tr>
+                  <td colSpan={10} className="py-10 text-center text-slate-400">
+                    Belum ada transaksi Omset Sell In untuk filter tahun {selectedYear}.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+
+            {monthlyRows.length > 0 && (
+              <tfoot>
+                <tr className="bg-slate-900 text-white font-mono tabular-nums text-xs">
+                  <td className="py-3 px-4 font-sans font-extrabold border-r border-slate-800 whitespace-nowrap">
+                    TOTAL {selectedYear} (Unik)
+                  </td>
+                  <td className="py-3 px-3 text-center font-bold">
+                    {yearlyTotals.distinctStoresCount}
+                  </td>
+                  <td className="py-3 px-3 text-right font-black border-r border-slate-800 whitespace-nowrap">
+                    {formatRupiah(yearlyTotals.totalSellIn, true)}
+                  </td>
+                  <td className="py-3 px-3 text-center font-bold text-rose-300">
+                    {yearlyTotals.distinctTokoBaCount}
+                  </td>
+                  <td className="py-3 px-3 text-right font-bold whitespace-nowrap">
+                    {formatRupiah(yearlyTotals.tokoBaSellIn, true)}
+                  </td>
+                  <td className="py-3 px-3 text-center font-black text-rose-300 border-r border-slate-800">
+                    {yearlyTotals.tokoBaContributionPct}%
+                  </td>
+                  <td className="py-3 px-3 text-center font-bold text-blue-300">
+                    {yearlyTotals.distinctTokoNonBaCount}
+                  </td>
+                  <td className="py-3 px-3 text-right font-bold whitespace-nowrap">
+                    {formatRupiah(yearlyTotals.tokoNonBaSellIn, true)}
+                  </td>
+                  <td className="py-3 px-3 text-center font-black text-blue-300 border-r border-slate-800">
+                    {yearlyTotals.tokoNonBaContributionPct}%
+                  </td>
+                  <td className="py-3 px-3">
+                    <div className="w-full h-2 bg-slate-700 rounded-full overflow-hidden flex">
+                      <div
+                        className="bg-rose-500 h-full"
+                        style={{ width: `${yearlyTotals.tokoBaContributionPct}%` }}
+                      />
+                      <div
+                        className="bg-blue-500 h-full"
+                        style={{ width: `${yearlyTotals.tokoNonBaContributionPct}%` }}
+                      />
+                    </div>
+                  </td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      </div>
+
+      {/* 4. Store-Level Sell In Detail Table */}
       <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
-        <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50/60">
+        <div className="p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
-            <h3 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
-              <span>Peringkat &amp; Daftar Kontribusi Semua Toko ({selectedMonth} {selectedYear})</span>
-              <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-700">
-                {filteredStores.length} Gerai
-              </span>
+            <h3 className="text-sm font-extrabold text-slate-900">
+              Daftar Rincian Omset Sell In per Toko ({periodDisplayLabel})
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              Urutan berdasarkan total omset penjualan dan persentase kontribusi terhadap total area
+              Menampilkan {filteredStores.length} toko dengan transaksi Sell In • Total {summary.totalBaCount} BA aktif
             </p>
           </div>
 
-          {/* Search box */}
-          <div className="relative min-w-[240px]">
+          <div className="relative min-w-[260px]">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Cari toko, nama BA, atau sales..."
+              placeholder="Cari nama toko, nama BA, sales, area..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-8 py-1.5 text-xs rounded-xl border border-slate-200 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-pink-500"
+              className="w-full pl-9 pr-8 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50/70 focus:bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-rose-500"
             />
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
@@ -735,128 +916,70 @@ export const StoreBaContributionView: React.FC<StoreBaContributionViewProps> = (
         <div className="overflow-x-auto">
           <table className="w-full text-xs text-left border-collapse">
             <thead>
-              <tr className="bg-slate-100/80 text-slate-700 font-bold border-b border-slate-200">
-                <th className="py-3 px-3 text-center w-10">No</th>
-                <th className="py-3 px-3 text-center">Status</th>
-                <th className="py-3 px-3">Nama Toko / Outlet</th>
+              <tr className="bg-slate-100/80 text-slate-600 text-[11px] font-bold uppercase tracking-wider border-b border-slate-200">
+                <th className="py-3 px-3 text-center w-12">No</th>
+                <th className="py-3 px-3">Status</th>
+                <th className="py-3 px-3">Nama Toko</th>
                 <th className="py-3 px-3">Nama BA</th>
-                <th className="py-3 px-3">Area &amp; SPV</th>
-                <th className="py-3 px-3">Sales In-Charge</th>
-                <th className="py-3 px-3 text-right">Total Omset (Rp)</th>
+                <th className="py-3 px-3">Area &amp; Sales</th>
+                <th className="py-3 px-3 text-right">Omset Sell In (Rp)</th>
                 <th className="py-3 px-3 text-center">% Kontribusi</th>
-                <th className="py-3 px-3 text-center">Qty / Fokus</th>
-                <th className="py-3 px-3 text-center">Klasifikasi Performa</th>
+                <th className="py-3 px-3 text-center">Qty Sell In</th>
                 <th className="py-3 px-3 text-center">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredStores.map((item, idx) => (
-                <tr
-                  key={item.id}
-                  className={`hover:bg-slate-50/80 transition-colors ${
-                    item.hasBa ? 'bg-white' : 'bg-slate-50/30'
-                  }`}
-                >
-                  <td className="py-3 px-3 text-center font-bold text-slate-500">
+                <tr key={item.id} className="hover:bg-slate-50/80 transition-colors">
+                  <td className="py-3 px-3 text-center font-mono tabular-nums font-bold text-slate-500">
                     {idx + 1}
                   </td>
-
-                  {/* Status Badge */}
-                  <td className="py-3 px-3 text-center">
+                  <td className="py-3 px-3 whitespace-nowrap">
                     <span
-                      className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold inline-flex items-center gap-1 ${
+                      className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold ${
                         item.hasBa
-                          ? 'bg-pink-100 text-pink-800 border border-pink-200'
-                          : 'bg-slate-200 text-slate-700 border border-slate-300'
+                          ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                          : 'bg-blue-50 text-blue-700 border border-blue-200'
                       }`}
                     >
-                      {item.hasBa ? '💄 Toko BA' : '🏪 Non-BA'}
+                      {item.hasBa ? 'Toko Ada BA' : 'Toko Non-BA'}
                     </span>
                   </td>
-
-                  {/* Store Name */}
                   <td className="py-3 px-3">
-                    <span className="font-extrabold text-slate-900 block">
-                      {item.storeName}
-                    </span>
-                    <span className="text-[10px] text-slate-400 block">{item.region}</span>
+                    <span className="font-bold text-slate-900 block">{item.storeName}</span>
+                    <span className="text-[11px] text-slate-400 block">{item.region}</span>
                   </td>
-
-                  {/* BA Name */}
                   <td className="py-3 px-3">
                     {item.hasBa ? (
                       <div>
-                        <span className="font-bold text-pink-700 block">{item.baName}</span>
-                        {item.baNumber && (
-                          <span className="text-[10px] text-slate-400 block">{item.baNumber}</span>
+                        <span className="font-bold text-rose-700 block">{item.baName}</span>
+                        {item.baCountInStore > 1 && (
+                          <span className="text-[10px] font-mono text-slate-500">
+                            ({item.baCountInStore} BA)
+                          </span>
                         )}
                       </div>
                     ) : (
-                      <span className="text-slate-400 italic text-[11px]">- (Tanpa BA)</span>
+                      <span className="text-slate-400">- (Tanpa BA)</span>
                     )}
                   </td>
-
-                  {/* Cover Area & SPV */}
                   <td className="py-3 px-3">
                     <span className="font-semibold text-slate-800 block">{item.coverArea}</span>
-                    <span className="text-[10px] text-slate-400 block">SPV: {item.spvName}</span>
+                    <span className="text-[11px] text-slate-400 block">Sales: {item.salesName}</span>
                   </td>
-
-                  {/* Sales */}
-                  <td className="py-3 px-3 font-semibold text-slate-700">
-                    {item.salesName}
-                  </td>
-
-                  {/* Total Omset */}
-                  <td className="py-3 px-3 text-right font-mono font-black text-slate-900">
+                  <td className="py-3 px-3 text-right font-mono tabular-nums font-black text-slate-900 whitespace-nowrap">
                     {formatRupiah(item.totalRevenue, true)}
                   </td>
-
-                  {/* Contribution Percent */}
-                  <td className="py-3 px-3 text-center">
-                    <span
-                      className={`px-2 py-0.5 rounded-full font-bold text-[11px] ${
-                        item.contributionPercent >= 10
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : item.contributionPercent >= 5
-                          ? 'bg-blue-100 text-blue-800'
-                          : 'bg-slate-100 text-slate-700'
-                      }`}
-                    >
-                      {item.contributionPercent}%
-                    </span>
+                  <td className="py-3 px-3 text-center font-mono tabular-nums font-bold text-slate-800">
+                    {item.contributionPercent}%
                   </td>
-
-                  {/* Qty & Focus Pcs */}
-                  <td className="py-3 px-3 text-center font-mono text-[11px]">
-                    <span className="text-slate-700">{item.totalQtySold} pcs</span>
-                    <span className="text-[10px] text-pink-600 block font-semibold">
-                      ({item.focusProductPcs} fokus)
-                    </span>
+                  <td className="py-3 px-3 text-center font-mono tabular-nums text-slate-600">
+                    {item.totalQtySold.toLocaleString('id-ID')} pcs
                   </td>
-
-                  {/* Performance Classification */}
-                  <td className="py-3 px-3 text-center">
-                    <span
-                      className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        item.performanceClass.includes('Bintang')
-                          ? 'bg-amber-100 text-amber-900 border border-amber-300'
-                          : item.performanceClass.includes('Prioritas')
-                          ? 'bg-orange-100 text-orange-900 border border-orange-300'
-                          : item.performanceClass.includes('Kandidat')
-                          ? 'bg-blue-100 text-blue-900 border border-blue-200'
-                          : 'bg-slate-100 text-slate-700'
-                      }`}
-                    >
-                      {item.performanceClass}
-                    </span>
-                  </td>
-
-                  {/* Action */}
                   <td className="py-3 px-3 text-center">
                     <button
                       onClick={() => setSelectedStoreModal(item)}
-                      className="px-2.5 py-1 text-[11px] font-bold bg-pink-50 hover:bg-pink-100 text-pink-700 rounded-lg border border-pink-200/80 transition-colors cursor-pointer"
+                      className="px-2.5 py-1 text-[11px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg border border-slate-200 transition-colors cursor-pointer"
                     >
                       Detail
                     </button>
@@ -866,8 +989,8 @@ export const StoreBaContributionView: React.FC<StoreBaContributionViewProps> = (
 
               {filteredStores.length === 0 && (
                 <tr>
-                  <td colSpan={11} className="py-10 text-center text-slate-400">
-                    Tidak ada data toko yang cocok dengan kriteria pencarian.
+                  <td colSpan={9} className="py-10 text-center text-slate-400">
+                    Tidak ada transaksi Omset Sell In yang cocok dengan filter saat ini.
                   </td>
                 </tr>
               )}
@@ -876,26 +999,23 @@ export const StoreBaContributionView: React.FC<StoreBaContributionViewProps> = (
         </div>
       </div>
 
-      {/* 5. Detail Modal */}
+      {/* 5. Detail Modal (Khusus Omset Sell In) */}
       {selectedStoreModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
           <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-lg w-full p-6 max-h-[90vh] overflow-y-auto">
-            {/* Modal Header */}
             <div className="flex items-start justify-between pb-4 border-b border-slate-100">
               <div>
                 <div className="flex items-center gap-2">
                   <span
                     className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded ${
                       selectedStoreModal.hasBa
-                        ? 'bg-pink-100 text-pink-800'
-                        : 'bg-slate-200 text-slate-700'
+                        ? 'bg-rose-100 text-rose-800'
+                        : 'bg-blue-100 text-blue-800'
                     }`}
                   >
-                    {selectedStoreModal.hasBa ? '💄 Toko dengan BA' : '🏪 Toko Non-BA'}
+                    {selectedStoreModal.hasBa ? 'Toko Ada BA' : 'Toko Non-BA'}
                   </span>
-                  <span className="text-xs text-slate-400">
-                    • Periode: {selectedMonth} {selectedYear}
-                  </span>
+                  <span className="text-xs text-slate-400">• {periodDisplayLabel}</span>
                 </div>
                 <h3 className="text-lg font-black text-slate-900 mt-1">
                   {selectedStoreModal.storeName}
@@ -906,267 +1026,64 @@ export const StoreBaContributionView: React.FC<StoreBaContributionViewProps> = (
               </div>
               <button
                 onClick={() => setSelectedStoreModal(null)}
-                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Key Metrics */}
-            <div className="mt-4 grid grid-cols-2 gap-3 p-3 bg-slate-50 rounded-xl border border-slate-200/70 text-xs">
+            <div className="mt-4 grid grid-cols-2 gap-3 p-3.5 bg-slate-50 rounded-xl border border-slate-200/70 text-xs">
               <div>
-                <span className="text-slate-400 block text-[10px]">Total Omset Penjualan:</span>
-                <span className="font-mono font-black text-base text-slate-900 block mt-0.5">
+                <span className="text-slate-400 block text-[10px]">Total Omset Sell In</span>
+                <span className="font-mono tabular-nums font-black text-base text-slate-900 block mt-0.5">
                   {formatRupiah(selectedStoreModal.totalRevenue, true)}
                 </span>
               </div>
               <div>
-                <span className="text-slate-400 block text-[10px]">Kontribusi terhadap Area:</span>
-                <span className="font-bold text-emerald-700 text-base block mt-0.5">
+                <span className="text-slate-400 block text-[10px]">Kontribusi Sell In</span>
+                <span className="font-mono tabular-nums font-black text-emerald-700 text-base block mt-0.5">
                   {selectedStoreModal.contributionPercent}%
                 </span>
               </div>
               <div>
-                <span className="text-slate-400 block text-[10px]">Unit Terjual (Total Qty):</span>
-                <span className="font-bold text-slate-800 text-sm block mt-0.5">
-                  {selectedStoreModal.totalQtySold} pcs
+                <span className="text-slate-400 block text-[10px]">Total Qty Sell In</span>
+                <span className="font-mono tabular-nums font-bold text-slate-800 text-sm block mt-0.5">
+                  {selectedStoreModal.totalQtySold.toLocaleString('id-ID')} pcs
                 </span>
               </div>
               <div>
-                <span className="text-slate-400 block text-[10px]">Produk Fokus Terjual:</span>
-                <span className="font-bold text-pink-600 text-sm block mt-0.5">
+                <span className="text-slate-400 block text-[10px]">Produk Fokus (Sell In)</span>
+                <span className="font-mono tabular-nums font-bold text-rose-700 text-sm block mt-0.5">
                   {selectedStoreModal.focusProductPcs} pcs ({formatRupiah(selectedStoreModal.focusProductValue, true)})
                 </span>
               </div>
             </div>
 
-            {/* BA Status Info */}
             <div className="mt-4 p-3 rounded-xl border border-slate-200 text-xs space-y-1">
-              <span className="font-bold text-slate-700 block">Status Penugasan BA:</span>
+              <span className="font-bold text-slate-700 block">Status BA di Toko:</span>
               <p className="text-slate-600">
                 {selectedStoreModal.hasBa
-                  ? `Dikelola oleh BA resmi: ${selectedStoreModal.baName} (${selectedStoreModal.baNumber || 'BA Aktif'}).`
-                  : 'Gerai ini belum memiliki BA tetap (hanya dilayani kunjungan Sales Taking Order berkala).'}
+                  ? `Dikelola oleh ${selectedStoreModal.baCountInStore} BA: ${selectedStoreModal.baName}.`
+                  : 'Gerai Non-BA (pasokan melalui Sales Taking Order reguler tanpa BA counter).'}
               </p>
             </div>
 
-            {/* Strategic Recommendation */}
-            <div className="mt-4 p-3.5 bg-pink-50/60 rounded-xl border border-pink-200 text-xs text-pink-950 space-y-1">
-              <span className="font-extrabold flex items-center gap-1.5 text-pink-900">
-                <CheckCircle2 className="w-4 h-4 text-pink-600" />
-                Rekomendasi Manajemen &amp; Ekspansi:
+            <div className="mt-4 p-3.5 bg-slate-50 rounded-xl border border-slate-200 text-xs text-slate-800 space-y-1">
+              <span className="font-extrabold flex items-center gap-1.5 text-slate-900">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                Catatan Evaluasi ({selectedStoreModal.performanceClass})
               </span>
-              <p className="leading-relaxed font-medium">
-                {selectedStoreModal.recommendationNote}
-              </p>
+              <p className="leading-relaxed">{selectedStoreModal.recommendationNote}</p>
             </div>
 
-            {/* Close Button */}
-            <div className="mt-6 flex justify-end">
+            <div className="mt-5 flex justify-end">
               <button
                 onClick={() => setSelectedStoreModal(null)}
                 className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer"
               >
-                Tutup Rincian
+                Tutup
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* Modal: Edit Manual Penjualan KA & MG */}
-      {isKaMgModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150 my-6">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div>
-                <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
-                  <Edit2 className="w-4 h-4 text-pink-600" />
-                  Edit Pencapaian SPV WIDODO, KA &amp; DAZZLE ME MG
-                </h3>
-                <span className="text-xs text-slate-500">
-                  SPV WIDODO Tunggal • Penjualan KA &amp; DAZZLE ME MG masuk penuh ke Pencapaian SPV &amp; Area
-                </span>
-              </div>
-              <button
-                onClick={() => setIsKaMgModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                saveKaMgSalesOverride({
-                  isManual: true,
-                  spvSalesValue: editSpvSales,
-                  kaSalesValue: editKaSales,
-                  mgSalesValue: editMgSales,
-                  dazzleMeMgSalesValue: editMgSales,
-                  notes: editKaMgNotes.trim(),
-                });
-                setRefreshVersion((v) => v + 1);
-                setIsKaMgModalOpen(false);
-              }}
-              className="space-y-4 mt-4 text-xs"
-            >
-              {/* Info Mode Override */}
-              <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-amber-950 flex items-start gap-2.5">
-                <Sparkles className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                <div className="space-y-0.5">
-                  <span className="font-bold block">Mode Penyesuaian Manual Aktif</span>
-                  <p className="text-[11px] text-amber-800 leading-relaxed">
-                    Total Penjualan Area akan dihitung rapi berdasarkan penjumlahan: Semua Penjualan SPV + Penjualan KA + PENJUALAN DAZZLE ME MG. Anda dapat mengembalikannya ke otomatis kapan saja.
-                  </p>
-                </div>
-              </div>
-
-              {/* Input 1: Semua Penjualan SPV */}
-              <div>
-                <label className="text-[11px] font-bold text-slate-700 block mb-1 flex items-center justify-between">
-                  <span>1. Semua Penjualan SPV (WIDODO + HENDRA GUNAWAN):</span>
-                  <span className="text-[10px] text-slate-400 font-mono">Format IDR</span>
-                </label>
-                <div className="relative">
-                  <span className="absolute left-3 top-2.5 font-bold text-slate-400 text-xs">Rp</span>
-                  <input
-                    type="number"
-                    min={0}
-                    step="any"
-                    value={editSpvSales}
-                    onChange={(e) => setEditSpvSales(Number(e.target.value))}
-                    className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 bg-white font-mono font-bold text-slate-900 text-sm focus:border-blue-500 focus:outline-none"
-                    required
-                  />
-                </div>
-                <span className="text-[10px] text-slate-500 block mt-0.5 font-mono">
-                  {formatRupiah(editSpvSales)}
-                </span>
-              </div>
-
-              {/* Input 2: Penjualan KA */}
-              <div>
-                <label className="text-[11px] font-bold text-slate-700 block mb-1 flex items-center justify-between">
-                  <span>2. Penjualan KA (Key Account / Modern Trade):</span>
-                  <span className="text-[10px] text-slate-400 font-mono">Format IDR</span>
-                </label>
-                <div className="relative">
-                  <span className="absolute left-3 top-2.5 font-bold text-slate-400 text-xs">Rp</span>
-                  <input
-                    type="number"
-                    min={0}
-                    step="any"
-                    value={editKaSales}
-                    onChange={(e) => setEditKaSales(Number(e.target.value))}
-                    className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 bg-white font-mono font-bold text-slate-900 text-sm focus:border-purple-500 focus:outline-none"
-                    required
-                  />
-                </div>
-                <span className="text-[10px] text-slate-500 block mt-0.5 font-mono">
-                  {formatRupiah(editKaSales)}
-                </span>
-              </div>
-
-              {/* Input 3: PENJUALAN DAZZLE ME MG */}
-              <div>
-                <label className="text-[11px] font-bold text-slate-700 block mb-1 flex items-center justify-between">
-                  <span>3. PENJUALAN DAZZLE ME MG (Market Group / General Trade):</span>
-                  <span className="text-[10px] text-slate-400 font-mono">Format IDR</span>
-                </label>
-                <div className="relative">
-                  <span className="absolute left-3 top-2.5 font-bold text-slate-400 text-xs">Rp</span>
-                  <input
-                    type="number"
-                    min={0}
-                    step="any"
-                    value={editMgSales}
-                    onChange={(e) => setEditMgSales(Number(e.target.value))}
-                    className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 bg-white font-mono font-bold text-slate-900 text-sm focus:border-emerald-500 focus:outline-none"
-                    required
-                  />
-                </div>
-                <span className="text-[10px] text-slate-500 block mt-0.5 font-mono">
-                  {formatRupiah(editMgSales)}
-                </span>
-              </div>
-
-              {/* Total Preview Strip (Formula Rapi) */}
-              <div className="p-3.5 bg-slate-900 text-white rounded-xl space-y-2 font-mono">
-                <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                  <span className="text-[10px] text-slate-400 uppercase tracking-wider block">
-                    Formula Total Penjualan:
-                  </span>
-                  <span className="text-xs text-amber-400 font-bold">
-                    SPV + KA + DAZZLE ME MG
-                  </span>
-                </div>
-                <div className="flex items-center justify-between pt-1">
-                  <div>
-                    <span className="text-[10px] text-slate-400 block uppercase">Total Penjualan Hasil:</span>
-                    <span className="text-base font-black text-amber-300">
-                      {formatRupiah(editSpvSales + editKaSales + editMgSales, true)}
-                    </span>
-                  </div>
-                  <div className="text-right text-[11px] space-y-0.5">
-                    <span className="text-blue-300 font-bold block">
-                      SPV: {editSpvSales + editKaSales + editMgSales > 0 ? Math.round((editSpvSales / (editSpvSales + editKaSales + editMgSales)) * 1000) / 10 : 0}%
-                    </span>
-                    <span className="text-purple-300 font-bold block">
-                      KA: {editSpvSales + editKaSales + editMgSales > 0 ? Math.round((editKaSales / (editSpvSales + editKaSales + editMgSales)) * 1000) / 10 : 0}%
-                    </span>
-                    <span className="text-emerald-300 font-bold block">
-                      DAZZLE ME MG: {editSpvSales + editKaSales + editMgSales > 0 ? Math.round((editMgSales / (editSpvSales + editKaSales + editMgSales)) * 1000) / 10 : 0}%
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Notes */}
-              <div>
-                <label className="text-[11px] text-slate-600 block mb-0.5">Catatan / Alasan Penyesuaian:</label>
-                <input
-                  type="text"
-                  value={editKaMgNotes}
-                  onChange={(e) => setEditKaMgNotes(e.target.value)}
-                  placeholder="Contoh: Penyesuaian faktur konsinyasi per tanggal 31..."
-                  className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs"
-                />
-              </div>
-
-              <div className="flex items-center justify-between pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => {
-                    resetKaMgSalesOverride();
-                    setRefreshVersion((v) => v + 1);
-                    setIsKaMgModalOpen(false);
-                  }}
-                  className="px-3 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg cursor-pointer flex items-center gap-1"
-                >
-                  <RotateCcw className="w-3 h-3" />
-                  <span>Reset ke Otomatis Sheet</span>
-                </button>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setIsKaMgModalOpen(false)}
-                    className="px-3 py-1.5 text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"
-                  >
-                    Batal
-                  </button>
-                  <button
-                    type="submit"
-                    className="px-4 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg shadow-xs cursor-pointer flex items-center gap-1.5"
-                  >
-                    <Save className="w-3.5 h-3.5" />
-                    <span>Simpan Penyesuaian</span>
-                  </button>
-                </div>
-              </div>
-            </form>
           </div>
         </div>
       )}

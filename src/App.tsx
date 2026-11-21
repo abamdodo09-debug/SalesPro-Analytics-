@@ -1,10 +1,20 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useMemo,
+  useCallback,
+  useTransition,
+  useDeferredValue,
+  useRef,
+  Suspense,
+} from 'react';
 import {
   ActiveTab,
   DashboardFilters,
   TimeframeMode,
   TransactionRecord,
   GasConfig,
+  MetricSummary,
 } from './types/dashboard';
 import { INITIAL_DATA } from './data/initialData';
 import {
@@ -33,39 +43,112 @@ import {
 import { Header } from './components/Header';
 import { FilterBar } from './components/FilterBar';
 import { KpiCards } from './components/KpiCards';
-import { TimeframeTrendChart } from './components/TimeframeTrendChart';
-import { ComparisonView } from './components/ComparisonView';
-import { GapAnalysisView } from './components/GapAnalysisView';
-import { SalesAnalysis } from './components/SalesAnalysis';
-import { SpvAnalysis } from './components/SpvAnalysis';
-import { BrandAnalysis } from './components/BrandAnalysis';
-import { StoreAnalysis } from './components/StoreAnalysis';
-import { SkuAnalysis } from './components/SkuAnalysis';
-import { RawDataTable } from './components/RawDataTable';
 import { GasIntegrationModal } from './components/GasIntegrationModal';
 import { AddTransactionModal } from './components/AddTransactionModal';
-import { CategoryAnalysis } from './components/CategoryAnalysis';
-import { CostAreaAnalysis } from './components/CostAreaAnalysis';
-import { ProfitAreaAnalysis } from './components/ProfitAreaAnalysis';
-import { StoreAgingBills } from './components/StoreAgingBills';
-import { KpiSalesScorecard } from './components/KpiSalesScorecard';
-import { KpiTrainerScorecard } from './components/KpiTrainerScorecard';
-import { ReviewWeeklySellOutBa } from './components/ReviewWeeklySellOutBa';
-import { BaPunishmentView } from './components/BaPunishmentView';
-import { FocusProductBaManagement } from './components/FocusProductBaManagement';
-import { TargetManagementView } from './components/TargetManagementView';
-import { QuarterlySummaryView } from './components/QuarterlySummaryView';
-import { SellInVsSellOutView } from './components/SellInVsSellOutView';
-import { StoreBaContributionView } from './components/StoreBaContributionView';
-import { MasterStoreBaSettings } from './components/MasterStoreBaSettings';
-import { CentralKaMgManager } from './components/CentralKaMgManager';
-import { ActivePersonnelStoreInfo } from './components/ActivePersonnelStoreInfo';
-import { SalesVisitView } from './components/SalesVisitView';
-import { TrainerVisitView } from './components/TrainerVisitView';
-import { OnlinePromoReportView } from './components/OnlinePromoReportView';
-import { MissGlamMarketShareView } from './components/MissGlamMarketShareView';
 import { exportToExcel, exportToPdf } from './utils/exportUtils';
 import { aggregateTargetMatrix, TARGETS_UPDATED_EVENT } from './services/targetManagementService';
+
+// Lazy-loaded tab modules so initial load and every menu switch remain lightweight & non-blocking
+const TimeframeTrendChart = React.lazy(() =>
+  import('./components/TimeframeTrendChart').then((m) => ({ default: m.TimeframeTrendChart }))
+);
+const ComparisonView = React.lazy(() =>
+  import('./components/ComparisonView').then((m) => ({ default: m.ComparisonView }))
+);
+const GapAnalysisView = React.lazy(() =>
+  import('./components/GapAnalysisView').then((m) => ({ default: m.GapAnalysisView }))
+);
+const SalesAnalysis = React.lazy(() =>
+  import('./components/SalesAnalysis').then((m) => ({ default: m.SalesAnalysis }))
+);
+const SpvAnalysis = React.lazy(() =>
+  import('./components/SpvAnalysis').then((m) => ({ default: m.SpvAnalysis }))
+);
+const BrandAnalysis = React.lazy(() =>
+  import('./components/BrandAnalysis').then((m) => ({ default: m.BrandAnalysis }))
+);
+const StoreAnalysis = React.lazy(() =>
+  import('./components/StoreAnalysis').then((m) => ({ default: m.StoreAnalysis }))
+);
+const SkuAnalysis = React.lazy(() =>
+  import('./components/SkuAnalysis').then((m) => ({ default: m.SkuAnalysis }))
+);
+const RawDataTable = React.lazy(() =>
+  import('./components/RawDataTable').then((m) => ({ default: m.RawDataTable }))
+);
+const CategoryAnalysis = React.lazy(() =>
+  import('./components/CategoryAnalysis').then((m) => ({ default: m.CategoryAnalysis }))
+);
+const CostAreaAnalysis = React.lazy(() =>
+  import('./components/CostAreaAnalysis').then((m) => ({ default: m.CostAreaAnalysis }))
+);
+const ProfitAreaAnalysis = React.lazy(() =>
+  import('./components/ProfitAreaAnalysis').then((m) => ({ default: m.ProfitAreaAnalysis }))
+);
+const StoreAgingBills = React.lazy(() =>
+  import('./components/StoreAgingBills').then((m) => ({ default: m.StoreAgingBills }))
+);
+const KpiSalesScorecard = React.lazy(() =>
+  import('./components/KpiSalesScorecard').then((m) => ({ default: m.KpiSalesScorecard }))
+);
+const KpiTrainerScorecard = React.lazy(() =>
+  import('./components/KpiTrainerScorecard').then((m) => ({ default: m.KpiTrainerScorecard }))
+);
+const ReviewWeeklySellOutBa = React.lazy(() =>
+  import('./components/ReviewWeeklySellOutBa').then((m) => ({ default: m.ReviewWeeklySellOutBa }))
+);
+const BaPunishmentView = React.lazy(() =>
+  import('./components/BaPunishmentView').then((m) => ({ default: m.BaPunishmentView }))
+);
+const FocusProductBaManagement = React.lazy(() =>
+  import('./components/FocusProductBaManagement').then((m) => ({
+    default: m.FocusProductBaManagement,
+  }))
+);
+const TargetManagementView = React.lazy(() =>
+  import('./components/TargetManagementView').then((m) => ({ default: m.TargetManagementView }))
+);
+const QuarterlySummaryView = React.lazy(() =>
+  import('./components/QuarterlySummaryView').then((m) => ({ default: m.QuarterlySummaryView }))
+);
+const SellInVsSellOutView = React.lazy(() =>
+  import('./components/SellInVsSellOutView').then((m) => ({ default: m.SellInVsSellOutView }))
+);
+const StoreBaContributionView = React.lazy(() =>
+  import('./components/StoreBaContributionView').then((m) => ({
+    default: m.StoreBaContributionView,
+  }))
+);
+const MasterStoreBaSettings = React.lazy(() =>
+  import('./components/MasterStoreBaSettings').then((m) => ({ default: m.MasterStoreBaSettings }))
+);
+const CentralKaMgManager = React.lazy(() =>
+  import('./components/CentralKaMgManager').then((m) => ({ default: m.CentralKaMgManager }))
+);
+const ActivePersonnelStoreInfo = React.lazy(() =>
+  import('./components/ActivePersonnelStoreInfo').then((m) => ({
+    default: m.ActivePersonnelStoreInfo,
+  }))
+);
+const SalesVisitView = React.lazy(() =>
+  import('./components/SalesVisitView').then((m) => ({ default: m.SalesVisitView }))
+);
+const TrainerVisitView = React.lazy(() =>
+  import('./components/TrainerVisitView').then((m) => ({ default: m.TrainerVisitView }))
+);
+const OnlinePromoReportView = React.lazy(() =>
+  import('./components/OnlinePromoReportView').then((m) => ({ default: m.OnlinePromoReportView }))
+);
+const MissGlamMarketShareView = React.lazy(() =>
+  import('./components/MissGlamMarketShareView').then((m) => ({
+    default: m.MissGlamMarketShareView,
+  }))
+);
+const ExecutiveSalesDashboardView = React.lazy(() =>
+  import('./components/ExecutiveSalesDashboardView').then((m) => ({
+    default: m.ExecutiveSalesDashboardView,
+  }))
+);
 import {
   TrendingUp,
   FileSpreadsheet,
@@ -108,8 +191,26 @@ export default function App() {
   // Timeframe mode for charts (Harian, Mingguan, Bulanan, Tahunan)
   const [timeframeMode, setTimeframeMode] = useState<TimeframeMode>('bulanan');
 
-  // Active navigation tab
+  // Active navigation tab (instant UI highlight + non-blocking concurrent transition)
+  const [uiActiveTab, setUiActiveTab] = useState<ActiveTab>('overview');
   const [activeTab, setActiveTab] = useState<ActiveTab>('overview');
+  const [isPendingTab, startTabTransition] = useTransition();
+  // Full-screen mode when Dashboard is active (hides SalesPro Analytics menus & expands Dashboard full screen)
+  const [isDashboardFullScreen, setIsDashboardFullScreen] = useState<boolean>(true);
+
+  const handleTabChange = useCallback((nextTab: ActiveTab) => {
+    setUiActiveTab(nextTab);
+    if (nextTab === 'executive_dashboard') {
+      setIsDashboardFullScreen(true);
+    }
+    startTabTransition(() => {
+      setActiveTab(nextTab);
+    });
+  }, []);
+
+  const handleToggleDashboardFullScreen = useCallback(() => {
+    setIsDashboardFullScreen((prev) => !prev);
+  }, []);
 
   // Google Apps Script integration state
   const [gasConfig, setGasConfig] = useState<GasConfig>(() => loadGasConfig());
@@ -119,6 +220,8 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [targetSyncVersion, setTargetSyncVersion] = useState<number>(0);
   const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState<boolean>(false);
+  const isInitialMountRef = useRef(true);
+  const loadedFromDbRef = useRef(false);
 
   useEffect(() => {
     const onTargetsUpdated = () => setTargetSyncVersion((v) => v + 1);
@@ -137,13 +240,22 @@ export default function App() {
   useEffect(() => {
     loadTransactionsFromDb().then((dbRecords) => {
       if (dbRecords && dbRecords.length > 0) {
+        loadedFromDbRef.current = true;
         setRecords(dbRecords);
       }
     }).catch(() => {});
   }, []);
 
-  // Save transactions to persistent storage (IndexedDB + safe localStorage cache)
+  // Save transactions to persistent storage only when mutated after initial load
   useEffect(() => {
+    if (isInitialMountRef.current) {
+      isInitialMountRef.current = false;
+      return;
+    }
+    if (loadedFromDbRef.current) {
+      loadedFromDbRef.current = false;
+      return;
+    }
     saveStoredTransactions(records);
   }, [records]);
 
@@ -160,87 +272,130 @@ export default function App() {
     }
   }, [toastMessage]);
 
-  const showToast = (text: string, type: 'success' | 'error' = 'success') => {
+  const showToast = useCallback((text: string, type: 'success' | 'error' = 'success') => {
     setToastMessage({ text, type });
-  };
+  }, []);
 
-  // Filter handlers
-  const handleFilterChange = <K extends keyof DashboardFilters>(key: K, value: DashboardFilters[K]) => {
+  // Filter handlers (instant state for dropdowns/inputs; heavy analytics consume deferredFilters)
+  const handleFilterChange = useCallback(<K extends keyof DashboardFilters>(key: K, value: DashboardFilters[K]) => {
     setFilters((prev) => ({ ...prev, [key]: value }));
-  };
+  }, []);
 
-  const handleResetFilters = () => {
+  const handleResetFilters = useCallback(() => {
     setFilters(INITIAL_FILTERS);
     showToast('Filter telah direset ke default.');
-  };
+  }, [showToast]);
+
+  const deferredFilters = useDeferredValue(filters);
 
   // Derived filtered records & cascading options
   const filteredRecords = useMemo(() => {
-    return filterRecords(records, filters);
-  }, [records, filters]);
+    return filterRecords(records, deferredFilters);
+  }, [records, deferredFilters]);
 
   const cascadingOptions = useMemo(() => {
-    return getCascadingOptions(records, filters);
-  }, [records, filters]);
+    return getCascadingOptions(records, deferredFilters);
+  }, [records, deferredFilters]);
 
-  // Summary KPIs
-  const summary = useMemo(() => {
+  const isExecutiveDashboard = activeTab === 'executive_dashboard';
+  const isOverviewTab = activeTab === 'overview';
+
+  // Summary KPIs (skipped when inside Executive Dashboard which computes its own scoped snapshot)
+  const summary = useMemo<MetricSummary>(() => {
+    if (isExecutiveDashboard) {
+      return {
+        totalRevenue: 0,
+        totalQty: 0,
+        totalTransactions: 0,
+        averageOrderValue: 0,
+        totalReturnRevenue: 0,
+        returnRatePercent: 0,
+        grossRevenue: 0,
+      };
+    }
     return calculateSummary(filteredRecords);
-  }, [filteredRecords]);
+  }, [filteredRecords, isExecutiveDashboard]);
 
   // Dynamic Target & Achievement calculation for executive KpiCards
   const kpiTargetMetrics = useMemo(() => {
-    const matrix = aggregateTargetMatrix(filteredRecords, filters.BULAN);
+    if (isExecutiveDashboard) return { targetTotal: 0, achievementPercent: 0 };
+    const matrix = aggregateTargetMatrix(filteredRecords, deferredFilters.BULAN);
     let targetTotal = 0;
-    if (filters.KET === 'SELL OUT') {
-      if (filters.NAMA_STORE !== 'ALL') {
+    if (deferredFilters.KET === 'SELL OUT') {
+      if (deferredFilters.NAMA_STORE !== 'ALL') {
         targetTotal = matrix.summary.totalBaTarget || matrix.summary.totalSalesTargetSellOut;
       } else {
         targetTotal = matrix.summary.totalSalesTargetSellOut || matrix.summary.totalBaTarget;
       }
-    } else if (filters.SALES !== 'ALL') {
+    } else if (deferredFilters.SALES !== 'ALL') {
       targetTotal = matrix.summary.totalSalesTarget;
-    } else if (filters.REGION !== 'ALL') {
+    } else if (deferredFilters.REGION !== 'ALL') {
       targetTotal = matrix.summary.totalAreaTarget;
-    } else if (filters.SPV !== 'ALL') {
+    } else if (deferredFilters.SPV !== 'ALL') {
       targetTotal = matrix.summary.totalSpvTarget;
     } else {
       targetTotal = matrix.summary.totalSalesTarget > 0 ? matrix.summary.totalSalesTarget : matrix.summary.totalSpvTarget;
     }
     const achievementPercent = targetTotal > 0 ? (summary.totalRevenue / targetTotal) * 100 : 0;
     return { targetTotal, achievementPercent };
-  }, [filteredRecords, filters.BULAN, filters.KET, filters.SALES, filters.REGION, filters.SPV, filters.NAMA_STORE, summary.totalRevenue, targetSyncVersion]);
+  }, [filteredRecords, deferredFilters.BULAN, deferredFilters.KET, deferredFilters.SALES, deferredFilters.REGION, deferredFilters.SPV, deferredFilters.NAMA_STORE, summary.totalRevenue, targetSyncVersion, isExecutiveDashboard]);
 
-  // Timeframe trend data (100% mengikuti Google Sheet & Filter Terintegrasi)
+  // Timeframe trend data (only needed on Overview tab)
   const trendData = useMemo(() => {
+    if (!isOverviewTab) return [];
     return aggregateTimeframe(filteredRecords, timeframeMode);
-  }, [filteredRecords, timeframeMode]);
+  }, [filteredRecords, timeframeMode, isOverviewTab]);
 
-  // Overall growth comparison (uses full records so previous period data like September can be retrieved)
+  // Overall growth comparison (skipped when inside Executive Dashboard)
   const growthComparison = useMemo(() => {
-    return calculateComparisonGrowth(records, 'mom', filters);
-  }, [records, filters]);
+    if (isExecutiveDashboard) {
+      return {
+        overall: {
+          currentValue: 0,
+          previousValue: 0,
+          deltaValue: 0,
+          growthPercent: 0,
+          currentQty: 0,
+          previousQty: 0,
+          growthQtyPercent: 0,
+        },
+        previousPeriodLabel: '',
+        currentPeriodLabel: '',
+      } as ReturnType<typeof calculateComparisonGrowth>;
+    }
+    return calculateComparisonGrowth(records, 'mom', deferredFilters);
+  }, [records, deferredFilters, isExecutiveDashboard]);
 
-  // Gap & Root-Cause Diagnosis: Why did sales drop?
+  // Gap & Root-Cause Diagnosis (only needed on Overview & Gap tabs)
   const gapDiagnosis = useMemo(() => {
-    return diagnoseSalesGap(records, filteredRecords, filters);
-  }, [records, filteredRecords, filters, targetSyncVersion]);
+    if (activeTab !== 'overview' && activeTab !== 'gap') {
+      return {
+        gapDeficit: 0,
+        gapPercentage: 0,
+        lostStoresCount: 0,
+      } as ReturnType<typeof diagnoseSalesGap>;
+    }
+    return diagnoseSalesGap(records, filteredRecords, deferredFilters);
+  }, [records, filteredRecords, deferredFilters, targetSyncVersion, activeTab]);
 
-  // Top Category, Brand & Store details strictly from filteredRecords (Google Sheet + Filter Terintegrasi)
+  // Top Category, Brand & Store details (only needed on Overview tab)
   const topCategories = useMemo(() => {
+    if (!isOverviewTab) return [];
     return aggregateCategoryDetails(filteredRecords);
-  }, [filteredRecords]);
+  }, [filteredRecords, isOverviewTab]);
 
   const topBrands = useMemo(() => {
+    if (!isOverviewTab) return [];
     return aggregateByDimension(filteredRecords, 'BRAND');
-  }, [filteredRecords]);
+  }, [filteredRecords, isOverviewTab]);
 
   const topStores = useMemo(() => {
+    if (!isOverviewTab) return [];
     return aggregateByDimension(filteredRecords, 'NAMA_STORE');
-  }, [filteredRecords]);
+  }, [filteredRecords, isOverviewTab]);
 
   // Live Sync with Google Apps Script
-  const handleSyncGas = async () => {
+  const handleSyncGas = useCallback(async () => {
     if (!gasConfig.webAppUrl) {
       setIsGasModalOpen(true);
       return;
@@ -264,34 +419,41 @@ export default function App() {
     }
 
     setIsSyncing(false);
-  };
+  }, [gasConfig, showToast]);
 
   // Add new transaction record
-  const handleAddRecord = (newRecord: TransactionRecord) => {
+  const handleAddRecord = useCallback((newRecord: TransactionRecord) => {
     setRecords((prev) => [newRecord, ...prev]);
     showToast(`Transaksi baru untuk "${newRecord.NAMA_STORE}" berhasil ditambahkan!`);
-  };
+  }, [showToast]);
 
   // Reset to initial sample data
-  const handleResetToSample = () => {
+  const handleResetToSample = useCallback(() => {
     clearStoredTransactions();
     setRecords(INITIAL_DATA);
-    setGasConfig({
-      ...gasConfig,
+    setGasConfig((prev) => ({
+      ...prev,
       dataSourceType: 'sample',
       status: 'idle',
       lastSyncedAt: null,
-    });
+    }));
     setFilters(INITIAL_FILTERS);
     showToast('Dataset telah dikembalikan ke data simulasi bawaan.');
-  };
+  }, [showToast]);
+
+  const handleOpenGasModal = useCallback(() => setIsGasModalOpen(true), []);
+  const handleOpenAddModal = useCallback(() => setIsAddModalOpen(true), []);
+  const handleExportCsv = useCallback(() => {
+    downloadCsv(filteredRecords, `salespro_export_${new Date().toISOString().slice(0, 10)}.csv`);
+  }, [filteredRecords]);
 
   // Export handlers for Excel (.xlsx) and PDF (.pdf)
-  const handleExportExcel = () => {
+  const handleExportExcel = useCallback(() => {
     try {
+      const exportSummary = isExecutiveDashboard ? calculateSummary(filteredRecords) : summary;
       exportToExcel(
         filteredRecords,
-        summary,
+        exportSummary,
         filters,
         `SalesPro_Laporan_${new Date().toISOString().slice(0, 10)}.xlsx`
       );
@@ -299,13 +461,14 @@ export default function App() {
     } catch (err: any) {
       showToast('Gagal men-download file Excel: ' + (err.message || 'Error'), 'error');
     }
-  };
+  }, [filteredRecords, summary, filters, isExecutiveDashboard, showToast]);
 
-  const handleExportPdf = () => {
+  const handleExportPdf = useCallback(() => {
     try {
+      const exportSummary = isExecutiveDashboard ? calculateSummary(filteredRecords) : summary;
       exportToPdf(
         filteredRecords,
-        summary,
+        exportSummary,
         filters,
         `SalesPro_Laporan_${new Date().toISOString().slice(0, 10)}.pdf`
       );
@@ -313,12 +476,34 @@ export default function App() {
     } catch (err: any) {
       showToast('Gagal men-download file PDF: ' + (err.message || 'Error'), 'error');
     }
-  };
+  }, [filteredRecords, summary, filters, isExecutiveDashboard, showToast]);
+
+  const kpiScopeKey = useMemo(
+    () =>
+      `${filters.BULAN}|${filters.TAHUN}|${filters.KET}|${filters.REGION}|${filters.SPV}|${filters.SALES}|${filters.TRAINER || 'ALL'}`,
+    [filters.BULAN, filters.TAHUN, filters.KET, filters.REGION, filters.SPV, filters.SALES, filters.TRAINER]
+  );
+
+  const kpiScopeLabel = useMemo(
+    () =>
+      `${filters.BULAN === 'ALL' ? 'Semua Bulan' : filters.BULAN}${filters.KET !== 'ALL' ? ` • ${filters.KET}` : ''}${filters.REGION !== 'ALL' ? ` • ${filters.REGION}` : ''}${filters.SALES !== 'ALL' ? ` • ${filters.SALES}` : ''}${filters.TRAINER && filters.TRAINER !== 'ALL' ? ` • Trainer ${filters.TRAINER}` : ''}`,
+    [filters.BULAN, filters.KET, filters.REGION, filters.SALES, filters.TRAINER]
+  );
+
+  const hideSalesProMenus = isExecutiveDashboard && isDashboardFullScreen;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-100/90 via-sky-50/40 via-indigo-50/25 to-pink-50/20 text-slate-900 flex flex-col relative selection:bg-teal-500 selection:text-white">
-      {/* Top Colorful Accent Ribbon */}
-      <div className="h-1.5 w-full bg-gradient-to-r from-emerald-500 via-teal-400 via-blue-500 via-indigo-500 via-purple-500 via-pink-500 to-amber-500 shrink-0 shadow-xs" />
+    <div
+      className={
+        hideSalesProMenus
+          ? 'min-h-screen bg-[#070B12] text-slate-100 flex flex-col relative selection:bg-teal-500 selection:text-white'
+          : 'min-h-screen bg-gradient-to-br from-slate-100/90 via-sky-50/40 via-indigo-50/25 to-pink-50/20 text-slate-900 flex flex-col relative selection:bg-teal-500 selection:text-white'
+      }
+    >
+      {/* Top Colorful Accent Ribbon (hidden in Dashboard full-screen mode) */}
+      {!hideSalesProMenus && (
+        <div className="h-1.5 w-full bg-gradient-to-r from-emerald-500 via-teal-400 via-blue-500 via-indigo-500 via-purple-500 via-pink-500 to-amber-500 shrink-0 shadow-xs" />
+      )}
 
       {/* Google Maps Platform Quota / Auth Banner */}
       {mapsQuotaExceeded && (
@@ -367,43 +552,80 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Top Bar */}
-      <Header
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        gasConfig={gasConfig}
-        totalRecordsCount={records.length}
-        filteredCount={filteredRecords.length}
-        onOpenGasModal={() => setIsGasModalOpen(true)}
-        onOpenAddModal={() => setIsAddModalOpen(true)}
-        onExportCsv={() => downloadCsv(filteredRecords, `salespro_export_${new Date().toISOString().slice(0, 10)}.csv`)}
-        onExportExcel={handleExportExcel}
-        onExportPdf={handleExportPdf}
-        onSyncGas={handleSyncGas}
-        isSyncing={isSyncing}
-        filters={filters}
-      />
+      {/* Main Top Bar (hidden when Dashboard full-screen mode is active) */}
+      {!hideSalesProMenus && (
+        <Header
+          activeTab={uiActiveTab}
+          onTabChange={handleTabChange}
+          gasConfig={gasConfig}
+          totalRecordsCount={records.length}
+          filteredCount={filteredRecords.length}
+          onOpenGasModal={handleOpenGasModal}
+          onOpenAddModal={handleOpenAddModal}
+          onExportCsv={handleExportCsv}
+          onExportExcel={handleExportExcel}
+          onExportPdf={handleExportPdf}
+          onSyncGas={handleSyncGas}
+          isSyncing={isSyncing}
+          isPendingTab={isPendingTab}
+          filters={filters}
+        />
+      )}
 
       {/* Main Workspace Canvas */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 grow w-full">
-        {/* Integrated Cascading Filter Bar */}
-        <FilterBar
-          filters={filters}
-          onChangeFilter={handleFilterChange}
-          onResetFilters={handleResetFilters}
-          options={cascadingOptions}
-        />
+      <main
+        className={
+          hideSalesProMenus
+            ? 'w-full min-h-screen p-0 grow'
+            : activeTab === 'executive_dashboard'
+            ? 'max-w-[1680px] mx-auto px-2 sm:px-3 py-1.5 grow w-full'
+            : 'max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 grow w-full'
+        }
+      >
+        {activeTab !== 'executive_dashboard' && (
+          <>
+            {/* Integrated Cascading Filter Bar */}
+            <FilterBar
+              filters={filters}
+              onChangeFilter={handleFilterChange}
+              onResetFilters={handleResetFilters}
+              options={cascadingOptions}
+            />
 
-        {/* Executive Summary Cards (shown on primary overview or comparison) */}
-        <KpiCards
-          summary={summary}
-          growth={growthComparison.overall}
-          comparisonLabel={growthComparison.previousPeriodLabel}
-          targetTotal={kpiTargetMetrics.targetTotal}
-          achievementPercent={kpiTargetMetrics.achievementPercent}
-          scopeKey={`${filters.BULAN}|${filters.TAHUN}|${filters.KET}|${filters.REGION}|${filters.SPV}|${filters.SALES}|${filters.TRAINER || 'ALL'}`}
-          scopeLabel={`${filters.BULAN === 'ALL' ? 'Semua Bulan' : filters.BULAN}${filters.KET !== 'ALL' ? ` • ${filters.KET}` : ''}${filters.REGION !== 'ALL' ? ` • ${filters.REGION}` : ''}${filters.SALES !== 'ALL' ? ` • ${filters.SALES}` : ''}${filters.TRAINER && filters.TRAINER !== 'ALL' ? ` • Trainer ${filters.TRAINER}` : ''}`}
-        />
+            {/* Executive Summary Cards (shown on primary overview or comparison) */}
+            <KpiCards
+              summary={summary}
+              growth={growthComparison.overall}
+              comparisonLabel={growthComparison.previousPeriodLabel}
+              targetTotal={kpiTargetMetrics.targetTotal}
+              achievementPercent={kpiTargetMetrics.achievementPercent}
+              scopeKey={kpiScopeKey}
+              scopeLabel={kpiScopeLabel}
+            />
+          </>
+        )}
+
+        <Suspense
+          fallback={
+            <div className="bg-white/80 rounded-2xl border border-slate-200 p-8 text-center text-xs font-semibold text-slate-500 animate-pulse">
+              Memuat tampilan menu...
+            </div>
+          }
+        >
+        {/* Tab: Dashboard Eksekutif (Dark Executive View) */}
+        {activeTab === 'executive_dashboard' && (
+          <ExecutiveSalesDashboardView
+            allRecords={records}
+            filteredRecords={filteredRecords}
+            filters={filters}
+            cascadingOptions={cascadingOptions}
+            onChangeFilter={handleFilterChange}
+            onExportPdf={handleExportPdf}
+            onNavigateTab={handleTabChange}
+            isFullScreen={isDashboardFullScreen}
+            onToggleFullScreen={handleToggleDashboardFullScreen}
+          />
+        )}
 
         {/* View Routing */}
         {activeTab === 'overview' && (
@@ -426,7 +648,7 @@ export default function App() {
                 </div>
               </div>
               <button
-                onClick={() => setActiveTab('gap')}
+                onClick={() => handleTabChange('gap')}
                 className="px-3.5 py-2 text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs flex items-center gap-1.5"
               >
                 <span>Buka Analisa Gap &amp; Solusi</span>
@@ -450,7 +672,7 @@ export default function App() {
                 </div>
               </div>
               <button
-                onClick={() => setActiveTab('cost')}
+                onClick={() => handleTabChange('cost')}
                 className="px-3.5 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs flex items-center gap-1.5"
               >
                 <span>Buka Estimasi Gaji Area</span>
@@ -486,7 +708,7 @@ export default function App() {
                       </div>
                     </div>
                     <button
-                      onClick={() => setActiveTab('category')}
+                      onClick={() => handleTabChange('category')}
                       className="text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-fuchsia-50 text-fuchsia-800 hover:bg-fuchsia-100 border border-fuchsia-200 transition-colors flex items-center gap-1 cursor-pointer"
                     >
                       <span>Detail</span>
@@ -562,7 +784,7 @@ export default function App() {
                       </div>
                     </div>
                     <button
-                      onClick={() => setActiveTab('brand')}
+                      onClick={() => handleTabChange('brand')}
                       className="text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-pink-50 text-pink-700 hover:bg-pink-100 border border-pink-200 transition-colors flex items-center gap-1 cursor-pointer"
                     >
                       <span>Detail</span>
@@ -648,7 +870,7 @@ export default function App() {
                       </div>
                     </div>
                     <button
-                      onClick={() => setActiveTab('store')}
+                      onClick={() => handleTabChange('store')}
                       className="text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200 transition-colors flex items-center gap-1 cursor-pointer"
                     >
                       <span>Detail</span>
@@ -719,7 +941,7 @@ export default function App() {
                 </p>
               </div>
               <button
-                onClick={() => setActiveTab('table')}
+                onClick={() => handleTabChange('table')}
                 className="px-4 py-2 text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-sm"
               >
                 Buka Data Spreadsheet ({filteredRecords.length} Baris)
@@ -753,7 +975,7 @@ export default function App() {
             allRecords={records}
             filters={filters}
             onFilterChange={handleFilterChange}
-            onNavigateTab={(tab) => setActiveTab(tab as any)}
+            onNavigateTab={(tab) => handleTabChange(tab as any)}
           />
         )}
 
@@ -815,7 +1037,7 @@ export default function App() {
             records={filteredRecords}
             allRecords={records}
             filters={filters}
-            onNavigateToSettings={() => setActiveTab('pengaturan_master')}
+            onNavigateToSettings={() => handleTabChange('pengaturan_master')}
           />
         )}
 
@@ -948,33 +1170,36 @@ export default function App() {
             summary={summary}
           />
         )}
+        </Suspense>
       </main>
 
-      {/* Footer */}
-      <footer className="mt-auto border-t border-slate-200 bg-white py-6">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
-          <div className="flex items-center gap-2">
-            <span className="font-bold text-slate-800">SalesPro Analytics</span>
-            <span>·</span>
-            <span>Platform Analisa Pencapaian Terintegrasi Google Sheets &amp; Apps Script</span>
+      {/* Footer (hidden on full-screen executive dashboard to preserve single-screen fit) */}
+      {activeTab !== 'executive_dashboard' && (
+        <footer className="mt-auto border-t border-slate-200 bg-white py-6">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-slate-800">SalesPro Analytics</span>
+              <span>·</span>
+              <span>Platform Analisa Pencapaian Terintegrasi Google Sheets &amp; Apps Script</span>
+            </div>
+            <div className="flex items-center gap-4">
+              <button
+                onClick={() => setIsGasModalOpen(true)}
+                className="hover:text-slate-800 font-medium transition-colors"
+              >
+                Pengaturan Google Apps Script
+              </button>
+              <span>·</span>
+              <button
+                onClick={handleResetToSample}
+                className="hover:text-slate-800 font-medium transition-colors"
+              >
+                Reset Data Contoh
+              </button>
+            </div>
           </div>
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => setIsGasModalOpen(true)}
-              className="hover:text-slate-800 font-medium transition-colors"
-            >
-              Pengaturan Google Apps Script
-            </button>
-            <span>·</span>
-            <button
-              onClick={handleResetToSample}
-              className="hover:text-slate-800 font-medium transition-colors"
-            >
-              Reset Data Contoh
-            </button>
-          </div>
-        </div>
-      </footer>
+        </footer>
+      )}
 
       {/* Google Apps Script Integration Modal */}
       <GasIntegrationModal

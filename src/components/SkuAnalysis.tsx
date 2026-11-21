@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Package, Sparkles, Flame, RotateCcw, Tag } from 'lucide-react';
+import React, { useState, useMemo, useDeferredValue } from 'react';
+import { Package, Sparkles, Flame, Search, X } from 'lucide-react';
 import { TransactionRecord } from '../types/dashboard';
 import { formatRupiah, formatNumber, formatPercent, isFocusProduct, isNewProduct } from '../utils/analytics';
 
@@ -7,83 +7,120 @@ interface SkuAnalysisProps {
   records: TransactionRecord[];
 }
 
-export const SkuAnalysis: React.FC<SkuAnalysisProps> = ({ records }) => {
+export const SkuAnalysis: React.FC<SkuAnalysisProps> = React.memo(({ records }) => {
   const [sortBy, setSortBy] = useState<'value' | 'qty' | 'returns'>('value');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const deferredSearch = useDeferredValue(searchQuery);
 
-  // Group by SKU
-  const skuMap: Record<string, {
-    noSku: string;
-    brand: string;
-    sku: string;
-    kategori: string;
-    focus: string;
-    newProduct: string;
-    totalValue: number;
-    totalQty: number;
-    returnsValue: number;
-    returnsQty: number;
-    txCount: number;
-  }> = {};
+  const {
+    rawSkuList,
+    totalFocusValue,
+    totalFocusValueQty,
+    totalRegularValue,
+    totalNewValue,
+    totalExistingValue,
+    totalAllVal,
+    focusPct,
+  } = useMemo(() => {
+    const skuMap: Record<string, {
+      noSku: string;
+      brand: string;
+      sku: string;
+      kategori: string;
+      focus: string;
+      newProduct: string;
+      totalValue: number;
+      totalQty: number;
+      returnsValue: number;
+      returnsQty: number;
+      txCount: number;
+    }> = {};
 
-  let totalFocusValue = 0;
-  let totalFocusValueQty = 0;
-  let totalRegularValue = 0;
+    let focusVal = 0;
+    let focusQty = 0;
+    let regularVal = 0;
+    let newVal = 0;
+    let existingVal = 0;
 
-  let totalNewValue = 0;
-  let totalExistingValue = 0;
+    for (let i = 0; i < records.length; i++) {
+      const r = records[i];
+      const k = r.SKU;
+      if (!skuMap[k]) {
+        skuMap[k] = {
+          noSku: r.NO_SKU,
+          brand: r.BRAND,
+          sku: r.SKU,
+          kategori: r.KATEGORI,
+          focus: r.PRODUK_FOCUS,
+          newProduct: r.PRODUK_NEW,
+          totalValue: 0,
+          totalQty: 0,
+          returnsValue: 0,
+          returnsQty: 0,
+          txCount: 0,
+        };
+      }
 
-  records.forEach((r) => {
-    const k = r.SKU;
-    if (!skuMap[k]) {
-      skuMap[k] = {
-        noSku: r.NO_SKU,
-        brand: r.BRAND,
-        sku: r.SKU,
-        kategori: r.KATEGORI,
-        focus: r.PRODUK_FOCUS,
-        newProduct: r.PRODUK_NEW,
-        totalValue: 0,
-        totalQty: 0,
-        returnsValue: 0,
-        returnsQty: 0,
-        txCount: 0,
-      };
+      const val = r.VALUE || 0;
+      const qty = r.QTY || 0;
+
+      skuMap[k].totalValue += val;
+      skuMap[k].totalQty += qty;
+      skuMap[k].txCount += 1;
+
+      if (val < 0 || r.KET === 'RETURN') {
+        skuMap[k].returnsValue += Math.abs(val);
+        skuMap[k].returnsQty += Math.abs(qty);
+      }
+
+      if (isFocusProduct(r.PRODUK_FOCUS)) {
+        focusVal += val;
+        focusQty += qty;
+      } else {
+        regularVal += val;
+      }
+
+      if (isNewProduct(r.PRODUK_NEW)) {
+        newVal += val;
+      } else {
+        existingVal += val;
+      }
     }
 
-    const val = r.VALUE || 0;
-    const qty = r.QTY || 0;
+    const totalAll = focusVal + regularVal || 1;
+    return {
+      rawSkuList: Object.values(skuMap),
+      totalFocusValue: focusVal,
+      totalFocusValueQty: focusQty,
+      totalRegularValue: regularVal,
+      totalNewValue: newVal,
+      totalExistingValue: existingVal,
+      totalAllVal: totalAll,
+      focusPct: (focusVal / totalAll) * 100,
+    };
+  }, [records]);
 
-    skuMap[k].totalValue += val;
-    skuMap[k].totalQty += qty;
-    skuMap[k].txCount += 1;
+  const skuList = useMemo(() => {
+    const list = [...rawSkuList];
+    list.sort((a, b) => {
+      if (sortBy === 'qty') return b.totalQty - a.totalQty;
+      if (sortBy === 'returns') return b.returnsValue - a.returnsValue;
+      return b.totalValue - a.totalValue;
+    });
+    return list;
+  }, [rawSkuList, sortBy]);
 
-    if (val < 0 || r.KET === 'RETURN') {
-      skuMap[k].returnsValue += Math.abs(val);
-      skuMap[k].returnsQty += Math.abs(qty);
-    }
-
-    if (isFocusProduct(r.PRODUK_FOCUS)) {
-      totalFocusValue += val;
-      totalFocusValueQty += qty;
-    } else {
-      totalRegularValue += val;
-    }
-
-    if (isNewProduct(r.PRODUK_NEW)) {
-      totalNewValue += val;
-    } else {
-      totalExistingValue += val;
-    }
-  });
-
-  const skuList = Object.values(skuMap).sort((a, b) => {
-    if (sortBy === 'qty') return b.totalQty - a.totalQty;
-    if (sortBy === 'returns') return b.returnsValue - a.returnsValue;
-    return b.totalValue - a.totalValue;
-  });
-
-  const totalAllVal = totalFocusValue + totalRegularValue || 1;
-  const focusPct = (totalFocusValue / totalAllVal) * 100;
+  const displayedSkuList = useMemo(() => {
+    const normalizedSearch = deferredSearch.trim().toLowerCase();
+    if (!normalizedSearch) return skuList;
+    return skuList.filter(
+      (item) =>
+        item.sku.toLowerCase().includes(normalizedSearch) ||
+        item.noSku.toLowerCase().includes(normalizedSearch) ||
+        item.brand.toLowerCase().includes(normalizedSearch) ||
+        item.kategori.toLowerCase().includes(normalizedSearch)
+    );
+  }, [skuList, deferredSearch]);
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-4 sm:p-6 mb-8">
@@ -209,23 +246,51 @@ export const SkuAnalysis: React.FC<SkuAnalysisProps> = ({ records }) => {
         </div>
       </div>
 
-      {/* SKU Table */}
-      <div className="overflow-x-auto">
+      {/* Search & Total SKU Count Bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+        <span className="text-xs font-bold text-slate-600 font-mono tabular-nums">
+          Menampilkan <span className="text-slate-900">{displayedSkuList.length}</span> dari{' '}
+          <span className="text-slate-900">{skuList.length}</span> Produk / SKU
+        </span>
+        <div className="relative min-w-[260px]">
+          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Cari nama produk, no SKU, brand..."
+            className="w-full pl-9 pr-8 py-1.5 text-xs rounded-xl border border-slate-200 bg-slate-50 focus:bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-500"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* SKU Table (Semua SKU & Nama Produk Tampil Penuh) */}
+      <div className="overflow-x-auto max-h-[680px] overflow-y-auto border border-slate-200/80 rounded-xl">
         <table className="w-full text-left border-collapse text-xs">
-          <thead>
-            <tr className="border-b border-slate-200 text-slate-600 font-bold bg-slate-50/80">
-              <th className="py-2.5 px-3">No SKU</th>
-              <th className="py-2.5 px-3">Nama Produk / SKU</th>
-              <th className="py-2.5 px-3">Brand</th>
-              <th className="py-2.5 px-3">Kategori</th>
-              <th className="py-2.5 px-3">Strategi</th>
-              <th className="py-2.5 px-3 text-right">Total Nilai (Rp)</th>
-              <th className="py-2.5 px-3 text-right">Kuantitas (QTY)</th>
-              <th className="py-2.5 px-3 text-right">Retur (Rp)</th>
+          <thead className="sticky top-0 z-10 bg-slate-50 shadow-2xs">
+            <tr className="border-b border-slate-200 text-slate-600 font-bold">
+              <th className="py-2.5 px-3 text-center w-10">No</th>
+              <th className="py-2.5 px-3 whitespace-nowrap">No SKU</th>
+              <th className="py-2.5 px-3 min-w-[260px]">Nama Produk / SKU</th>
+              <th className="py-2.5 px-3 whitespace-nowrap">Brand</th>
+              <th className="py-2.5 px-3 whitespace-nowrap">Kategori</th>
+              <th className="py-2.5 px-3 whitespace-nowrap">Strategi</th>
+              <th className="py-2.5 px-3 text-right whitespace-nowrap">Total Nilai (Rp)</th>
+              <th className="py-2.5 px-3 text-right whitespace-nowrap">Kuantitas (QTY)</th>
+              <th className="py-2.5 px-3 text-right whitespace-nowrap">Retur (Rp)</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {skuList.slice(0, 25).map((item) => {
+            {displayedSkuList.map((item, idx) => {
               const brandColorMap: Record<string, string> = {
                 'barenbliss': 'bg-pink-100 text-pink-900 border-pink-200',
                 'Y.O.U': 'bg-blue-100 text-blue-900 border-blue-200',
@@ -236,17 +301,20 @@ export const SkuAnalysis: React.FC<SkuAnalysisProps> = ({ records }) => {
               const brandBadge = brandColorMap[item.brand] || 'bg-slate-100 text-slate-800 border-slate-200';
 
               return (
-                <tr key={item.sku} className="hover:bg-slate-50/80 transition-colors">
-                  <td className="py-3 px-3 font-mono font-semibold text-slate-500">{item.noSku}</td>
-                  <td className="py-3 px-3 font-extrabold text-slate-900 max-w-xs truncate" title={item.sku}>
+                <tr key={`${item.sku}-${idx}`} className="hover:bg-slate-50/80 transition-colors">
+                  <td className="py-3 px-3 text-center font-mono tabular-nums text-slate-400">
+                    {idx + 1}
+                  </td>
+                  <td className="py-3 px-3 font-mono font-semibold text-slate-500 whitespace-nowrap">{item.noSku}</td>
+                  <td className="py-3 px-3 font-extrabold text-slate-900 min-w-[260px] whitespace-normal break-words leading-snug">
                     {item.sku}
                   </td>
-                  <td className="py-3 px-3">
+                  <td className="py-3 px-3 whitespace-nowrap">
                     <span className={`font-bold px-2 py-0.5 rounded-md border text-[11px] ${brandBadge}`}>
                       {item.brand}
                     </span>
                   </td>
-                  <td className="py-3 px-3 text-slate-600 font-medium">{item.kategori}</td>
+                  <td className="py-3 px-3 text-slate-600 font-medium whitespace-nowrap">{item.kategori}</td>
                   <td className="py-3 px-3">
                     <div className="flex items-center gap-1">
                       {item.focus === 'FOCUS' && (
@@ -284,4 +352,4 @@ export const SkuAnalysis: React.FC<SkuAnalysisProps> = ({ records }) => {
       </div>
     </div>
   );
-};
+});

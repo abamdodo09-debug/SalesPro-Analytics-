@@ -1,10 +1,17 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
+  Award,
+  BarChart3,
   Calendar,
+  CalendarDays,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Edit3,
+  Eye,
+  EyeOff,
   Filter,
   Percent,
   PlusCircle,
@@ -26,6 +33,7 @@ import { formatRupiah } from '../utils/analytics';
 import {
   aggregateDailyOnlinePromoRecap,
   aggregateMonthlyOnlinePromoRecap,
+  analyzeMonthlyPromoPotential,
   clearAllOnlinePromoReports,
   computeOnlinePromoGrowth,
   deleteOnlinePromoReport,
@@ -118,11 +126,15 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
   const [editDate, setEditDate] = useState<string>('');
   const [editActualStr, setEditActualStr] = useState<string>('');
 
-  // Filters & Confirmations
+  // Filters, View Toggles & Confirmations
   const [filterMonth, setFilterMonth] = useState<string>('ALL');
   const [filterDate, setFilterDate] = useState<string>('ALL');
   const [filterStore, setFilterStore] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [isMainTableExpanded, setIsMainTableExpanded] = useState<boolean>(true);
+  const [hoveredMonthIndex, setHoveredMonthIndex] = useState<number | null>(null);
+  const [analysisMonthFilter, setAnalysisMonthFilter] = useState<string>('ALL');
+  const [hoveredDayDetailKey, setHoveredDayDetailKey] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmClearAll, setConfirmClearAll] = useState<boolean>(false);
 
@@ -182,9 +194,37 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
     return computeOnlinePromoGrowth(simulated).find((x) => x.id === editingRowId) || null;
   }, [editingRowId, editStoreName, editMonthPeriod, editDate, editActualStr, items]);
 
-  // Recaps: Per Hari & Bulanan
+  // Recaps: Per Hari, Bulanan, & Analisa Durasi + Tanggal Potensi
   const dailyRecap = useMemo(() => aggregateDailyOnlinePromoRecap(items), [items]);
   const monthlyRecap = useMemo(() => aggregateMonthlyOnlinePromoRecap(items), [items]);
+  const monthlyPotentialAnalysis = useMemo(
+    () => analyzeMonthlyPromoPotential(items),
+    [items]
+  );
+
+  const filteredPotentialAnalysis = useMemo(() => {
+    if (analysisMonthFilter === 'ALL') return monthlyPotentialAnalysis;
+    return monthlyPotentialAnalysis.filter(
+      (m) => m.monthPeriod.toUpperCase() === analysisMonthFilter.toUpperCase()
+    );
+  }, [monthlyPotentialAnalysis, analysisMonthFilter]);
+
+  const maxMonthlyActual = useMemo(
+    () => Math.max(...monthlyRecap.map((m) => m.totalActual), 1),
+    [monthlyRecap]
+  );
+
+  const peakMonthlyIndex = useMemo(() => {
+    let bestIdx = -1;
+    let bestVal = -Infinity;
+    monthlyRecap.forEach((m, idx) => {
+      if (m.totalActual > bestVal) {
+        bestVal = m.totalActual;
+        bestIdx = idx;
+      }
+    });
+    return bestIdx;
+  }, [monthlyRecap]);
 
   // Filtered table items
   const filteredItems = useMemo(() => {
@@ -666,77 +706,115 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
         </form>
       </div>
 
-      {/* Main Editable Table */}
+      {/* Main Editable Table (Collapsible) */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-5 py-4 border-b border-slate-200 bg-slate-50/70 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-extrabold text-slate-900">
-              Tabel Report Promo Toko Online ({filteredItems.length} Baris)
-            </h3>
-            <p className="text-[11px] text-slate-500 mt-0.5">
-              Klik <span className="font-bold text-amber-700">Edit</span> untuk mengubah Nama Toko, Bulan, Tanggal, atau Actual langsung di tabel.
-            </p>
+        <div
+          className={`px-5 py-4 bg-slate-50/70 flex flex-col lg:flex-row lg:items-center justify-between gap-3 ${
+            isMainTableExpanded ? 'border-b border-slate-200' : ''
+          }`}
+        >
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h3 className="text-sm font-extrabold text-slate-900">
+                Tabel Report Promo Toko Online ({filteredItems.length} Baris)
+              </h3>
+              {!isMainTableExpanded && (
+                <span className="text-xs text-slate-500 font-mono tabular-nums">
+                  · Total Actual {formatRupiah(kpiSummary.totalActual)} (Tabel disembunyikan)
+                </span>
+              )}
+            </div>
+            {isMainTableExpanded && (
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Klik <span className="font-bold text-amber-700">Edit</span> untuk mengubah Nama Toko, Bulan, Tanggal, atau Actual langsung di tabel.
+              </p>
+            )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Cari toko / tanggal..."
-                className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {isMainTableExpanded && (
+              <>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Cari toko / tanggal..."
+                    className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
 
-            <div className="flex items-center gap-1.5">
-              <Filter className="w-3.5 h-3.5 text-slate-500" />
-              <select
-                value={filterMonth}
-                onChange={(e) => setFilterMonth(e.target.value)}
-                className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-white"
-              >
-                <option value="ALL">Semua Bulan</option>
-                {monthOptions.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-            </div>
+                <div className="flex items-center gap-1.5">
+                  <Filter className="w-3.5 h-3.5 text-slate-500" />
+                  <select
+                    value={filterMonth}
+                    onChange={(e) => setFilterMonth(e.target.value)}
+                    className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-white"
+                  >
+                    <option value="ALL">Semua Bulan</option>
+                    {monthOptions.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                </div>
 
-            <select
-              value={filterStore}
-              onChange={(e) => setFilterStore(e.target.value)}
-              className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-white max-w-[190px]"
-            >
-              <option value="ALL">Semua Toko</option>
-              {manualStoreOptions.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
+                <select
+                  value={filterStore}
+                  onChange={(e) => setFilterStore(e.target.value)}
+                  className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-white max-w-[190px]"
+                >
+                  <option value="ALL">Semua Toko</option>
+                  {manualStoreOptions.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
 
-            {(filterMonth !== 'ALL' || filterDate !== 'ALL' || filterStore !== 'ALL' || searchQuery) && (
-              <button
-                type="button"
-                onClick={() => {
-                  setFilterMonth('ALL');
-                  setFilterDate('ALL');
-                  setFilterStore('ALL');
-                  setSearchQuery('');
-                }}
-                className="px-2.5 py-1.5 text-xs font-bold rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 cursor-pointer"
-              >
-                Reset
-              </button>
+                {(filterMonth !== 'ALL' || filterDate !== 'ALL' || filterStore !== 'ALL' || searchQuery) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFilterMonth('ALL');
+                      setFilterDate('ALL');
+                      setFilterStore('ALL');
+                      setSearchQuery('');
+                    }}
+                    className="px-2.5 py-1.5 text-xs font-bold rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Reset
+                  </button>
+                )}
+              </>
             )}
+
+            <button
+              type="button"
+              onClick={() => setIsMainTableExpanded((prev) => !prev)}
+              aria-expanded={isMainTableExpanded}
+              className="px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+            >
+              {isMainTableExpanded ? (
+                <>
+                  <EyeOff className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Sembunyikan Tabel</span>
+                  <ChevronUp className="w-3.5 h-3.5 text-slate-400" />
+                </>
+              ) : (
+                <>
+                  <Eye className="w-3.5 h-3.5 text-blue-600" />
+                  <span>Tampilkan Tabel</span>
+                  <ChevronDown className="w-3.5 h-3.5 text-blue-600" />
+                </>
+              )}
+            </button>
           </div>
         </div>
 
-        {filteredItems.length === 0 ? (
+        {isMainTableExpanded && (filteredItems.length === 0 ? (
           <div className="p-12 text-center space-y-2">
             <div className="w-11 h-11 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
               <Tag className="w-5 h-5" />
@@ -968,146 +1046,658 @@ export const OnlinePromoReportView: React.FC<OnlinePromoReportViewProps> = ({
               </tfoot>
             </table>
           </div>
-        )}
+        ))}
       </div>
 
-      {/* Dual Recap: Pencapaian Per Hari & Pencapaian Bulanan */}
+      {/* Rekapan Pencapaian Bulanan (Growth MoM) + Grafik */}
       {items.length > 0 && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Rekapan Pencapaian Per Hari */}
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
-            <div className="px-5 py-4 border-b border-slate-200 bg-emerald-50/60 flex items-center justify-between gap-2">
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-200 bg-blue-50/50 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-lg bg-blue-600 text-white shrink-0">
+                <BarChart3 className="w-4 h-4" />
+              </div>
               <div>
                 <h3 className="text-sm font-extrabold text-slate-900">
-                  Rekapan Pencapaian Per Hari (Growth Harian)
+                  Rekapan Pencapaian Bulanan (Growth MoM) &amp; Grafik
                 </h3>
                 <p className="text-[11px] text-slate-500 mt-0.5">
-                  Total Actual seluruh toko per tanggal &amp; pertumbuhan dibanding hari sebelumnya. Klik tanggal untuk filter tabel.
+                  Grafik perbandingan Actual &amp; laju Growth MoM per bulan. Klik batang grafik atau baris tabel untuk memfilter tabel utama.
                 </p>
               </div>
-              {filterDate !== 'ALL' && (
-                <button
-                  type="button"
-                  onClick={() => setFilterDate('ALL')}
-                  className="px-2.5 py-1 rounded-lg bg-white border border-emerald-200 text-emerald-800 text-[11px] font-bold cursor-pointer"
-                >
-                  Semua Tanggal
-                </button>
-              )}
             </div>
-            <div className="overflow-x-auto grow">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="bg-slate-100/80 border-b border-slate-200 text-slate-700">
-                    <th className="text-left font-extrabold px-4 py-2.5">Tanggal</th>
-                    <th className="text-center font-extrabold px-3 py-2.5">Toko</th>
-                    <th className="text-right font-extrabold px-3 py-2.5">Actual Harian</th>
-                    <th className="text-right font-extrabold px-4 py-2.5">Growth Per Hari</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {dailyRecap.map((row) => (
-                    <tr
-                      key={row.date}
-                      onClick={() => setFilterDate(filterDate === row.date ? 'ALL' : row.date)}
-                      className={`cursor-pointer transition-colors ${
-                        filterDate === row.date ? 'bg-emerald-50/80 font-bold' : 'hover:bg-slate-50'
-                      }`}
-                    >
-                      <td className="px-4 py-2.5 font-mono font-bold text-slate-900 tabular-nums whitespace-nowrap">
-                        {formatDisplayDateId(row.date)}
-                      </td>
-                      <td className="px-3 py-2.5 text-center font-mono tabular-nums text-slate-600">
-                        {row.storeCount}
-                      </td>
-                      <td className="px-3 py-2.5 text-right font-mono font-extrabold text-slate-900 tabular-nums whitespace-nowrap">
-                        {formatRupiah(row.totalActual)}
-                      </td>
-                      <td className="px-4 py-2.5 text-right whitespace-nowrap">
-                        {renderGrowthPill(
-                          row.growthPercent,
-                          row.growthDelta,
-                          row.previousDate ? formatDisplayDateId(row.previousDate) : null,
-                          row.previousTotalActual,
-                          'Hari Awal (-)'
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            {filterMonth !== 'ALL' && (
+              <button
+                type="button"
+                onClick={() => setFilterMonth('ALL')}
+                className="px-3 py-1.5 rounded-lg bg-white border border-blue-200 hover:bg-blue-50 text-blue-800 text-xs font-bold whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Semua Bulan
+              </button>
+            )}
+          </div>
+
+          {/* Monthly Bar & Growth MoM Chart */}
+          <div className="p-5 border-b border-slate-200">
+            <div className="relative pt-6">
+              {hoveredMonthIndex !== null && monthlyRecap[hoveredMonthIndex] && (() => {
+                const hm = monthlyRecap[hoveredMonthIndex];
+                return (
+                  <div className="absolute top-0 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-4 py-2.5 rounded-lg shadow-lg text-xs z-20 pointer-events-none border border-slate-700 whitespace-nowrap">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-white">{hm.monthPeriod}</span>
+                      <span className="text-slate-400">·</span>
+                      <span className="font-mono text-slate-300">
+                        {hm.promoDaysCount} hari promo ({hm.storeCount} toko)
+                      </span>
+                    </div>
+                    <div className="mt-1 flex items-center gap-3 font-mono tabular-nums">
+                      <span className="text-emerald-400 font-extrabold text-sm">
+                        {formatRupiah(hm.totalActual)}
+                      </span>
+                      {hm.growthPercent !== null && (
+                        <span
+                          className={`font-bold text-[11px] ${
+                            hm.growthPercent >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                          }`}
+                        >
+                          MoM {hm.growthPercent >= 0 ? '+' : ''}
+                          {hm.growthPercent.toFixed(1).replace('.', ',')}% (
+                          {hm.growthDelta !== null
+                            ? `${hm.growthDelta >= 0 ? '+' : '-'}${formatRupiah(Math.abs(hm.growthDelta), true)}`
+                            : ''}
+                          )
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div className="flex items-stretch gap-3">
+                {/* Left Y-axis */}
+                <div className="hidden sm:flex flex-col justify-between text-right font-mono text-[10px] text-slate-400 tabular-nums py-7 pr-2 border-r border-slate-100 shrink-0 w-20">
+                  <span>{formatRupiah(maxMonthlyActual, true)}</span>
+                  <span>{formatRupiah(maxMonthlyActual * 0.5, true)}</span>
+                  <span>Rp 0</span>
+                </div>
+
+                {/* Bars area */}
+                <div className="flex-1 flex items-end gap-3 sm:gap-5 h-64 pt-10 pb-2 overflow-x-auto">
+                  {monthlyRecap.map((row, idx) => {
+                    const heightPct =
+                      maxMonthlyActual > 0
+                        ? Math.max(6, (Math.max(0, row.totalActual) / maxMonthlyActual) * 100)
+                        : 6;
+                    const isPeak = idx === peakMonthlyIndex && row.totalActual > 0;
+                    const isSelected = filterMonth.toUpperCase() === row.monthPeriod.toUpperCase();
+                    const isPositive = row.growthPercent !== null && row.growthPercent >= 0;
+
+                    return (
+                      <button
+                        key={row.monthPeriod}
+                        type="button"
+                        onClick={() =>
+                          setFilterMonth(
+                            filterMonth === row.monthPeriod ? 'ALL' : row.monthPeriod
+                          )
+                        }
+                        onMouseEnter={() => setHoveredMonthIndex(idx)}
+                        onMouseLeave={() => setHoveredMonthIndex(null)}
+                        className="flex-1 min-w-[74px] max-w-[130px] flex flex-col items-center h-full justify-end group cursor-pointer focus:outline-none"
+                      >
+                        <div className="mb-1.5 flex flex-col items-center">
+                          {row.growthPercent !== null ? (
+                            <span
+                              className={`text-[10px] font-mono font-extrabold tabular-nums leading-none ${
+                                isPositive ? 'text-emerald-700' : 'text-rose-700'
+                              }`}
+                            >
+                              {isPositive ? '+' : ''}
+                              {row.growthPercent.toFixed(1).replace('.', ',')}%
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-mono text-slate-400 leading-none">
+                              Awal
+                            </span>
+                          )}
+                          <span
+                            className={`text-[11px] font-mono font-extrabold tabular-nums mt-1 ${
+                              isSelected
+                                ? 'text-blue-700'
+                                : isPeak
+                                ? 'text-emerald-700'
+                                : 'text-slate-700'
+                            }`}
+                          >
+                            {formatRupiah(row.totalActual, true)}
+                          </span>
+                        </div>
+
+                        <div className="w-full relative flex items-end justify-center h-full px-2">
+                          <div
+                            style={{ height: `${heightPct}%` }}
+                            className={`w-full max-w-[56px] rounded-t-md transition-all duration-200 ${
+                              isSelected
+                                ? 'bg-blue-700 ring-2 ring-blue-300'
+                                : isPeak
+                                ? 'bg-emerald-600 group-hover:bg-emerald-700'
+                                : 'bg-sky-600 group-hover:bg-sky-700'
+                            }`}
+                          />
+                        </div>
+
+                        <div className="mt-2 text-center w-full">
+                          <span
+                            className={`block text-[11px] font-bold truncate ${
+                              isSelected
+                                ? 'text-blue-800'
+                                : isPeak
+                                ? 'text-emerald-800'
+                                : 'text-slate-800'
+                            }`}
+                          >
+                            {row.monthPeriod}
+                          </span>
+                          <span className="block text-[10px] font-mono text-slate-500 tabular-nums">
+                            {row.promoDaysCount} hr promo
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+                <div className="flex flex-wrap items-center gap-4 font-medium">
+                  <span className="flex items-center gap-1.5 text-emerald-800 font-semibold">
+                    <span className="w-2.5 h-2.5 rounded-xs bg-emerald-600 inline-block" />
+                    Puncak Bulanan ({peakMonthlyIndex >= 0 ? monthlyRecap[peakMonthlyIndex]?.monthPeriod : '-'})
+                  </span>
+                  <span className="flex items-center gap-1.5 text-sky-800">
+                    <span className="w-2.5 h-2.5 rounded-xs bg-sky-600 inline-block" />
+                    Bulan Lainnya
+                  </span>
+                  {filterMonth !== 'ALL' && (
+                    <span className="flex items-center gap-1.5 text-blue-800 font-semibold">
+                      <span className="w-2.5 h-2.5 rounded-xs bg-blue-700 inline-block" />
+                      Filter Aktif ({filterMonth})
+                    </span>
+                  )}
+                </div>
+                <span className="font-mono text-slate-600 font-semibold tabular-nums">
+                  {monthlyRecap.length} Bulan Tercatat
+                </span>
+              </div>
             </div>
           </div>
 
-          {/* Rekapan Pencapaian Bulanan */}
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
-            <div className="px-5 py-4 border-b border-slate-200 bg-blue-50/60 flex items-center justify-between gap-2">
+          {/* Monthly Table */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-slate-100/80 border-b border-slate-200 text-slate-700">
+                  <th className="text-left font-extrabold px-5 py-3">Bulan</th>
+                  <th className="text-center font-extrabold px-3 py-3">Hari Promo</th>
+                  <th className="text-center font-extrabold px-3 py-3">Toko</th>
+                  <th className="text-right font-extrabold px-3 py-3">Rata-rata / Hari</th>
+                  <th className="text-right font-extrabold px-3 py-3">Actual Bulanan</th>
+                  <th className="text-right font-extrabold px-5 py-3">Growth Bulanan (MoM)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {monthlyRecap.map((row) => (
+                  <tr
+                    key={row.monthPeriod}
+                    onClick={() =>
+                      setFilterMonth(
+                        filterMonth === row.monthPeriod ? 'ALL' : row.monthPeriod
+                      )
+                    }
+                    className={`cursor-pointer transition-colors ${
+                      filterMonth === row.monthPeriod
+                        ? 'bg-blue-50/80 font-bold'
+                        : 'hover:bg-slate-50'
+                    }`}
+                  >
+                    <td className="px-5 py-3 font-bold text-slate-900 whitespace-nowrap">
+                      {row.monthPeriod}
+                    </td>
+                    <td className="px-3 py-3 text-center font-mono tabular-nums text-slate-700 whitespace-nowrap">
+                      {row.promoDaysCount} hr{' '}
+                      <span className="text-slate-400">/ {row.calendarDaysInMonth} hr</span>
+                    </td>
+                    <td className="px-3 py-3 text-center font-mono tabular-nums text-slate-600">
+                      {row.storeCount}
+                    </td>
+                    <td className="px-3 py-3 text-right font-mono font-semibold text-slate-700 tabular-nums whitespace-nowrap">
+                      {formatRupiah(row.avgPerPromoDay)}
+                    </td>
+                    <td className="px-3 py-3 text-right font-mono font-extrabold text-slate-900 tabular-nums whitespace-nowrap">
+                      {formatRupiah(row.totalActual)}
+                    </td>
+                    <td className="px-5 py-3 text-right whitespace-nowrap">
+                      {renderGrowthPill(
+                        row.growthPercent,
+                        row.growthDelta,
+                        row.previousMonthPeriod,
+                        row.previousTotalActual,
+                        'Bulan Awal (-)'
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Analisa Durasi Promo & Tanggal Potensi per Bulan */}
+      {items.length > 0 && monthlyPotentialAnalysis.length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-200 bg-emerald-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-lg bg-emerald-600 text-white shrink-0">
+                <CalendarDays className="w-4 h-4" />
+              </div>
               <div>
                 <h3 className="text-sm font-extrabold text-slate-900">
-                  Rekapan Pencapaian Bulanan (Growth MoM)
+                  Analisa Durasi Promo &amp; Tanggal Potensi per Bulan
                 </h3>
                 <p className="text-[11px] text-slate-500 mt-0.5">
-                  Total Actual seluruh toko per bulan &amp; pertumbuhan dibanding bulan sebelumnya. Klik bulan untuk filter tabel.
+                  Ringkasan berapa hari promo dijalankan serta tanggal-tanggal dengan potensi terbaik (di atas rata-rata harian bulan tersebut).
                 </p>
               </div>
-              {filterMonth !== 'ALL' && (
-                <button
-                  type="button"
-                  onClick={() => setFilterMonth('ALL')}
-                  className="px-2.5 py-1 rounded-lg bg-white border border-blue-200 text-blue-800 text-[11px] font-bold cursor-pointer"
+            </div>
+
+            {monthlyPotentialAnalysis.length > 1 && (
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-[11px] font-bold text-slate-600">Lihat Bulan:</span>
+                <select
+                  value={analysisMonthFilter}
+                  onChange={(e) => setAnalysisMonthFilter(e.target.value)}
+                  className="px-2.5 py-1.5 text-xs font-bold rounded-lg border border-slate-300 bg-white"
                 >
-                  Semua Bulan
-                </button>
-              )}
-            </div>
-            <div className="overflow-x-auto grow">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="bg-slate-100/80 border-b border-slate-200 text-slate-700">
-                    <th className="text-left font-extrabold px-4 py-2.5">Bulan</th>
-                    <th className="text-center font-extrabold px-3 py-2.5">Toko</th>
-                    <th className="text-right font-extrabold px-3 py-2.5">Actual Bulanan</th>
-                    <th className="text-right font-extrabold px-4 py-2.5">Growth Bulanan</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {monthlyRecap.map((row) => (
-                    <tr
-                      key={row.monthPeriod}
-                      onClick={() =>
-                        setFilterMonth(
-                          filterMonth === row.monthPeriod ? 'ALL' : row.monthPeriod
-                        )
-                      }
-                      className={`cursor-pointer transition-colors ${
-                        filterMonth === row.monthPeriod
-                          ? 'bg-blue-50/80 font-bold'
-                          : 'hover:bg-slate-50'
-                      }`}
-                    >
-                      <td className="px-4 py-2.5 font-bold text-slate-900 whitespace-nowrap">
-                        {row.monthPeriod}
-                      </td>
-                      <td className="px-3 py-2.5 text-center font-mono tabular-nums text-slate-600">
-                        {row.storeCount}
-                      </td>
-                      <td className="px-3 py-2.5 text-right font-mono font-extrabold text-slate-900 tabular-nums whitespace-nowrap">
-                        {formatRupiah(row.totalActual)}
-                      </td>
-                      <td className="px-4 py-2.5 text-right whitespace-nowrap">
-                        {renderGrowthPill(
-                          row.growthPercent,
-                          row.growthDelta,
-                          row.previousMonthPeriod,
-                          row.previousTotalActual,
-                          'Bulan Awal (-)'
-                        )}
-                      </td>
-                    </tr>
+                  <option value="ALL">Semua Bulan ({monthlyPotentialAnalysis.length})</option>
+                  {monthlyPotentialAnalysis.map((m) => (
+                    <option key={m.monthPeriod} value={m.monthPeriod}>
+                      {m.monthPeriod}
+                    </option>
                   ))}
-                </tbody>
-              </table>
+                </select>
+              </div>
+            )}
+          </div>
+
+          {/* Ringkasan Tabel Cepat per Bulan */}
+          <div className="overflow-x-auto border-b border-slate-200">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-slate-100/80 border-b border-slate-200 text-slate-700">
+                  <th className="text-left font-extrabold px-5 py-3">Bulan</th>
+                  <th className="text-left font-extrabold px-3 py-3">Durasi Promo Dijalankan</th>
+                  <th className="text-left font-extrabold px-3 py-3">Tanggal Potensi Tinggi (&ge; Rata-rata)</th>
+                  <th className="text-left font-extrabold px-3 py-3">Tanggal Puncak</th>
+                  <th className="text-right font-extrabold px-3 py-3">Rata-rata / Hari</th>
+                  <th className="text-right font-extrabold px-5 py-3">Total Actual</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filteredPotentialAnalysis.map((m) => (
+                  <tr
+                    key={m.monthPeriod}
+                    onClick={() =>
+                      setFilterMonth(
+                        filterMonth === m.monthPeriod ? 'ALL' : m.monthPeriod
+                      )
+                    }
+                    className="hover:bg-slate-50/90 transition-colors cursor-pointer"
+                  >
+                    <td className="px-5 py-3 font-extrabold text-slate-900 whitespace-nowrap">
+                      {m.monthPeriod}
+                    </td>
+                    <td className="px-3 py-3 whitespace-nowrap">
+                      <div className="font-mono font-bold text-slate-900 tabular-nums">
+                        {m.promoDaysCount} Hari Promo
+                        <span className="text-slate-400 font-normal">
+                          {' '}
+                          / {m.calendarDaysInMonth} hr ({m.coveragePercent.toFixed(1).replace('.', ',')}%)
+                        </span>
+                      </div>
+                      {m.firstPromoDate && m.lastPromoDate && (
+                        <div className="text-[11px] font-mono text-slate-500 tabular-nums mt-0.5">
+                          {formatDisplayDateId(m.firstPromoDate)} s/d {formatDisplayDateId(m.lastPromoDate)}
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-3 py-3">
+                      {m.potentialDates.length === 0 ? (
+                        <span className="text-slate-400">-</span>
+                      ) : (
+                        <div>
+                          <div className="font-mono font-bold text-emerald-800 tabular-nums">
+                            Tgl {m.potentialDates.map((d) => d.dayOfMonth).join(', ')}
+                          </div>
+                          <div className="text-[11px] text-slate-500 mt-0.5">
+                            {m.potentialDates.length} hari di atas rata-rata harian
+                          </div>
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-3 py-3 whitespace-nowrap">
+                      {m.peakDate ? (
+                        <div>
+                          <div className="font-mono font-bold text-slate-900 tabular-nums flex items-center gap-1">
+                            <Award className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span>{formatDisplayDateId(m.peakDate.date)}</span>
+                          </div>
+                          <div className="text-[11px] font-mono text-emerald-700 tabular-nums mt-0.5">
+                            {formatRupiah(m.peakDate.totalActual, true)} ({m.peakDate.sharePercent.toFixed(1).replace('.', ',')}% bulan)
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="text-slate-400">-</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-3 text-right font-mono font-semibold text-slate-700 tabular-nums whitespace-nowrap">
+                      {formatRupiah(m.avgDailyActual)}
+                    </td>
+                    <td className="px-5 py-3 text-right font-mono font-extrabold text-slate-900 tabular-nums whitespace-nowrap">
+                      {formatRupiah(m.totalActual)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Detail Peta Tanggal Kalender & Tanggal Potensi per Bulan */}
+          <div className="divide-y divide-slate-200">
+            {filteredPotentialAnalysis.map((m) => {
+              const daysArray = Array.from({ length: m.calendarDaysInMonth }, (_, i) => i + 1);
+              const hoveredDay = hoveredDayDetailKey
+                ? m.allActiveDates.find((d) => `${m.monthPeriod}-${d.date}` === hoveredDayDetailKey) || null
+                : null;
+              const selectedDayInMonth =
+                filterDate !== 'ALL'
+                  ? m.allActiveDates.find((d) => d.date === filterDate) || null
+                  : null;
+              const inspectedDay = hoveredDay || selectedDayInMonth || m.peakDate;
+
+              return (
+                <div key={m.monthPeriod} className="p-5 space-y-4">
+                  {/* Month Subheader with clean unboxed metadata */}
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+                      <h4 className="text-sm font-extrabold text-slate-900">{m.monthPeriod}</h4>
+                      <span className="text-xs text-slate-500 font-mono tabular-nums">
+                        {m.promoDaysCount} dari {m.calendarDaysInMonth} hari promo ({m.coveragePercent.toFixed(1).replace('.', ',')}%)
+                      </span>
+                      <span className="text-slate-300" aria-hidden="true">·</span>
+                      <span className="text-xs text-slate-600 font-mono tabular-nums">
+                        Rata-rata {formatRupiah(m.avgDailyActual)}/hari
+                      </span>
+                      {m.peakDate && (
+                        <>
+                          <span className="text-slate-300" aria-hidden="true">·</span>
+                          <span className="text-xs font-bold text-emerald-700 font-mono tabular-nums">
+                            Puncak Tgl {m.peakDate.dayOfMonth} ({formatRupiah(m.peakDate.totalActual, true)})
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    <div className="text-[11px] font-mono text-slate-500 tabular-nums">
+                      Total {formatRupiah(m.totalActual)} · {m.storeCount} toko · {m.entryCount} entri
+                    </div>
+                  </div>
+
+                  {/* Two-column layout: Calendar Day Map + Potential Dates Ranking */}
+                  <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+                    {/* Left: Interactive 1..30/31 Day Map */}
+                    <div className="xl:col-span-5 space-y-3">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-bold text-slate-800">
+                          Peta Kalender Tanggal Promo (Tgl 1–{m.calendarDaysInMonth})
+                        </span>
+                        {filterDate !== 'ALL' && selectedDayInMonth && (
+                          <button
+                            type="button"
+                            onClick={() => setFilterDate('ALL')}
+                            className="text-[11px] font-bold text-blue-700 hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                          >
+                            Reset Tanggal
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-7 gap-1.5">
+                        {daysArray.map((dayNum) => {
+                          const detail = m.activeDayMap[dayNum];
+                          if (!detail) {
+                            return (
+                              <div
+                                key={dayNum}
+                                title={`Tgl ${dayNum} — Tidak ada promo`}
+                                className="h-8 rounded-lg border border-slate-100 bg-slate-50 text-slate-300 font-mono text-[11px] tabular-nums flex items-center justify-center select-none"
+                              >
+                                {dayNum}
+                              </div>
+                            );
+                          }
+
+                          const isSelectedDate = filterDate === detail.date;
+                          const hoverKey = `${m.monthPeriod}-${detail.date}`;
+                          const cellClass = detail.isPeakDay
+                            ? 'bg-emerald-600 text-white border-emerald-700 font-extrabold hover:bg-emerald-700'
+                            : detail.isAboveAverage
+                            ? 'bg-emerald-100 text-emerald-900 border-emerald-300 font-bold hover:bg-emerald-200'
+                            : 'bg-sky-50 text-sky-900 border-sky-200 font-semibold hover:bg-sky-100';
+
+                          return (
+                            <button
+                              key={dayNum}
+                              type="button"
+                              onClick={() =>
+                                setFilterDate(isSelectedDate ? 'ALL' : detail.date)
+                              }
+                              onMouseEnter={() => setHoveredDayDetailKey(hoverKey)}
+                              onMouseLeave={() => setHoveredDayDetailKey(null)}
+                              title={`${formatDisplayDateId(detail.date)}: ${formatRupiah(detail.totalActual)} (${detail.storeNames.join(', ')})`}
+                              className={`h-8 rounded-lg border font-mono text-[11px] tabular-nums flex items-center justify-center transition-colors cursor-pointer ${cellClass} ${
+                                isSelectedDate ? 'ring-2 ring-blue-600 ring-offset-1' : ''
+                              }`}
+                            >
+                              {dayNum}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Legend */}
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-slate-600 pt-1">
+                        <span className="flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-xs bg-emerald-600 inline-block" />
+                          Puncak
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-xs bg-emerald-200 border border-emerald-400 inline-block" />
+                          Potensi Tinggi (&ge; Rata-rata)
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-xs bg-sky-100 border border-sky-300 inline-block" />
+                          Hari Promo Lain
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-xs bg-slate-100 border border-slate-200 inline-block" />
+                          Kosong
+                        </span>
+                      </div>
+
+                      {/* Inspected day readout */}
+                      {inspectedDay && (
+                        <div className="pt-2 border-t border-slate-100 text-xs flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <span className="font-bold text-slate-900 font-mono tabular-nums">
+                              {formatDisplayDateId(inspectedDay.date)}
+                            </span>
+                            <span className="text-slate-400 mx-1.5">·</span>
+                            <span className="text-slate-600">
+                              {inspectedDay.storeNames.join(', ') || '-'}
+                            </span>
+                          </div>
+                          <div className="font-mono font-extrabold text-emerald-700 tabular-nums">
+                            {formatRupiah(inspectedDay.totalActual)} ({inspectedDay.sharePercent.toFixed(1).replace('.', ',')}%)
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Right: Ranked Potential Dates Table */}
+                    <div className="xl:col-span-7 space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <span className="font-bold text-slate-800">
+                          Daftar Tanggal Potensi di {m.monthPeriod} ({m.potentialDates.length} Tanggal Terbaik)
+                        </span>
+                        <span className="text-[11px] text-slate-500">
+                          Klik tanggal untuk memfilter tabel utama
+                        </span>
+                      </div>
+
+                      <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                              <th className="text-center font-extrabold px-2.5 py-2 w-10">#</th>
+                              <th className="text-left font-extrabold px-3 py-2">Tanggal Potensi</th>
+                              <th className="text-left font-extrabold px-3 py-2">Toko Aktif</th>
+                              <th className="text-right font-extrabold px-3 py-2">Actual</th>
+                              <th className="text-right font-extrabold px-3 py-2">Kontribusi</th>
+                              <th className="text-right font-extrabold px-3 py-2">vs Rata-rata</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {m.potentialDates.map((d, rankIdx) => {
+                              const isSelectedDate = filterDate === d.date;
+                              return (
+                                <tr
+                                  key={d.date}
+                                  onClick={() =>
+                                    setFilterDate(isSelectedDate ? 'ALL' : d.date)
+                                  }
+                                  className={`cursor-pointer transition-colors ${
+                                    isSelectedDate ? 'bg-blue-50/80' : 'hover:bg-slate-50'
+                                  }`}
+                                >
+                                  <td className="px-2.5 py-2 text-center font-mono font-bold text-slate-500 tabular-nums">
+                                    {rankIdx + 1}
+                                  </td>
+                                  <td className="px-3 py-2 font-mono font-bold text-slate-900 tabular-nums whitespace-nowrap">
+                                    {formatDisplayDateId(d.date)}
+                                    {d.isPeakDay && (
+                                      <span className="ml-1.5 text-[10px] font-sans font-extrabold text-emerald-700">
+                                        (Puncak)
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="px-3 py-2 text-slate-700 font-medium">
+                                    {d.storeNames.join(', ')}
+                                  </td>
+                                  <td className="px-3 py-2 text-right font-mono font-extrabold text-slate-900 tabular-nums whitespace-nowrap">
+                                    {formatRupiah(d.totalActual)}
+                                  </td>
+                                  <td className="px-3 py-2 text-right font-mono font-semibold text-slate-700 tabular-nums whitespace-nowrap">
+                                    {d.sharePercent.toFixed(1).replace('.', ',')}%
+                                  </td>
+                                  <td className="px-3 py-2 text-right font-mono font-bold text-emerald-700 tabular-nums whitespace-nowrap">
+                                    +{d.vsAvgPercent.toFixed(1).replace('.', ',')}%
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <div className="text-[11px] text-slate-600 font-mono tabular-nums">
+                        <span className="font-sans font-semibold text-slate-700">
+                          Semua tanggal promo aktif ({m.promoDaysCount} hari):{' '}
+                        </span>
+                        {m.allActiveDates.map((d) => `Tgl ${d.dayOfMonth}`).join(', ')}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Rekapan Pencapaian Per Hari (Growth Harian) */}
+      {items.length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+          <div className="px-5 py-4 border-b border-slate-200 bg-emerald-50/60 flex items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-extrabold text-slate-900">
+                Rekapan Pencapaian Per Hari (Growth Harian)
+              </h3>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Total Actual seluruh toko per tanggal &amp; pertumbuhan dibanding hari sebelumnya. Klik tanggal untuk filter tabel.
+              </p>
             </div>
+            {filterDate !== 'ALL' && (
+              <button
+                type="button"
+                onClick={() => setFilterDate('ALL')}
+                className="px-2.5 py-1 rounded-lg bg-white border border-emerald-200 text-emerald-800 text-[11px] font-bold whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Semua Tanggal
+              </button>
+            )}
+          </div>
+          <div className="overflow-x-auto max-h-[380px] overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 z-10">
+                <tr className="bg-slate-100 border-b border-slate-200 text-slate-700">
+                  <th className="text-left font-extrabold px-5 py-2.5">Tanggal</th>
+                  <th className="text-center font-extrabold px-3 py-2.5">Toko</th>
+                  <th className="text-right font-extrabold px-3 py-2.5">Actual Harian</th>
+                  <th className="text-right font-extrabold px-5 py-2.5">Growth Per Hari</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {dailyRecap.map((row) => (
+                  <tr
+                    key={row.date}
+                    onClick={() => setFilterDate(filterDate === row.date ? 'ALL' : row.date)}
+                    className={`cursor-pointer transition-colors ${
+                      filterDate === row.date ? 'bg-emerald-50/80 font-bold' : 'hover:bg-slate-50'
+                    }`}
+                  >
+                    <td className="px-5 py-2.5 font-mono font-bold text-slate-900 tabular-nums whitespace-nowrap">
+                      {formatDisplayDateId(row.date)}
+                    </td>
+                    <td className="px-3 py-2.5 text-center font-mono tabular-nums text-slate-600">
+                      {row.storeCount}
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-mono font-extrabold text-slate-900 tabular-nums whitespace-nowrap">
+                      {formatRupiah(row.totalActual)}
+                    </td>
+                    <td className="px-5 py-2.5 text-right whitespace-nowrap">
+                      {renderGrowthPill(
+                        row.growthPercent,
+                        row.growthDelta,
+                        row.previousDate ? formatDisplayDateId(row.previousDate) : null,
+                        row.previousTotalActual,
+                        'Hari Awal (-)'
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Store, TrendingUp, Award, MapPin, Building } from 'lucide-react';
 import { TransactionRecord } from '../types/dashboard';
 import { aggregateByDimension, formatRupiah, formatNumber, formatPercent } from '../utils/analytics';
@@ -7,44 +7,49 @@ interface StoreAnalysisProps {
   records: TransactionRecord[];
 }
 
-export const StoreAnalysis: React.FC<StoreAnalysisProps> = ({ records }) => {
-  const storeData = aggregateByDimension(records, 'NAMA_STORE');
+export const StoreAnalysis: React.FC<StoreAnalysisProps> = React.memo(({ records }) => {
+  const { storeData, enrichedStores, grandTotal } = useMemo(() => {
+    const storeData = aggregateByDimension(records, 'NAMA_STORE');
 
-  // Compute region and sales servicing each store
-  const storeMetaMap: Record<string, { region: string; sales: Set<string> }> = {};
-  records.forEach((r) => {
-    if (!storeMetaMap[r.NAMA_STORE]) {
-      storeMetaMap[r.NAMA_STORE] = { region: r.REGION, sales: new Set() };
-    }
-    if (r.SALES) storeMetaMap[r.NAMA_STORE].sales.add(r.SALES);
-  });
-
-  // Calculate cumulative Pareto share
-  let runningTotal = 0;
-  const grandTotal = storeData.reduce((acc, s) => acc + s.totalValue, 0);
-
-  const enrichedStores = storeData.map((store) => {
-    runningTotal += store.totalValue;
-    const cumulativePct = grandTotal > 0 ? (runningTotal / grandTotal) * 100 : 0;
-    let paretoClass = 'Kelas A (Pilar)';
-    let badgeColor = 'bg-emerald-50 text-emerald-800 border-emerald-200';
-
-    if (cumulativePct > 95) {
-      paretoClass = 'Kelas C';
-      badgeColor = 'bg-slate-50 text-slate-700 border-slate-200';
-    } else if (cumulativePct > 80) {
-      paretoClass = 'Kelas B';
-      badgeColor = 'bg-blue-50 text-blue-800 border-blue-200';
+    // Compute region and sales servicing each store
+    const storeMetaMap: Record<string, { region: string; sales: Set<string> }> = {};
+    for (let i = 0; i < records.length; i++) {
+      const r = records[i];
+      if (!storeMetaMap[r.NAMA_STORE]) {
+        storeMetaMap[r.NAMA_STORE] = { region: r.REGION, sales: new Set() };
+      }
+      if (r.SALES) storeMetaMap[r.NAMA_STORE].sales.add(r.SALES);
     }
 
-    return {
-      ...store,
-      cumulativePct,
-      paretoClass,
-      badgeColor,
-      meta: storeMetaMap[store.name] || { region: 'PEKAN BARU', sales: new Set() },
-    };
-  });
+    // Calculate cumulative Pareto share
+    let runningTotal = 0;
+    const total = storeData.reduce((acc, s) => acc + s.totalValue, 0);
+
+    const enriched = storeData.map((store) => {
+      runningTotal += store.totalValue;
+      const cumulativePct = total > 0 ? (runningTotal / total) * 100 : 0;
+      let paretoClass = 'Kelas A (Pilar)';
+      let badgeColor = 'bg-emerald-50 text-emerald-800 border-emerald-200';
+
+      if (cumulativePct > 95) {
+        paretoClass = 'Kelas C';
+        badgeColor = 'bg-slate-50 text-slate-700 border-slate-200';
+      } else if (cumulativePct > 80) {
+        paretoClass = 'Kelas B';
+        badgeColor = 'bg-blue-50 text-blue-800 border-blue-200';
+      }
+
+      return {
+        ...store,
+        cumulativePct,
+        paretoClass,
+        badgeColor,
+        meta: storeMetaMap[store.name] || { region: 'PEKAN BARU', sales: new Set() },
+      };
+    });
+
+    return { storeData, enrichedStores: enriched, grandTotal: total };
+  }, [records]);
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-4 sm:p-6 mb-8">
@@ -195,4 +200,4 @@ export const StoreAnalysis: React.FC<StoreAnalysisProps> = ({ records }) => {
       </div>
     </div>
   );
-};
+});

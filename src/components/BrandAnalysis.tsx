@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Layers, Sparkles, TrendingUp, Package, BarChart2, Star } from 'lucide-react';
 import { TransactionRecord } from '../types/dashboard';
 import { aggregateByDimension, formatRupiah, formatNumber, formatPercent } from '../utils/analytics';
@@ -7,9 +7,12 @@ interface BrandAnalysisProps {
   records: TransactionRecord[];
 }
 
-export const BrandAnalysis: React.FC<BrandAnalysisProps> = ({ records }) => {
-  const brandData = aggregateByDimension(records, 'BRAND');
-  const maxBrandValue = Math.max(...brandData.map((b) => b.totalValue), 1);
+export const BrandAnalysis: React.FC<BrandAnalysisProps> = React.memo(({ records }) => {
+  const { brandData, maxBrandValue } = useMemo(() => {
+    const data = aggregateByDimension(records, 'BRAND');
+    const maxVal = Math.max(...data.map((b) => b.totalValue), 1);
+    return { brandData: data, maxBrandValue: maxVal };
+  }, [records]);
 
   // Vibrant Brand visual themes
   const brandThemes: Record<string, {
@@ -227,4 +230,4 @@ export const BrandAnalysis: React.FC<BrandAnalysisProps> = ({ records }) => {
       )}
     </div>
   );
-};
+});

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useDeferredValue } from 'react';
 import {
   Download,
   Search,
@@ -19,45 +19,54 @@ interface RawDataTableProps {
   summary?: MetricSummary;
 }
 
-export const RawDataTable: React.FC<RawDataTableProps> = ({ records, filters, summary }) => {
+export const RawDataTable: React.FC<RawDataTableProps> = React.memo(({ records, filters, summary }) => {
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [sortField, setSortField] = useState<keyof TransactionRecord>('TANGGAL');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [tableSearch, setTableSearch] = useState('');
+  const deferredSearch = useDeferredValue(tableSearch);
 
-  // Local search filter
-  const filtered = records.filter((r) => {
-    if (!tableSearch.trim()) return true;
-    const q = tableSearch.toLowerCase();
-    return (
-      r.SKU.toLowerCase().includes(q) ||
-      r.NAMA_STORE.toLowerCase().includes(q) ||
-      r.SALES.toLowerCase().includes(q) ||
-      r.SPV.toLowerCase().includes(q) ||
-      r.BRAND.toLowerCase().includes(q) ||
-      r.NO_SKU.includes(q)
+  // Local search filter (memoized + deferred)
+  const filtered = useMemo(() => {
+    const q = deferredSearch.trim().toLowerCase();
+    if (!q) return records;
+    return records.filter(
+      (r) =>
+        r.SKU.toLowerCase().includes(q) ||
+        r.NAMA_STORE.toLowerCase().includes(q) ||
+        r.SALES.toLowerCase().includes(q) ||
+        r.SPV.toLowerCase().includes(q) ||
+        r.BRAND.toLowerCase().includes(q) ||
+        r.NO_SKU.includes(q)
     );
-  });
+  }, [records, deferredSearch]);
 
-  // Sort
-  const sorted = [...filtered].sort((a, b) => {
-    let aVal = a[sortField];
-    let bVal = b[sortField];
+  // Sort (memoized)
+  const sorted = useMemo(() => {
+    const arr = [...filtered];
+    arr.sort((a, b) => {
+      const aVal = a[sortField];
+      const bVal = b[sortField];
 
-    if (typeof aVal === 'string' && typeof bVal === 'string') {
-      return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-    }
+      if (typeof aVal === 'string' && typeof bVal === 'string') {
+        return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      }
 
-    if (typeof aVal === 'number' && typeof bVal === 'number') {
-      return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
-    }
+      if (typeof aVal === 'number' && typeof bVal === 'number') {
+        return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
+      }
 
-    return 0;
-  });
+      return 0;
+    });
+    return arr;
+  }, [filtered, sortField, sortDirection]);
 
   const totalPages = Math.ceil(sorted.length / pageSize) || 1;
-  const paginatedRows = sorted.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const paginatedRows = useMemo(
+    () => sorted.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [sorted, currentPage, pageSize]
+  );
 
   const handleSort = (field: keyof TransactionRecord) => {
     if (sortField === field) {
@@ -348,4 +357,4 @@ export const RawDataTable: React.FC<RawDataTableProps> = ({ records, filters, su
       </div>
     </div>
   );
-};
+});

@@ -71,7 +71,7 @@ interface KpiCardsProps {
   scopeLabel?: string;
 }
 
-export const KpiCards: React.FC<KpiCardsProps> = ({
+export const KpiCards: React.FC<KpiCardsProps> = React.memo(({
   summary,
   growth,
   comparisonLabel,
@@ -1095,5 +1095,5 @@ export const KpiCards: React.FC<KpiCardsProps> = ({
       )}
     </div>
   );
-};
+});
 

@@ -39,6 +39,7 @@ export type TimeframeMode = 'harian' | 'mingguan' | 'bulanan' | 'tahunan';
 export type ComparisonMode = 'wow' | 'mom' | 'yoy';
 
 export type ActiveTab =
+  | 'executive_dashboard'
   | 'overview'
   | 'rangkuman_kuartal'
   | 'comparison'
@@ -1148,21 +1149,42 @@ export interface StoreBaContributionItem {
   storeName: string;
   hasBa: boolean;
   baName: string;
+  baCountInStore: number;
   baNumber?: string;
   coverArea: string;
   region: string;
   salesName: string;
   spvName: string;
   trainerName: string;
-  totalRevenue: number;         // Total Sell Out dalam IDR
-  contributionPercent: number;  // % terhadap total omset area
+  totalRevenue: number;         // Total Omset Sell In dalam IDR
+  contributionPercent: number;  // % terhadap total omset Sell In area/periode
   totalQtySold: number;
   focusProductPcs: number;
   focusProductValue: number;
   transactionCount: number;
   averageBasketSize: number;
-  performanceClass: string;     // e.g. 'Pilar Utama', 'Sangat Produktif', 'Potensial Pasang BA', 'Gerai Reguler'
+  performanceClass: string;
   recommendationNote: string;
+}
+
+export interface MonthlyStoreBaSellInRow {
+  monthName: string;
+  monthIndex: number; // 0-11
+  year: number;
+  totalStoresCount: number;
+  totalSellIn: number;
+  totalQtySellIn: number;
+  tokoBaCount: number;
+  totalBaCount: number;
+  tokoBaSellIn: number;
+  tokoBaContributionPct: number;
+  tokoBaStorePct: number;
+  tokoBaAvgSellIn: number;
+  tokoNonBaCount: number;
+  tokoNonBaSellIn: number;
+  tokoNonBaContributionPct: number;
+  tokoNonBaStorePct: number;
+  tokoNonBaAvgSellIn: number;
 }
 
 export interface StoreBaContributionSummary {
@@ -1172,8 +1194,9 @@ export interface StoreBaContributionSummary {
   totalAreaQty: number;
   totalStoresCount: number;
 
-  // Toko BA Metrics
+  // Toko BA Metrics (Sell In)
   tokoBaCount: number;
+  totalBaCount: number;
   tokoBaStorePercent: number;
   tokoBaTotalRevenue: number;
   tokoBaRevenuePercent: number;
@@ -1181,7 +1204,7 @@ export interface StoreBaContributionSummary {
   tokoBaTotalQty: number;
   tokoBaFocusPcs: number;
 
-  // Toko Non-BA Metrics
+  // Toko Non-BA Metrics (Sell In)
   tokoNonBaCount: number;
   tokoNonBaStorePercent: number;
   tokoNonBaTotalRevenue: number;
@@ -1191,18 +1214,6 @@ export interface StoreBaContributionSummary {
   tokoNonBaFocusPcs: number;
 
   // Comparative Lift Factor
-  productivityMultiplier: number; // e.g. 2.8x (Avg Omset Toko BA / Avg Omset Toko Non BA)
-  potentialBaCandidateStoresCount: number; // Non-BA stores with high volume ripe for BA
-
-  // Komposisi Total Penjualan: Semua Penjualan SPV + Penjualan KA + PENJUALAN DAZZLE ME MG
-  spvTotalRevenue?: number;
-  spvRevenuePercent?: number;
-  kaRevenue: number;
-  mgRevenue: number; // PENJUALAN DAZZLE ME MG (Market Group)
-  dazzleMeMgRevenue?: number;
-  kaRevenuePercent: number;
-  mgRevenuePercent: number;
-  dazzleMeMgRevenuePercent?: number;
-  isManualKaMg?: boolean;
-  kaMgNotes?: string;
+  productivityMultiplier: number;
+  potentialBaCandidateStoresCount: number;
 }

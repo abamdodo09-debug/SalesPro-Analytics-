@@ -276,6 +276,15 @@ export function aggregateDailyOnlinePromoRecap(
   return rowsAsc.reverse();
 }
 
+export function getCalendarDaysFromMonthPeriod(monthPeriod: string): number {
+  const clean = (monthPeriod || '').trim().toUpperCase();
+  const parts = clean.split(/\s+/);
+  const mIdx = MONTH_NAMES_ID.findIndex((m) => m === parts[0]);
+  const year = parts[1] ? Number(parts[1]) || 2026 : 2026;
+  if (mIdx < 0) return 30;
+  return new Date(year, mIdx + 1, 0).getDate();
+}
+
 export interface MonthlyOnlinePromoRecapRow {
   monthPeriod: string;
   totalActual: number;
@@ -285,6 +294,9 @@ export interface MonthlyOnlinePromoRecapRow {
   growthDelta: number | null;
   storeCount: number;
   entryCount: number;
+  promoDaysCount: number;
+  calendarDaysInMonth: number;
+  avgPerPromoDay: number;
 }
 
 export function aggregateMonthlyOnlinePromoRecap(
@@ -292,17 +304,24 @@ export function aggregateMonthlyOnlinePromoRecap(
 ): MonthlyOnlinePromoRecapRow[] {
   const buckets: Record<
     string,
-    { totalActual: number; stores: Record<string, boolean>; count: number }
+    {
+      totalActual: number;
+      stores: Record<string, boolean>;
+      dates: Record<string, boolean>;
+      count: number;
+    }
   > = {};
 
   items.forEach((item) => {
     const mp = (item.monthPeriod || '').trim().toUpperCase();
     if (!mp) return;
     if (!buckets[mp]) {
-      buckets[mp] = { totalActual: 0, stores: {}, count: 0 };
+      buckets[mp] = { totalActual: 0, stores: {}, dates: {}, count: 0 };
     }
     buckets[mp].totalActual += item.actual;
     buckets[mp].stores[item.storeName.trim().toUpperCase()] = true;
+    const d = (item.date || '').trim();
+    if (d) buckets[mp].dates[d] = true;
     buckets[mp].count += 1;
   });
 
@@ -320,6 +339,10 @@ export function aggregateMonthlyOnlinePromoRecap(
         ? ((b.totalActual - prevActual) / prevActual) * 100
         : null;
 
+    const promoDaysCount = Object.keys(b.dates).length;
+    const calendarDaysInMonth = getCalendarDaysFromMonthPeriod(mp);
+    const avgPerPromoDay = promoDaysCount > 0 ? b.totalActual / promoDaysCount : 0;
+
     return {
       monthPeriod: mp,
       totalActual: b.totalActual,
@@ -329,6 +352,155 @@ export function aggregateMonthlyOnlinePromoRecap(
       growthDelta,
       storeCount: Object.keys(b.stores).length,
       entryCount: b.count,
+      promoDaysCount,
+      calendarDaysInMonth,
+      avgPerPromoDay,
+    };
+  });
+}
+
+export interface PromoPotentialDateDetail {
+  date: string;
+  dayOfMonth: number;
+  totalActual: number;
+  sharePercent: number;
+  vsAvgPercent: number;
+  isAboveAverage: boolean;
+  isPeakDay: boolean;
+  storeNames: string[];
+  entryCount: number;
+}
+
+export interface MonthlyPromoPotentialSummary {
+  monthPeriod: string;
+  calendarDaysInMonth: number;
+  promoDaysCount: number;
+  coveragePercent: number;
+  totalActual: number;
+  avgDailyActual: number;
+  storeCount: number;
+  entryCount: number;
+  firstPromoDate: string | null;
+  lastPromoDate: string | null;
+  peakDate: PromoPotentialDateDetail | null;
+  potentialDates: PromoPotentialDateDetail[];
+  allActiveDates: PromoPotentialDateDetail[];
+  activeDayMap: Record<number, PromoPotentialDateDetail>;
+}
+
+export function analyzeMonthlyPromoPotential(
+  items: OnlinePromoReportItem[]
+): MonthlyPromoPotentialSummary[] {
+  const byMonth: Record<string, OnlinePromoReportItem[]> = {};
+
+  items.forEach((item) => {
+    const mp = (item.monthPeriod || '').trim().toUpperCase();
+    if (!mp) return;
+    if (!byMonth[mp]) byMonth[mp] = [];
+    byMonth[mp].push(item);
+  });
+
+  const sortedMonthsAsc = Object.keys(byMonth).sort(
+    (a, b) => parseMonthPeriodOrder(a) - parseMonthPeriodOrder(b)
+  );
+
+  return sortedMonthsAsc.map((mp) => {
+    const monthItems = byMonth[mp];
+    const calendarDaysInMonth = getCalendarDaysFromMonthPeriod(mp);
+    const storesSet: Record<string, boolean> = {};
+    const dateBuckets: Record<
+      string,
+      { totalActual: number; stores: Record<string, string>; entryCount: number }
+    > = {};
+
+    let totalActual = 0;
+
+    monthItems.forEach((it) => {
+      totalActual += it.actual;
+      const storeClean = it.storeName.trim();
+      if (storeClean) storesSet[storeClean.toUpperCase()] = true;
+
+      const d = (it.date || '').trim();
+      if (!d) return;
+      if (!dateBuckets[d]) {
+        dateBuckets[d] = { totalActual: 0, stores: {}, entryCount: 0 };
+      }
+      dateBuckets[d].totalActual += it.actual;
+      if (storeClean) dateBuckets[d].stores[storeClean.toUpperCase()] = storeClean;
+      dateBuckets[d].entryCount += 1;
+    });
+
+    const sortedDatesAsc = Object.keys(dateBuckets).sort((a, b) => a.localeCompare(b));
+    const promoDaysCount = sortedDatesAsc.length;
+    const avgDailyActual = promoDaysCount > 0 ? totalActual / promoDaysCount : 0;
+    const coveragePercent =
+      calendarDaysInMonth > 0 ? (promoDaysCount / calendarDaysInMonth) * 100 : 0;
+
+    let maxDayTotal = -Infinity;
+    sortedDatesAsc.forEach((d) => {
+      if (dateBuckets[d].totalActual > maxDayTotal) {
+        maxDayTotal = dateBuckets[d].totalActual;
+      }
+    });
+
+    let peakAssigned = false;
+    const activeDayMap: Record<number, PromoPotentialDateDetail> = {};
+
+    const allActiveDates: PromoPotentialDateDetail[] = sortedDatesAsc.map((d) => {
+      const bucket = dateBuckets[d];
+      const parts = d.split('-');
+      const dayOfMonth = parts.length === 3 ? Number(parts[2]) || 0 : 0;
+      const sharePercent = totalActual > 0 ? (bucket.totalActual / totalActual) * 100 : 0;
+      const vsAvgPercent =
+        avgDailyActual > 0 ? ((bucket.totalActual - avgDailyActual) / avgDailyActual) * 100 : 0;
+      const isAboveAverage = bucket.totalActual >= avgDailyActual && bucket.totalActual > 0;
+      const isPeakDay = !peakAssigned && bucket.totalActual === maxDayTotal && maxDayTotal > 0;
+      if (isPeakDay) peakAssigned = true;
+
+      const detail: PromoPotentialDateDetail = {
+        date: d,
+        dayOfMonth,
+        totalActual: bucket.totalActual,
+        sharePercent,
+        vsAvgPercent,
+        isAboveAverage,
+        isPeakDay,
+        storeNames: Object.values(bucket.stores).sort((a, b) => a.localeCompare(b, 'id-ID')),
+        entryCount: bucket.entryCount,
+      };
+
+      if (dayOfMonth >= 1 && dayOfMonth <= 31) {
+        activeDayMap[dayOfMonth] = detail;
+      }
+
+      return detail;
+    });
+
+    const potentialDates = [...allActiveDates]
+      .filter((d) => d.isAboveAverage)
+      .sort((a, b) => b.totalActual - a.totalActual || a.date.localeCompare(b.date));
+
+    const peakDate =
+      allActiveDates.find((d) => d.isPeakDay) ||
+      potentialDates[0] ||
+      allActiveDates[0] ||
+      null;
+
+    return {
+      monthPeriod: mp,
+      calendarDaysInMonth,
+      promoDaysCount,
+      coveragePercent,
+      totalActual,
+      avgDailyActual,
+      storeCount: Object.keys(storesSet).length,
+      entryCount: monthItems.length,
+      firstPromoDate: sortedDatesAsc[0] || null,
+      lastPromoDate: sortedDatesAsc[sortedDatesAsc.length - 1] || null,
+      peakDate,
+      potentialDates,
+      allActiveDates,
+      activeDayMap,
     };
   });
 }

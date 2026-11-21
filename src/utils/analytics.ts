@@ -456,62 +456,71 @@ export function formatPercent(percent: number, showSign: boolean = true): string
   return `${sign}${percent.toFixed(1).replace('.', ',')}%`;
 }
 
-// Filter engine: cascades cross-filters
+// Filter engine: cascades cross-filters (pre-normalized & O(1) fast-path when unfiltered)
 export function filterRecords(
   records: TransactionRecord[],
   filters: DashboardFilters
 ): TransactionRecord[] {
-  return records.filter((r) => {
-    // Bulan
-    if (filters.BULAN !== 'ALL' && (r.BULAN || '').trim().toUpperCase() !== filters.BULAN.trim().toUpperCase()) return false;
+  const fBulan = filters.BULAN !== 'ALL' ? filters.BULAN.trim().toUpperCase() : '';
+  const fTahun = filters.TAHUN !== 'ALL' ? String(filters.TAHUN).trim() : '';
+  const fSales = filters.SALES !== 'ALL' ? filters.SALES.trim().toUpperCase() : '';
+  const fTrainer =
+    filters.TRAINER && filters.TRAINER !== 'ALL' ? filters.TRAINER.trim().toUpperCase() : '';
+  const fSpv = filters.SPV !== 'ALL' ? filters.SPV.trim().toUpperCase() : '';
+  const fBrand = filters.BRAND !== 'ALL' ? filters.BRAND.trim().toUpperCase() : '';
+  const fKategori =
+    filters.KATEGORI && filters.KATEGORI !== 'ALL' ? filters.KATEGORI.trim().toUpperCase() : '';
+  const fStatus =
+    filters.STATUS_PRODUK && filters.STATUS_PRODUK !== 'ALL' ? filters.STATUS_PRODUK : '';
+  const fStore = filters.NAMA_STORE !== 'ALL' ? filters.NAMA_STORE.trim().toUpperCase() : '';
+  const fRegion = filters.REGION !== 'ALL' ? filters.REGION.trim().toUpperCase() : '';
+  const fKet = filters.KET && filters.KET !== 'ALL' ? filters.KET.trim().toUpperCase() : '';
+  const fSku = filters.SKU !== 'ALL' ? filters.SKU.toLowerCase() : '';
+  const fSkuRaw = filters.SKU !== 'ALL' ? filters.SKU : '';
+  const q = filters.searchQuery ? filters.searchQuery.trim().toLowerCase() : '';
 
-    // Tahun
-    if (filters.TAHUN !== 'ALL' && String(r.TAHUN || '').trim() !== String(filters.TAHUN).trim()) return false;
+  if (
+    !fBulan &&
+    !fTahun &&
+    !fSales &&
+    !fTrainer &&
+    !fSpv &&
+    !fBrand &&
+    !fKategori &&
+    !fStatus &&
+    !fStore &&
+    !fRegion &&
+    !fKet &&
+    !fSku &&
+    !q
+  ) {
+    return records;
+  }
 
-    // Sales
-    if (filters.SALES !== 'ALL' && (r.SALES || '').trim().toUpperCase() !== filters.SALES.trim().toUpperCase()) return false;
+  const out: TransactionRecord[] = [];
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i];
+    if (fBulan && (r.BULAN || '').trim().toUpperCase() !== fBulan) continue;
+    if (fTahun && String(r.TAHUN || '').trim() !== fTahun) continue;
+    if (fSales && (r.SALES || '').trim().toUpperCase() !== fSales) continue;
+    if (fTrainer && getTrainerForRecord(r).trim().toUpperCase() !== fTrainer) continue;
+    if (fSpv && (r.SPV || '').trim().toUpperCase() !== fSpv) continue;
+    if (fBrand && (r.BRAND || '').trim().toUpperCase() !== fBrand) continue;
+    if (fKategori && resolveCategory(r).trim().toUpperCase() !== fKategori) continue;
+    if (fStatus && resolveProductStatus(r) !== fStatus) continue;
+    if (fStore && (r.NAMA_STORE || '').trim().toUpperCase() !== fStore) continue;
+    if (fRegion && (r.REGION || '').trim().toUpperCase() !== fRegion) continue;
+    if (fKet && (r.KET || '').trim().toUpperCase() !== fKet) continue;
 
-    // Trainer (ARA / RATIH)
-    if (filters.TRAINER && filters.TRAINER !== 'ALL') {
-      if (getTrainerForRecord(r).trim().toUpperCase() !== filters.TRAINER.trim().toUpperCase()) return false;
-    }
-
-    // SPV
-    if (filters.SPV !== 'ALL' && (r.SPV || '').trim().toUpperCase() !== filters.SPV.trim().toUpperCase()) return false;
-
-    // Brand
-    if (filters.BRAND !== 'ALL' && (r.BRAND || '').trim().toUpperCase() !== filters.BRAND.trim().toUpperCase()) return false;
-
-    // Kategori (selalu konsisten dengan resolveCategory)
-    if (filters.KATEGORI && filters.KATEGORI !== 'ALL' && resolveCategory(r).trim().toUpperCase() !== filters.KATEGORI.trim().toUpperCase()) return false;
-
-    // Status Produk (Lifecycle Status)
-    if (filters.STATUS_PRODUK && filters.STATUS_PRODUK !== 'ALL') {
-      const status = resolveProductStatus(r);
-      if (status !== filters.STATUS_PRODUK) return false;
-    }
-
-    // Store
-    if (filters.NAMA_STORE !== 'ALL' && (r.NAMA_STORE || '').trim().toUpperCase() !== filters.NAMA_STORE.trim().toUpperCase()) return false;
-
-    // Region
-    if (filters.REGION !== 'ALL' && (r.REGION || '').trim().toUpperCase() !== filters.REGION.trim().toUpperCase()) return false;
-
-    // Ket
-    if (filters.KET && filters.KET !== 'ALL' && (r.KET || '').trim().toUpperCase() !== filters.KET.trim().toUpperCase()) return false;
-
-    // SKU
-    if (filters.SKU !== 'ALL') {
+    if (fSku) {
       const matchSku =
-        (r.SKU || '').toLowerCase().includes(filters.SKU.toLowerCase()) ||
-        (r.NO_SKU || '').includes(filters.SKU) ||
-        (r.SPU || '').toLowerCase().includes(filters.SKU.toLowerCase());
-      if (!matchSku) return false;
+        (r.SKU || '').toLowerCase().includes(fSku) ||
+        (r.NO_SKU || '').includes(fSkuRaw) ||
+        (r.SPU || '').toLowerCase().includes(fSku);
+      if (!matchSku) continue;
     }
 
-    // Free text search
-    if (filters.searchQuery && filters.searchQuery.trim()) {
-      const q = filters.searchQuery.trim().toLowerCase();
+    if (q) {
       const trainerName = getTrainerForRecord(r).toLowerCase();
       const resolvedCat = resolveCategory(r).toLowerCase();
       const match =
@@ -531,11 +540,12 @@ export function filterRecords(
         (r.BA && r.BA.toLowerCase().includes(q)) ||
         (r.COVER_AREA && r.COVER_AREA.toLowerCase().includes(q)) ||
         (r.KET && r.KET.toLowerCase().includes(q));
-      if (!match) return false;
+      if (!match) continue;
     }
 
-    return true;
-  });
+    out.push(r);
+  }
+  return out;
 }
 
 // Get dynamic available filter options based on other active selections (cascading)
@@ -543,59 +553,156 @@ export function getCascadingOptions(
   allRecords: TransactionRecord[],
   currentFilters: DashboardFilters
 ) {
-  // Compute option sets with partial filters applied
-  const filterIgnoring = (ignoreKey: keyof DashboardFilters) => {
-    return allRecords.filter((r) => {
-      if (ignoreKey !== 'BULAN' && currentFilters.BULAN !== 'ALL' && (r.BULAN || '').trim().toUpperCase() !== currentFilters.BULAN.trim().toUpperCase()) return false;
-      if (ignoreKey !== 'TAHUN' && currentFilters.TAHUN !== 'ALL' && String(r.TAHUN || '').trim() !== String(currentFilters.TAHUN).trim()) return false;
-      if (ignoreKey !== 'SALES' && currentFilters.SALES !== 'ALL' && (r.SALES || '').trim().toUpperCase() !== currentFilters.SALES.trim().toUpperCase()) return false;
-      if (ignoreKey !== 'TRAINER' && currentFilters.TRAINER && currentFilters.TRAINER !== 'ALL') {
-        if (getTrainerForRecord(r).trim().toUpperCase() !== currentFilters.TRAINER.trim().toUpperCase()) return false;
-      }
-      if (ignoreKey !== 'SPV' && currentFilters.SPV !== 'ALL' && (r.SPV || '').trim().toUpperCase() !== currentFilters.SPV.trim().toUpperCase()) return false;
-      if (ignoreKey !== 'BRAND' && currentFilters.BRAND !== 'ALL' && (r.BRAND || '').trim().toUpperCase() !== currentFilters.BRAND.trim().toUpperCase()) return false;
-      if (ignoreKey !== 'KATEGORI' && currentFilters.KATEGORI && currentFilters.KATEGORI !== 'ALL' && resolveCategory(r).trim().toUpperCase() !== currentFilters.KATEGORI.trim().toUpperCase()) return false;
-      if (ignoreKey !== 'STATUS_PRODUK' && currentFilters.STATUS_PRODUK && currentFilters.STATUS_PRODUK !== 'ALL') {
-        const st = resolveProductStatus(r);
-        if (st !== currentFilters.STATUS_PRODUK) return false;
-      }
-      if (ignoreKey !== 'NAMA_STORE' && currentFilters.NAMA_STORE !== 'ALL' && (r.NAMA_STORE || '').trim().toUpperCase() !== currentFilters.NAMA_STORE.trim().toUpperCase()) return false;
-      if (ignoreKey !== 'REGION' && currentFilters.REGION !== 'ALL' && (r.REGION || '').trim().toUpperCase() !== currentFilters.REGION.trim().toUpperCase()) return false;
-      if (ignoreKey !== 'KET' && currentFilters.KET !== 'ALL' && (r.KET || '').trim().toUpperCase() !== currentFilters.KET.trim().toUpperCase()) return false;
-      return true;
-    });
-  };
+  const fBulan = currentFilters.BULAN !== 'ALL' ? currentFilters.BULAN.trim().toUpperCase() : '';
+  const fTahun = currentFilters.TAHUN !== 'ALL' ? String(currentFilters.TAHUN).trim() : '';
+  const fSales = currentFilters.SALES !== 'ALL' ? currentFilters.SALES.trim().toUpperCase() : '';
+  const fTrainer =
+    currentFilters.TRAINER && currentFilters.TRAINER !== 'ALL'
+      ? currentFilters.TRAINER.trim().toUpperCase()
+      : '';
+  const fSpv = currentFilters.SPV !== 'ALL' ? currentFilters.SPV.trim().toUpperCase() : '';
+  const fBrand = currentFilters.BRAND !== 'ALL' ? currentFilters.BRAND.trim().toUpperCase() : '';
+  const fKategori =
+    currentFilters.KATEGORI && currentFilters.KATEGORI !== 'ALL'
+      ? currentFilters.KATEGORI.trim().toUpperCase()
+      : '';
+  const fStatus =
+    currentFilters.STATUS_PRODUK && currentFilters.STATUS_PRODUK !== 'ALL'
+      ? currentFilters.STATUS_PRODUK
+      : '';
+  const fStore =
+    currentFilters.NAMA_STORE !== 'ALL' ? currentFilters.NAMA_STORE.trim().toUpperCase() : '';
+  const fRegion = currentFilters.REGION !== 'ALL' ? currentFilters.REGION.trim().toUpperCase() : '';
+  const fKet = currentFilters.KET !== 'ALL' ? currentFilters.KET.trim().toUpperCase() : '';
 
-  const getUnique = (arr: TransactionRecord[], key: keyof TransactionRecord) => {
-    return Array.from(new Set(arr.map((item) => String(item[key] || '').trim()).filter(Boolean))).sort();
-  };
+  const monthsSet = new Set<string>();
+  const yearsSet = new Set<string>();
+  const salesSet = new Set<string>();
+  const trainersSet = new Set<string>(GAP_TRAINER_LIST);
+  const spvSet = new Set<string>();
+  const brandsSet = new Set<string>();
+  const categoriesSet = new Set<string>();
+  const statusSet = new Set<string>();
+  const storesSet = new Set<string>();
+  const regionsSet = new Set<string>();
+  const ketSet = new Set<string>();
 
-  // Sort months by calendar order
-  const availableMonths = getUnique(filterIgnoring('BULAN'), 'BULAN').sort((a, b) => {
-    return (MONTH_ORDER[a.toUpperCase()] || 99) - (MONTH_ORDER[b.toUpperCase()] || 99);
-  });
+  for (let i = 0; i < allRecords.length; i++) {
+    const r = allRecords[i];
 
-  const availableYears = getUnique(filterIgnoring('TAHUN'), 'TAHUN').sort((a, b) => Number(b) - Number(a));
-  const availableSales = getUnique(filterIgnoring('SALES'), 'SALES');
-  const availableTrainers = Array.from(
-    new Set([
-      ...GAP_TRAINER_LIST,
-      ...filterIgnoring('TRAINER').map((r) => getTrainerForRecord(r)).filter(Boolean),
-    ])
-  ).sort();
-  const availableSpv = getUnique(filterIgnoring('SPV'), 'SPV');
-  const availableBrands = getUnique(filterIgnoring('BRAND'), 'BRAND');
-  const availableCategories = Array.from(
-    new Set(filterIgnoring('KATEGORI').map((r) => resolveCategory(r)).filter(Boolean))
-  ).sort();
-  const availableStores = getUnique(filterIgnoring('NAMA_STORE'), 'NAMA_STORE');
-  const availableRegions = getUnique(filterIgnoring('REGION'), 'REGION');
-  const availableKet = getUnique(filterIgnoring('KET'), 'KET');
+    const rawBulan = String(r.BULAN || '').trim();
+    const rawTahun = String(r.TAHUN || '').trim();
+    const rawSales = String(r.SALES || '').trim();
+    const rawSpv = String(r.SPV || '').trim();
+    const rawBrand = String(r.BRAND || '').trim();
+    const rawStore = String(r.NAMA_STORE || '').trim();
+    const rawRegion = String(r.REGION || '').trim();
+    const rawKet = String(r.KET || '').trim();
 
-  // Available Status Produk
-  const availableStatusProduk = Array.from(
-    new Set(filterIgnoring('STATUS_PRODUK').map((r) => resolveProductStatus(r)).filter(Boolean))
-  ).sort((a, b) => {
+    let failCount = 0;
+    let failedSlot = -1;
+
+    if (fBulan && rawBulan.toUpperCase() !== fBulan) {
+      failCount++;
+      failedSlot = 0;
+    }
+    if (fTahun && rawTahun !== fTahun) {
+      failCount++;
+      if (failCount > 1) continue;
+      failedSlot = 1;
+    }
+    if (fSales && rawSales.toUpperCase() !== fSales) {
+      failCount++;
+      if (failCount > 1) continue;
+      failedSlot = 2;
+    }
+    if (fSpv && rawSpv.toUpperCase() !== fSpv) {
+      failCount++;
+      if (failCount > 1) continue;
+      failedSlot = 4;
+    }
+    if (fBrand && rawBrand.toUpperCase() !== fBrand) {
+      failCount++;
+      if (failCount > 1) continue;
+      failedSlot = 5;
+    }
+    if (fStore && rawStore.toUpperCase() !== fStore) {
+      failCount++;
+      if (failCount > 1) continue;
+      failedSlot = 8;
+    }
+    if (fRegion && rawRegion.toUpperCase() !== fRegion) {
+      failCount++;
+      if (failCount > 1) continue;
+      failedSlot = 9;
+    }
+    if (fKet && rawKet.toUpperCase() !== fKet) {
+      failCount++;
+      if (failCount > 1) continue;
+      failedSlot = 10;
+    }
+
+    const trainerVal = getTrainerForRecord(r);
+    if (fTrainer && trainerVal.trim().toUpperCase() !== fTrainer) {
+      failCount++;
+      if (failCount > 1) continue;
+      failedSlot = 3;
+    }
+
+    const catVal = resolveCategory(r);
+    if (fKategori && catVal.trim().toUpperCase() !== fKategori) {
+      failCount++;
+      if (failCount > 1) continue;
+      failedSlot = 6;
+    }
+
+    const statusVal = resolveProductStatus(r);
+    if (fStatus && statusVal !== fStatus) {
+      failCount++;
+      if (failCount > 1) continue;
+      failedSlot = 7;
+    }
+
+    if (failCount === 0) {
+      if (rawBulan) monthsSet.add(rawBulan);
+      if (rawTahun) yearsSet.add(rawTahun);
+      if (rawSales) salesSet.add(rawSales);
+      if (trainerVal) trainersSet.add(trainerVal);
+      if (rawSpv) spvSet.add(rawSpv);
+      if (rawBrand) brandsSet.add(rawBrand);
+      if (catVal) categoriesSet.add(catVal);
+      if (statusVal) statusSet.add(statusVal);
+      if (rawStore) storesSet.add(rawStore);
+      if (rawRegion) regionsSet.add(rawRegion);
+      if (rawKet) ketSet.add(rawKet);
+    } else if (failCount === 1) {
+      if (failedSlot === 0 && rawBulan) monthsSet.add(rawBulan);
+      else if (failedSlot === 1 && rawTahun) yearsSet.add(rawTahun);
+      else if (failedSlot === 2 && rawSales) salesSet.add(rawSales);
+      else if (failedSlot === 3 && trainerVal) trainersSet.add(trainerVal);
+      else if (failedSlot === 4 && rawSpv) spvSet.add(rawSpv);
+      else if (failedSlot === 5 && rawBrand) brandsSet.add(rawBrand);
+      else if (failedSlot === 6 && catVal) categoriesSet.add(catVal);
+      else if (failedSlot === 7 && statusVal) statusSet.add(statusVal);
+      else if (failedSlot === 8 && rawStore) storesSet.add(rawStore);
+      else if (failedSlot === 9 && rawRegion) regionsSet.add(rawRegion);
+      else if (failedSlot === 10 && rawKet) ketSet.add(rawKet);
+    }
+  }
+
+  const availableMonths = Array.from(monthsSet).sort(
+    (a, b) => (MONTH_ORDER[a.toUpperCase()] || 99) - (MONTH_ORDER[b.toUpperCase()] || 99)
+  );
+  const availableYears = Array.from(yearsSet).sort((a, b) => Number(b) - Number(a));
+  const availableSales = Array.from(salesSet).sort();
+  const availableTrainers = Array.from(trainersSet).sort();
+  const availableSpv = Array.from(spvSet).sort();
+  const availableBrands = Array.from(brandsSet).sort();
+  const availableCategories = Array.from(categoriesSet).sort();
+  const availableStores = Array.from(storesSet).sort();
+  const availableRegions = Array.from(regionsSet).sort();
+  const availableKet = Array.from(ketSet).sort();
+  const availableStatusProduk = Array.from(statusSet).sort((a, b) => {
     const priorityA = PRODUCT_STATUS_CONFIG[a]?.priority || 99;
     const priorityB = PRODUCT_STATUS_CONFIG[b]?.priority || 99;
     return priorityA - priorityB;
@@ -1040,6 +1147,17 @@ export function parseTransactionDate(r: Partial<TransactionRecord>): Date | null
 
   const parsed = new Date(raw);
   return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+export function getRecordDayOfMonth(r: Partial<TransactionRecord>): number | null {
+  const parsed = parseTransactionDate(r);
+  if (parsed) return parsed.getDate();
+  const dayOnlyMatch = String(r.TANGGAL || '').trim().match(/^(\d{1,2})$/);
+  if (dayOnlyMatch) {
+    const d = Number(dayOnlyMatch[1]);
+    if (d >= 1 && d <= 31) return d;
+  }
+  return null;
 }
 
 function getWeekNumberFromDate(d: Date): number {
