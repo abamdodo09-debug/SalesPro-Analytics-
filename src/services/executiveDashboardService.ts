@@ -21,7 +21,7 @@ import {
 import {
   calculateSummary,
   aggregateByDimension,
-  aggregateCategoryDetails,
+  detectCategoryFromSku,
   calculateComparisonGrowth,
   diagnoseSalesGap,
   calculateProductStatusAnalysis,
@@ -261,9 +261,21 @@ export interface ExecutiveCoreSnapshot {
   alerts: ExecutiveAlertItem[];
 }
 
+export interface SlowMovingSkuItem {
+  name: string;
+  brand: string;
+  category: string;
+  totalValue: number;
+  totalQty: number;
+  transactionCount: number;
+  storeCount: number;
+  contributionPercent: number;
+}
+
 export interface ProductMixLensData {
   topCategories: CategoryDetailData[];
   topSkus: DimensionPerformance[];
+  slowMovingSkus: SlowMovingSkuItem[];
 }
 
 export interface MarketShareLensData {
@@ -291,6 +303,7 @@ export interface TargetsAlertsLensData {
 
 export interface SalesProExecutiveSnapshot extends ExecutiveCoreSnapshot {
   topSkus: DimensionPerformance[];
+  slowMovingSkus: SlowMovingSkuItem[];
   topCategories: CategoryDetailData[];
   productStatusSummary: ProductStatusSummary;
   storeBaMonthlyRows: MonthlyStoreBaSellInRow[];
@@ -1081,14 +1094,307 @@ export function buildMarketShareLensData(): MarketShareLensData {
   };
 }
 
+const DASHBOARD_TOP_CATEGORIES = [
+  'MAKEUP',
+  'PERSONAL CARE',
+  'SKIN CARE',
+  'TOOLS',
+  'HUED',
+] as const;
+
+type DashboardTopCategory = (typeof DASHBOARD_TOP_CATEGORIES)[number];
+
+function mapRecordToDashboardTopCategory(r: TransactionRecord): DashboardTopCategory | null {
+  const rawCat = String(r.KATEGORI || '').trim().toUpperCase();
+  const rawBrand = String(r.BRAND || '').trim().toUpperCase();
+
+  if (rawCat === 'HUED') return 'HUED';
+  if (rawCat === 'MAKEUP' || rawCat === 'MAKE UP') return 'MAKEUP';
+  if (rawCat === 'PERSONAL CARE' || rawCat === 'PERSONALCARE') return 'PERSONAL CARE';
+  if (rawCat === 'SKIN CARE' || rawCat === 'SKINCARE') return 'SKIN CARE';
+  if (rawCat === 'TOOLS' || rawCat === 'TOOL' || rawCat === 'BEAUTY TOOLS') return 'TOOLS';
+
+  // Map internal auto-detected sub-categories (e.g., demo/offline records) to the 5 main categories
+  if (
+    rawCat === 'LIP MAKEUP' ||
+    rawCat === 'FACE MAKEUP' ||
+    rawCat === 'COMPLEXION & POWDER' ||
+    rawCat === 'EYE MAKEUP'
+  ) {
+    return rawBrand === 'HUED' ? 'HUED' : 'MAKEUP';
+  }
+  if (rawCat === 'BODY CARE' || rawCat === 'HAIR CARE') {
+    return 'PERSONAL CARE';
+  }
+  if (rawCat === 'SUNSCREEN') {
+    return 'SKIN CARE';
+  }
+  if (rawCat === 'EYE & LASH TOOLS') {
+    return 'TOOLS';
+  }
+
+  // If explicit category column from Google Sheet is empty, infer via brand/SKU
+  if (!rawCat) {
+    if (rawBrand === 'HUED') return 'HUED';
+    const inferred = detectCategoryFromSku(r.SKU, r.BRAND).toUpperCase();
+    if (inferred === 'BODY CARE' || inferred === 'HAIR CARE') return 'PERSONAL CARE';
+    if (inferred === 'SKINCARE' || inferred === 'SUNSCREEN') return 'SKIN CARE';
+    if (inferred === 'EYE & LASH TOOLS') return 'TOOLS';
+    return 'MAKEUP';
+  }
+
+  // Any other explicit category (e.g. GIFT, TESTER, POSM, LAINNYA, etc.) is excluded
+  return null;
+}
+
 export function buildProductMixLensData(
   filteredRecords: TransactionRecord[],
   dayRange?: ExecutiveDayRange
 ): ProductMixLensData {
   const effective = filterRecordsByDayRange(filteredRecords, dayRange);
+
+  // 1. Strictly aggregate the 5 requested Top Kategori Produk
+  const catBuckets: Record<
+    DashboardTopCategory,
+    {
+      totalValue: number;
+      totalQty: number;
+      txCount: number;
+      returnValue: number;
+      focusValue: number;
+      regularValue: number;
+      brands: Record<string, { value: number; qty: number }>;
+      skus: Record<string, { sku: string; brand: string; value: number; qty: number }>;
+      stores: Set<string>;
+    }
+  > = {
+    MAKEUP: {
+      totalValue: 0,
+      totalQty: 0,
+      txCount: 0,
+      returnValue: 0,
+      focusValue: 0,
+      regularValue: 0,
+      brands: {},
+      skus: {},
+      stores: new Set(),
+    },
+    'PERSONAL CARE': {
+      totalValue: 0,
+      totalQty: 0,
+      txCount: 0,
+      returnValue: 0,
+      focusValue: 0,
+      regularValue: 0,
+      brands: {},
+      skus: {},
+      stores: new Set(),
+    },
+    'SKIN CARE': {
+      totalValue: 0,
+      totalQty: 0,
+      txCount: 0,
+      returnValue: 0,
+      focusValue: 0,
+      regularValue: 0,
+      brands: {},
+      skus: {},
+      stores: new Set(),
+    },
+    TOOLS: {
+      totalValue: 0,
+      totalQty: 0,
+      txCount: 0,
+      returnValue: 0,
+      focusValue: 0,
+      regularValue: 0,
+      brands: {},
+      skus: {},
+      stores: new Set(),
+    },
+    HUED: {
+      totalValue: 0,
+      totalQty: 0,
+      txCount: 0,
+      returnValue: 0,
+      focusValue: 0,
+      regularValue: 0,
+      brands: {},
+      skus: {},
+      stores: new Set(),
+    },
+  };
+
+  let fiveCatTotalValue = 0;
+
+  // 2. Simultaneously aggregate per-SKU movement for Top 10 & Slow Moving 10
+  const skuMap: Record<
+    string,
+    {
+      totalValue: number;
+      totalQty: number;
+      txCount: number;
+      brands: Record<string, number>;
+      categories: Record<string, number>;
+      stores: Set<string>;
+    }
+  > = {};
+  let totalSkuPositiveValue = 0;
+
+  for (let i = 0; i < effective.length; i++) {
+    const r = effective[i];
+    const val = r.VALUE || 0;
+    const qty = r.QTY || 0;
+    const mappedCat = mapRecordToDashboardTopCategory(r);
+
+    if (mappedCat) {
+      const bucket = catBuckets[mappedCat];
+      bucket.totalValue += val;
+      bucket.totalQty += qty;
+      bucket.txCount += 1;
+      fiveCatTotalValue += val;
+      if (r.NAMA_STORE) bucket.stores.add(r.NAMA_STORE);
+      if (val < 0 || r.KET === 'RETURN') {
+        bucket.returnValue += Math.abs(val);
+      }
+      if (isFocusProduct(r.PRODUK_FOCUS || r)) {
+        bucket.focusValue += val;
+      } else {
+        bucket.regularValue += val;
+      }
+      const brandKey = r.BRAND || 'LAINNYA';
+      if (!bucket.brands[brandKey]) {
+        bucket.brands[brandKey] = { value: 0, qty: 0 };
+      }
+      bucket.brands[brandKey].value += val;
+      bucket.brands[brandKey].qty += qty;
+
+      const catSkuKey = r.SKU || r.SPU || r.NO_SKU;
+      if (catSkuKey) {
+        if (!bucket.skus[catSkuKey]) {
+          bucket.skus[catSkuKey] = { sku: catSkuKey, brand: brandKey, value: 0, qty: 0 };
+        }
+        bucket.skus[catSkuKey].value += val;
+        bucket.skus[catSkuKey].qty += qty;
+      }
+    }
+
+    const skuName = String(r.SKU || '').trim();
+    if (skuName && skuName.toUpperCase() !== 'N/A') {
+      if (!skuMap[skuName]) {
+        skuMap[skuName] = {
+          totalValue: 0,
+          totalQty: 0,
+          txCount: 0,
+          brands: {},
+          categories: {},
+          stores: new Set(),
+        };
+      }
+      const sk = skuMap[skuName];
+      sk.totalValue += val;
+      sk.totalQty += qty;
+      sk.txCount += 1;
+      if (r.NAMA_STORE) sk.stores.add(r.NAMA_STORE);
+      const bKey = String(r.BRAND || '-').trim();
+      sk.brands[bKey] = (sk.brands[bKey] || 0) + Math.max(0, val);
+      const cKey = mappedCat || String(r.KATEGORI || '-').trim().toUpperCase();
+      sk.categories[cKey] = (sk.categories[cKey] || 0) + Math.max(0, val);
+      if (val > 0) totalSkuPositiveValue += val;
+    }
+  }
+
+  const topCategories: CategoryDetailData[] = DASHBOARD_TOP_CATEGORIES.map((cat) => {
+    const item = catBuckets[cat];
+    const contributionPercent =
+      fiveCatTotalValue > 0 ? (item.totalValue / fiveCatTotalValue) * 100 : 0;
+    const avgPrice = item.totalQty > 0 ? item.totalValue / item.totalQty : 0;
+    const grossVal = item.totalValue + item.returnValue;
+    const returnRate = grossVal > 0 ? (item.returnValue / grossVal) * 100 : 0;
+    const focusPercent = item.totalValue > 0 ? (item.focusValue / item.totalValue) * 100 : 0;
+
+    const brandBreakdown = Object.entries(item.brands)
+      .map(([brand, bData]) => ({
+        brand,
+        value: bData.value,
+        qty: bData.qty,
+        percent: item.totalValue > 0 ? (bData.value / item.totalValue) * 100 : 0,
+      }))
+      .sort((a, b) => b.value - a.value);
+
+    const topCatSkus = Object.values(item.skus)
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 5);
+
+    return {
+      category: cat,
+      totalValue: item.totalValue,
+      totalQty: item.totalQty,
+      txCount: item.txCount,
+      contributionPercent,
+      avgPrice,
+      brandBreakdown,
+      focusValue: item.focusValue,
+      focusPercent,
+      regularValue: item.regularValue,
+      topSkus: topCatSkus,
+      storeCount: item.stores.size,
+      returnValue: item.returnValue,
+      returnRate,
+    };
+  }).sort((a, b) => b.totalValue - a.totalValue);
+
+  const topSkus = aggregateByDimension(effective, 'SKU').slice(0, 15);
+  const top10Set = new Set(topSkus.slice(0, 10).map((s) => s.name.trim()));
+
+  const nonSellablePattern = /\b(GIFT|FREEBIE|FREE\b|TESTER|SAMPLE|POSM|DISPLAY|GWP|PAPER\s*BAG|VOUCHER|POUCH)\b/i;
+
+  const allSlowCandidates: SlowMovingSkuItem[] = Object.entries(skuMap)
+    .filter(([, data]) => data.totalQty > 0 && data.totalValue > 0)
+    .map(([name, data]) => {
+      const primaryBrand =
+        Object.entries(data.brands).sort((a, b) => b[1] - a[1])[0]?.[0] || '-';
+      const primaryCat =
+        Object.entries(data.categories).sort((a, b) => b[1] - a[1])[0]?.[0] || '-';
+      const contributionPercent =
+        totalSkuPositiveValue > 0 ? (data.totalValue / totalSkuPositiveValue) * 100 : 0;
+      return {
+        name,
+        brand: primaryBrand,
+        category: primaryCat,
+        totalValue: data.totalValue,
+        totalQty: data.totalQty,
+        transactionCount: data.txCount,
+        storeCount: data.stores.size,
+        contributionPercent,
+      };
+    });
+
+  const cleanCandidates = allSlowCandidates.filter(
+    (s) => !nonSellablePattern.test(s.name) && !top10Set.has(s.name)
+  );
+  const pool =
+    cleanCandidates.length >= 10
+      ? cleanCandidates
+      : allSlowCandidates.filter((s) => !top10Set.has(s.name)).length >= 10
+      ? allSlowCandidates.filter((s) => !top10Set.has(s.name))
+      : allSlowCandidates;
+
+  const slowMovingSkus = [...pool]
+    .sort((a, b) => {
+      if (a.totalQty !== b.totalQty) return a.totalQty - b.totalQty;
+      if (a.totalValue !== b.totalValue) return a.totalValue - b.totalValue;
+      if (a.transactionCount !== b.transactionCount) {
+        return a.transactionCount - b.transactionCount;
+      }
+      return a.storeCount - b.storeCount;
+    })
+    .slice(0, 10);
+
   return {
-    topCategories: aggregateCategoryDetails(effective),
-    topSkus: aggregateByDimension(effective, 'SKU').slice(0, 15),
+    topCategories,
+    topSkus,
+    slowMovingSkus,
   };
 }
 
@@ -1345,6 +1651,7 @@ export function buildSalesProExecutiveSnapshot(
   return {
     ...core,
     topSkus: mix.topSkus,
+    slowMovingSkus: mix.slowMovingSkus,
     topCategories: mix.topCategories,
     productStatusSummary: targetsGap.productStatusSummary,
     storeBaMonthlyRows: channelRows,

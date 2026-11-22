@@ -8,6 +8,11 @@ import {
   SalesQuarterlySummaryItem,
   BaQuarterlySummaryItem,
   TrainerQuarterlySummaryItem,
+  AreaTargetItem,
+  SalesTargetItem,
+  SpvTargetItem,
+  KpiSalesScorecardItem,
+  KpiTrainerScorecardItem,
 } from '../types/dashboard';
 import {
   buildExecutiveCoreSnapshot,
@@ -24,9 +29,23 @@ import {
 } from '../services/executiveDashboardService';
 import { calculateQuarterlySummary } from '../services/quarterlySummaryService';
 import { SALES_MASTER_6_CONFIG } from '../services/kpiSalesData';
+import { loadKpiSalesData, calculateKpiPoints } from '../services/agingAndKpiService';
+import { loadKpiTrainerData, calculateTrainerKpiPoints } from '../services/kpiTrainerService';
+import {
+  TARGETS_UPDATED_EVENT,
+  loadSalesSellOutTargets,
+  loadTrainerConfigs,
+  loadTrainerTargets,
+} from '../services/targetManagementService';
 import { MonthlyOnlinePromoRecapRow } from '../services/onlinePromoService';
 import { aggregatePerStoreMgRecap } from '../services/missGlamMarketShareService';
-import { formatRupiah, formatNumber, formatPercent, filterRecords } from '../utils/analytics';
+import {
+  formatRupiah,
+  formatNumber,
+  formatPercent,
+  filterRecords,
+  MONTH_ORDER,
+} from '../utils/analytics';
 import {
   LayoutDashboard,
   MapPin,
@@ -52,6 +71,7 @@ import {
   BarChart3,
   Calendar,
   Award,
+  GraduationCap,
   PanelTopOpen,
   PanelTopClose,
   Edit3,
@@ -90,6 +110,8 @@ type SidebarLens =
   | 'promo_ba'
   | 'finance_bills'
   | 'targets_alerts'
+  | 'kpi_sales'
+  | 'kpi_trainer'
   | 'achieve_quartal';
 
 function formatCompactIdr(val: number): string {
@@ -1215,6 +1237,1261 @@ const PromoMonthlyGrowthPanel: React.FC<{
   );
 });
 
+const REGIONAL_SALES_PALETTE = [
+  '#10B981',
+  '#00D2FF',
+  '#FF6B00',
+  '#3B82F6',
+  '#A855F7',
+  '#F59E0B',
+];
+
+// Isolated Memoized Area & Tim Sales Panel (KET-aware Sell In / Sell Out / All + Cool Charts + Full-Width Tables)
+const RegionalSalesPanel: React.FC<{
+  sales: SalesTargetItem[];
+  areas: AreaTargetItem[];
+  spvs: SpvTargetItem[];
+  ketFilter: string;
+  selectedMonthLabel: string;
+  onChangeKet: (ket: string) => void;
+  onNavigateTab: (tab: ActiveTab) => void;
+}> = React.memo(
+  ({ sales, areas, spvs, ketFilter, selectedMonthLabel, onChangeKet, onNavigateTab }) => {
+    const normalizedKet = (ketFilter || 'ALL').trim().toUpperCase();
+    const isSellInOnly = normalizedKet === 'SELL IN';
+    const isSellOutOnly = normalizedKet === 'SELL OUT';
+
+    const [chartMetricMode, setChartMetricMode] = useState<'sell_in' | 'sell_out' | 'compare'>(
+      isSellOutOnly ? 'sell_out' : 'sell_in'
+    );
+    const [sortBy, setSortBy] = useState<'achv' | 'actual'>('achv');
+    const [hoveredSalesIdx, setHoveredSalesIdx] = useState<number | null>(null);
+    const [selectedSalesName, setSelectedSalesName] = useState<string | null>(null);
+
+    useEffect(() => {
+      if (normalizedKet === 'SELL IN') setChartMetricMode('sell_in');
+      else if (normalizedKet === 'SELL OUT') setChartMetricMode('sell_out');
+    }, [normalizedKet]);
+
+    const effectiveChartMetric: 'sell_in' | 'sell_out' | 'compare' = isSellInOnly
+      ? 'sell_in'
+      : isSellOutOnly
+      ? 'sell_out'
+      : chartMetricMode;
+
+    // Map Area -> Supervisor names
+    const spvsByArea = useMemo(() => {
+      const map = new Map<string, string[]>();
+      areas.forEach((a) => {
+        const aUpper = a.coverArea.trim().toUpperCase();
+        const matching = spvs
+          .filter((sp) =>
+            sp.coverAreas.some((c) => c.trim().toUpperCase() === aUpper)
+          )
+          .map((sp) => sp.spvName);
+        map.set(
+          aUpper,
+          matching.length > 0 ? matching : spvs.map((sp) => sp.spvName)
+        );
+      });
+      return map;
+    }, [areas, spvs]);
+
+    // Prepare sorted sales items & totals
+    const salesMetrics = useMemo(() => {
+      const rows = sales.map((s) => {
+        const tIn = s.targetSellIn || 0;
+        const aIn = s.actualSellIn || 0;
+        const pctIn = tIn > 0 ? (aIn / tIn) * 100 : 0;
+
+        const tOut = s.targetSellOut ?? 0;
+        const aOut = s.actualSellOut ?? 0;
+        const pctOut = tOut > 0 ? (aOut / tOut) * 100 : 0;
+
+        return {
+          ...s,
+          tIn,
+          aIn,
+          pctIn,
+          tOut,
+          aOut,
+          pctOut,
+        };
+      });
+
+      const sorted = [...rows].sort((a, b) => {
+        const aPct = effectiveChartMetric === 'sell_out' ? a.pctOut : a.pctIn;
+        const bPct = effectiveChartMetric === 'sell_out' ? b.pctOut : b.pctIn;
+        const aAct = effectiveChartMetric === 'sell_out' ? a.aOut : a.aIn;
+        const bAct = effectiveChartMetric === 'sell_out' ? b.aOut : b.aIn;
+        if (sortBy === 'achv') {
+          if (Math.abs(bPct - aPct) > 0.01) return bPct - aPct;
+          return bAct - aAct;
+        }
+        return bAct - aAct;
+      });
+
+      const totalTgtIn = rows.reduce((acc, r) => acc + r.tIn, 0);
+      const totalActIn = rows.reduce((acc, r) => acc + r.aIn, 0);
+      const totalPctIn = totalTgtIn > 0 ? (totalActIn / totalTgtIn) * 100 : 0;
+
+      const totalTgtOut = rows.reduce((acc, r) => acc + r.tOut, 0);
+      const totalActOut = rows.reduce((acc, r) => acc + r.aOut, 0);
+      const totalPctOut = totalTgtOut > 0 ? (totalActOut / totalTgtOut) * 100 : 0;
+
+      const maxChartValue = Math.max(
+        1,
+        ...sorted.map((r) => {
+          if (effectiveChartMetric === 'sell_out') return Math.max(r.tOut, r.aOut);
+          if (effectiveChartMetric === 'compare') return Math.max(r.aIn, r.aOut, r.tIn, r.tOut);
+          return Math.max(r.tIn, r.aIn);
+        })
+      );
+
+      const topSales = sorted[0] || null;
+
+      return {
+        sorted,
+        totalTgtIn,
+        totalActIn,
+        totalPctIn,
+        totalTgtOut,
+        totalActOut,
+        totalPctOut,
+        maxChartValue,
+        topSales,
+      };
+    }, [sales, effectiveChartMetric, sortBy]);
+
+    // Area totals & SPV labels
+    const areaMetrics = useMemo(() => {
+      const rows = areas.map((a) => {
+        const tIn = a.targetOmzet || 0;
+        const aIn = a.actualSellIn || 0;
+        const pctIn = tIn > 0 ? (aIn / tIn) * 100 : 0;
+
+        const tOut = a.targetSellOut ?? 0;
+        const aOut = a.actualSellOut || 0;
+        const pctOut = tOut > 0 ? (aOut / tOut) * 100 : 0;
+
+        const supList = spvsByArea.get(a.coverArea.trim().toUpperCase()) || [];
+        const spvLabel = supList.length > 0 ? supList.join(', ') : `${a.spvCount} SPV`;
+
+        return {
+          ...a,
+          spvLabel,
+          tIn,
+          aIn,
+          pctIn,
+          tOut,
+          aOut,
+          pctOut,
+        };
+      });
+
+      const totalTgtIn = rows.reduce((acc, r) => acc + r.tIn, 0);
+      const totalActIn = rows.reduce((acc, r) => acc + r.aIn, 0);
+      const totalPctIn = totalTgtIn > 0 ? (totalActIn / totalTgtIn) * 100 : 0;
+
+      const totalTgtOut = rows.reduce((acc, r) => acc + r.tOut, 0);
+      const totalActOut = rows.reduce((acc, r) => acc + r.aOut, 0);
+      const totalPctOut = totalTgtOut > 0 ? (totalActOut / totalTgtOut) * 100 : 0;
+
+      return { rows, totalTgtIn, totalActIn, totalPctIn, totalTgtOut, totalActOut, totalPctOut };
+    }, [areas, spvsByArea]);
+
+    // Donut share segments for Right Chart
+    const shareBreakdown = useMemo(() => {
+      const totalAct =
+        effectiveChartMetric === 'sell_out'
+          ? salesMetrics.totalActOut
+          : salesMetrics.totalActIn;
+      const items = salesMetrics.sorted.map((s, idx) => {
+        const val = effectiveChartMetric === 'sell_out' ? s.aOut : s.aIn;
+        const share = totalAct > 0 ? (val / totalAct) * 100 : 0;
+        return {
+          name: s.salesName,
+          area: s.coverArea,
+          val,
+          share,
+          color: REGIONAL_SALES_PALETTE[idx % REGIONAL_SALES_PALETTE.length],
+        };
+      });
+      const r = 46;
+      const circ = 2 * Math.PI * r;
+      let offset = 0;
+      const segments = items.map((item) => {
+        const len = (item.share / 100) * circ;
+        const seg = {
+          ...item,
+          strokeLength: Math.max(0, len - 1.5),
+          strokeOffset: -offset,
+        };
+        offset += len;
+        return seg;
+      });
+      return { totalAct, items, segments, r, circ };
+    }, [salesMetrics, effectiveChartMetric]);
+
+    const activeSalesFocus =
+      hoveredSalesIdx !== null && salesMetrics.sorted[hoveredSalesIdx]
+        ? salesMetrics.sorted[hoveredSalesIdx]
+        : selectedSalesName
+        ? salesMetrics.sorted.find((s) => s.salesName === selectedSalesName) || null
+        : salesMetrics.topSales;
+
+    const headlineTarget = isSellOutOnly ? salesMetrics.totalTgtOut : salesMetrics.totalTgtIn;
+    const headlineActual = isSellOutOnly ? salesMetrics.totalActOut : salesMetrics.totalActIn;
+    const headlinePct = isSellOutOnly ? salesMetrics.totalPctOut : salesMetrics.totalPctIn;
+    const headlineGap = headlineActual - headlineTarget;
+
+    return (
+      <div className="flex-1 flex flex-col gap-3">
+        {/* Top Header + Quick KET Switcher + Action Links */}
+        <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <div>
+            <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
+              Performa Area, Supervisor &amp; Tim Sales
+            </h2>
+            <p className="text-xs text-slate-400">
+              {isSellInOnly
+                ? `Mode Filter: SELL IN · Target vs Aktual Sell In (${selectedMonthLabel})`
+                : isSellOutOnly
+                ? `Mode Filter: SELL OUT · Target vs Aktual Sell Out (${selectedMonthLabel})`
+                : `Mode Filter: SEMUA (Sell In & Sell Out) · Periode ${selectedMonthLabel}`}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Segmented KET Quick Filter */}
+            <div className="inline-flex items-center p-0.5 rounded-lg bg-[#0D121D] border border-[#243147] text-[11px] font-bold">
+              {(
+                [
+                  { key: 'ALL', label: 'Semua' },
+                  { key: 'SELL IN', label: 'Sell In' },
+                  { key: 'SELL OUT', label: 'Sell Out' },
+                ] as const
+              ).map((tab) => {
+                const isActive =
+                  (tab.key === 'ALL' && !isSellInOnly && !isSellOutOnly) ||
+                  (tab.key === 'SELL IN' && isSellInOnly) ||
+                  (tab.key === 'SELL OUT' && isSellOutOnly);
+                return (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => onChangeKet(tab.key)}
+                    className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer whitespace-nowrap ${
+                      isActive
+                        ? tab.key === 'SELL OUT'
+                          ? 'bg-[#00D2FF] text-slate-950 font-extrabold'
+                          : 'bg-[#FF6B00] text-white font-extrabold'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => onNavigateTab('sales')}
+              className="px-3 py-1.5 rounded-lg bg-[#FF6B00] hover:bg-[#EA580C] text-white text-xs font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap"
+            >
+              <span>Buka Analisis Sales</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigateTab('spv')}
+              className="px-3 py-1.5 rounded-lg bg-[#192234] hover:bg-[#233049] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer whitespace-nowrap"
+            >
+              Buka Analisis SPV
+            </button>
+          </div>
+        </div>
+
+        {/* 4 Summary KPI Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2.5 font-mono tabular-nums">
+          <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+            <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">
+              {isSellOutOnly
+                ? 'Total Target Sell Out Tim'
+                : isSellInOnly
+                ? 'Total Target Sell In Tim'
+                : 'Total Target Tim (In / Out)'}
+            </span>
+            <span
+              className="text-base sm:text-lg font-black text-white mt-1 block whitespace-nowrap"
+              title={formatRupiah(headlineTarget)}
+            >
+              {formatRupiah(headlineTarget)}
+            </span>
+            {!isSellInOnly && !isSellOutOnly && (
+              <span className="text-[10.5px] text-cyan-400 font-bold mt-0.5 block whitespace-nowrap">
+                Target Sell Out: {formatCompactIdr(salesMetrics.totalTgtOut)}
+              </span>
+            )}
+            {(isSellInOnly || isSellOutOnly) && (
+              <span className="text-[10.5px] font-sans text-slate-400 mt-0.5 block">
+                {sales.length} Sales · {areas.length} Area Aktif
+              </span>
+            )}
+          </div>
+
+          <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+            <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">
+              {isSellOutOnly
+                ? 'Total Aktual Sell Out'
+                : isSellInOnly
+                ? 'Total Aktual Sell In'
+                : 'Total Aktual Tim (In / Out)'}
+            </span>
+            <span
+              className={`text-base sm:text-lg font-black mt-1 block whitespace-nowrap ${
+                isSellOutOnly ? 'text-[#00D2FF]' : 'text-[#FF6B00]'
+              }`}
+              title={formatRupiah(headlineActual)}
+            >
+              {formatRupiah(headlineActual)}
+            </span>
+            {!isSellInOnly && !isSellOutOnly ? (
+              <span className="text-[10.5px] text-cyan-300 font-bold mt-0.5 block whitespace-nowrap">
+                Aktual Sell Out: {formatCompactIdr(salesMetrics.totalActOut)}
+              </span>
+            ) : (
+              <span
+                className={`text-[10.5px] font-bold mt-0.5 block whitespace-nowrap ${
+                  headlineGap >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                }`}
+              >
+                Gap: {headlineGap >= 0 ? '+' : '-'}
+                {formatCompactIdr(Math.abs(headlineGap))}
+              </span>
+            )}
+          </div>
+
+          <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+            <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">
+              {isSellOutOnly
+                ? 'Pencapaian Sell Out (Achv)'
+                : isSellInOnly
+                ? 'Pencapaian Sell In (Achv)'
+                : 'Pencapaian Tim (In & Out)'}
+            </span>
+            <div className="flex items-baseline gap-2 mt-1">
+              <span
+                className={`text-lg font-black ${
+                  headlinePct >= 100
+                    ? 'text-emerald-400'
+                    : headlinePct >= 75
+                    ? 'text-cyan-400'
+                    : 'text-amber-400'
+                }`}
+              >
+                {headlinePct.toFixed(1)}%
+              </span>
+              {!isSellInOnly && !isSellOutOnly && (
+                <span className="text-xs font-bold text-cyan-300">
+                  · Out: {salesMetrics.totalPctOut.toFixed(1)}%
+                </span>
+              )}
+            </div>
+            <div className="w-full h-1.5 bg-[#1D283A] rounded-full overflow-hidden mt-1.5">
+              <div
+                className={`h-full rounded-full transition-all duration-300 ${
+                  headlinePct >= 100
+                    ? 'bg-emerald-500'
+                    : isSellOutOnly
+                    ? 'bg-[#00D2FF]'
+                    : 'bg-[#FF6B00]'
+                }`}
+                style={{ width: `${Math.max(0, Math.min(100, headlinePct))}%` }}
+              />
+            </div>
+          </div>
+
+          <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+            <span className="text-[10px] font-sans font-bold uppercase text-emerald-400 flex items-center gap-1">
+              <Crown className="w-3 h-3" />
+              Top Sales ({isSellOutOnly ? 'Sell Out' : 'Sell In'})
+            </span>
+            {salesMetrics.topSales ? (
+              <>
+                <span className="text-sm sm:text-base font-sans font-black text-white mt-1 block truncate">
+                  {salesMetrics.topSales.salesName}
+                </span>
+                <span className="text-[11px] font-bold text-emerald-400 mt-0.5 block whitespace-nowrap">
+                  {(isSellOutOnly
+                    ? salesMetrics.topSales.pctOut
+                    : salesMetrics.topSales.pctIn
+                  ).toFixed(1)}
+                  % ·{' '}
+                  {formatCompactIdr(
+                    isSellOutOnly
+                      ? salesMetrics.topSales.aOut
+                      : salesMetrics.topSales.aIn
+                  )}
+                </span>
+              </>
+            ) : (
+              <span className="text-xs font-sans text-slate-400 mt-1 block">Belum ada data</span>
+            )}
+          </div>
+        </div>
+
+        {/* COOL CHARTS SECTION */}
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
+          {/* LEFT CHART: Target vs Aktual & % Achv per Sales */}
+          <div className="xl:col-span-8 bg-[#121926] border border-[#1F293B] rounded-xl p-4 flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#1E293B]">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-[#FF6B00]/15 border border-[#FF6B00]/30 text-[#FF6B00] shrink-0">
+                  <BarChart3 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-xs font-extrabold uppercase tracking-wider text-white">
+                    Grafik Pencapaian Tim Sales:{' '}
+                    {effectiveChartMetric === 'sell_out'
+                      ? 'Target vs Aktual Sell Out'
+                      : effectiveChartMetric === 'compare'
+                      ? 'Komparasi Sell In vs Sell Out'
+                      : 'Target vs Aktual Sell In'}
+                  </h3>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Arahkan kursor atau klik batang sales untuk menyorot baris &amp; detail pencapaian.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {!isSellInOnly && !isSellOutOnly && (
+                  <div className="inline-flex items-center p-0.5 rounded-lg bg-[#0B101A] border border-[#243147] text-[10.5px] font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setChartMetricMode('sell_in')}
+                      className={`px-2 py-1 rounded-md cursor-pointer transition-colors ${
+                        chartMetricMode === 'sell_in'
+                          ? 'bg-[#FF6B00] text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Sell In
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setChartMetricMode('sell_out')}
+                      className={`px-2 py-1 rounded-md cursor-pointer transition-colors ${
+                        chartMetricMode === 'sell_out'
+                          ? 'bg-[#00D2FF] text-slate-950'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Sell Out
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setChartMetricMode('compare')}
+                      className={`px-2 py-1 rounded-md cursor-pointer transition-colors ${
+                        chartMetricMode === 'compare'
+                          ? 'bg-emerald-500 text-slate-950'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      In vs Out
+                    </button>
+                  </div>
+                )}
+
+                <div className="inline-flex items-center p-0.5 rounded-lg bg-[#0B101A] border border-[#243147] text-[10.5px] font-bold">
+                  <button
+                    type="button"
+                    onClick={() => setSortBy('achv')}
+                    className={`px-2 py-1 rounded-md cursor-pointer transition-colors ${
+                      sortBy === 'achv'
+                        ? 'bg-[#1E2B45] text-cyan-300'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Urut % Achv
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSortBy('actual')}
+                    className={`px-2 py-1 rounded-md cursor-pointer transition-colors ${
+                      sortBy === 'actual'
+                        ? 'bg-[#1E2B45] text-cyan-300'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Urut Omset
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Active Inspect Strip */}
+            {activeSalesFocus && (
+              <div className="px-3 py-2 rounded-lg bg-[#0B101A] border border-[#243147] flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-[10px] font-extrabold uppercase text-[#00D2FF]">
+                    {hoveredSalesIdx !== null
+                      ? 'Sorotan Grafik'
+                      : selectedSalesName
+                      ? 'Sales Dipilih'
+                      : 'Peringkat #1'}
+                  </span>
+                  <span className="text-slate-500">·</span>
+                  <span className="font-bold text-white truncate">{activeSalesFocus.salesName}</span>
+                  <span className="text-slate-500">·</span>
+                  <span className="text-[11px] text-slate-400 truncate">
+                    {activeSalesFocus.coverArea}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-3 font-mono tabular-nums text-[11px]">
+                  {effectiveChartMetric === 'compare' ? (
+                    <>
+                      <span className="text-[#FF6B00] font-bold">
+                        Sell In: {formatRupiah(activeSalesFocus.aIn)} ({activeSalesFocus.pctIn.toFixed(1)}%)
+                      </span>
+                      <span className="text-[#00D2FF] font-bold">
+                        Sell Out: {formatRupiah(activeSalesFocus.aOut)} ({activeSalesFocus.pctOut.toFixed(1)}%)
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-slate-400">
+                        Tgt:{' '}
+                        <strong className="text-slate-200">
+                          {formatRupiah(
+                            effectiveChartMetric === 'sell_out'
+                              ? activeSalesFocus.tOut
+                              : activeSalesFocus.tIn
+                          )}
+                        </strong>
+                      </span>
+                      <span className="text-white font-extrabold">
+                        Akt:{' '}
+                        {formatRupiah(
+                          effectiveChartMetric === 'sell_out'
+                            ? activeSalesFocus.aOut
+                            : activeSalesFocus.aIn
+                        )}
+                      </span>
+                      {(() => {
+                        const pct =
+                          effectiveChartMetric === 'sell_out'
+                            ? activeSalesFocus.pctOut
+                            : activeSalesFocus.pctIn;
+                        return (
+                          <span
+                            className={`font-black ${
+                              pct >= 100
+                                ? 'text-emerald-400'
+                                : pct >= 75
+                                ? 'text-cyan-400'
+                                : 'text-amber-400'
+                            }`}
+                          >
+                            {pct.toFixed(1)}%
+                          </span>
+                        );
+                      })()}
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Vertical Bar Chart Canvas */}
+            {salesMetrics.sorted.length === 0 ? (
+              <div className="py-12 text-center text-xs text-slate-400">
+                Tidak ada data sales untuk filter yang dipilih.
+              </div>
+            ) : (
+              <div className="flex items-stretch gap-3 pt-1">
+                {/* Y Axis */}
+                <div className="hidden sm:flex flex-col justify-between text-right font-mono text-[10px] text-slate-500 tabular-nums py-7 pr-2 border-r border-[#1E293B] shrink-0 w-16">
+                  <span>{formatCompactIdr(salesMetrics.maxChartValue)}</span>
+                  <span>{formatCompactIdr(salesMetrics.maxChartValue * 0.5)}</span>
+                  <span>Rp 0</span>
+                </div>
+
+                {/* Bars */}
+                <div className="flex-1 flex items-end gap-2 sm:gap-3.5 h-56 pt-8 pb-1 overflow-x-auto">
+                  {salesMetrics.sorted.map((item, idx) => {
+                    const isSelected = selectedSalesName === item.salesName;
+                    const isHovered = hoveredSalesIdx === idx;
+                    const primaryTgt =
+                      effectiveChartMetric === 'sell_out' ? item.tOut : item.tIn;
+                    const primaryAct =
+                      effectiveChartMetric === 'sell_out' ? item.aOut : item.aIn;
+                    const primaryPct =
+                      effectiveChartMetric === 'sell_out' ? item.pctOut : item.pctIn;
+
+                    const tgtHeightPct =
+                      salesMetrics.maxChartValue > 0
+                        ? Math.max(6, (primaryTgt / salesMetrics.maxChartValue) * 100)
+                        : 6;
+                    const actHeightPct =
+                      salesMetrics.maxChartValue > 0
+                        ? Math.max(6, (primaryAct / salesMetrics.maxChartValue) * 100)
+                        : 6;
+                    const outHeightPct =
+                      salesMetrics.maxChartValue > 0
+                        ? Math.max(6, (item.aOut / salesMetrics.maxChartValue) * 100)
+                        : 6;
+
+                    return (
+                      <button
+                        key={item.salesName}
+                        type="button"
+                        onClick={() =>
+                          setSelectedSalesName((prev) =>
+                            prev === item.salesName ? null : item.salesName
+                          )
+                        }
+                        onMouseEnter={() => setHoveredSalesIdx(idx)}
+                        onMouseLeave={() => setHoveredSalesIdx(null)}
+                        className={`flex-1 min-w-[74px] flex flex-col items-center h-full justify-end rounded-lg px-1.5 py-1 transition-colors cursor-pointer focus:outline-none ${
+                          isSelected
+                            ? 'bg-[#17263D] ring-1 ring-[#00D2FF]/50'
+                            : isHovered
+                            ? 'bg-[#151F33]'
+                            : ''
+                        }`}
+                      >
+                        <div className="mb-1.5 flex flex-col items-center">
+                          <span
+                            className={`text-[10.5px] font-mono font-black tabular-nums leading-none ${
+                              primaryPct >= 100
+                                ? 'text-emerald-400'
+                                : primaryPct >= 75
+                                ? 'text-cyan-400'
+                                : 'text-amber-400'
+                            }`}
+                          >
+                            {primaryPct.toFixed(1)}%
+                          </span>
+                          <span className="text-[9.5px] font-mono font-bold text-slate-300 tabular-nums mt-0.5 whitespace-nowrap">
+                            {formatCompactIdr(primaryAct)}
+                          </span>
+                        </div>
+
+                        <div className="w-full h-full flex items-end justify-center gap-1.5 px-1">
+                          {effectiveChartMetric === 'compare' ? (
+                            <>
+                              <div
+                                style={{ height: `${actHeightPct}%` }}
+                                title={`Aktual Sell In ${item.salesName}: ${formatRupiah(item.aIn)}`}
+                                className="w-5 sm:w-6 rounded-t-md bg-gradient-to-t from-[#EA580C] to-[#FF8533] transition-all duration-200"
+                              />
+                              <div
+                                style={{ height: `${outHeightPct}%` }}
+                                title={`Aktual Sell Out ${item.salesName}: ${formatRupiah(item.aOut)}`}
+                                className="w-5 sm:w-6 rounded-t-md bg-gradient-to-t from-[#0284C7] to-[#00D2FF] transition-all duration-200"
+                              />
+                            </>
+                          ) : (
+                            <>
+                              <div
+                                style={{ height: `${tgtHeightPct}%` }}
+                                title={`Target ${item.salesName}: ${formatRupiah(primaryTgt)}`}
+                                className="w-3.5 sm:w-4 rounded-t-sm bg-[#1E293B] border border-slate-600/80 transition-all duration-200"
+                              />
+                              <div
+                                style={{ height: `${actHeightPct}%` }}
+                                title={`Aktual ${item.salesName}: ${formatRupiah(primaryAct)}`}
+                                className={`w-5 sm:w-7 rounded-t-md transition-all duration-200 ${
+                                  primaryPct >= 100
+                                    ? 'bg-gradient-to-t from-emerald-600 to-emerald-400'
+                                    : effectiveChartMetric === 'sell_out'
+                                    ? 'bg-gradient-to-t from-cyan-600 to-[#00D2FF]'
+                                    : 'bg-gradient-to-t from-[#EA580C] to-[#FF8533]'
+                                }`}
+                              />
+                            </>
+                          )}
+                        </div>
+
+                        <div className="mt-2 text-center w-full">
+                          <span className="block text-[10px] font-extrabold text-white truncate">
+                            {item.salesName}
+                          </span>
+                          <span className="block text-[9px] text-slate-400 truncate">
+                            {item.coverArea}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Chart Legend */}
+            <div className="pt-2 border-t border-[#1E293B] flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+              <div className="flex flex-wrap items-center gap-4">
+                {effectiveChartMetric === 'compare' ? (
+                  <>
+                    <span className="flex items-center gap-1.5 text-slate-200">
+                      <span className="w-2.5 h-2.5 rounded-xs bg-[#FF6B00] inline-block" />
+                      Aktual Sell In
+                    </span>
+                    <span className="flex items-center gap-1.5 text-slate-200">
+                      <span className="w-2.5 h-2.5 rounded-xs bg-[#00D2FF] inline-block" />
+                      Aktual Sell Out
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="flex items-center gap-1.5 text-slate-300">
+                      <span className="w-2.5 h-2.5 rounded-xs bg-[#1E293B] border border-slate-500 inline-block" />
+                      Target ({effectiveChartMetric === 'sell_out' ? 'Sell Out' : 'Sell In'})
+                    </span>
+                    <span className="flex items-center gap-1.5 text-slate-200">
+                      <span
+                        className={`w-2.5 h-2.5 rounded-xs inline-block ${
+                          effectiveChartMetric === 'sell_out' ? 'bg-[#00D2FF]' : 'bg-[#FF6B00]'
+                        }`}
+                      />
+                      Aktual (&lt;100%)
+                    </span>
+                    <span className="flex items-center gap-1.5 text-emerald-400">
+                      <span className="w-2.5 h-2.5 rounded-xs bg-emerald-500 inline-block" />
+                      Target Capai (≥100%)
+                    </span>
+                  </>
+                )}
+              </div>
+              {selectedSalesName && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedSalesName(null)}
+                  className="text-cyan-300 font-bold hover:underline cursor-pointer"
+                >
+                  Hapus Sorotan ({selectedSalesName})
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* RIGHT CHART: Area & Supervisor Achievement Gauge + Sales Share Donut */}
+          <div className="xl:col-span-4 bg-[#121926] border border-[#1F293B] rounded-xl p-4 flex flex-col justify-between gap-3">
+            {/* Area & SPV Achievement Bars */}
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-extrabold uppercase tracking-wider text-white">
+                  Pencapaian Area &amp; Supervisor
+                </h3>
+                <span className="text-[10px] font-mono font-bold text-[#FF6B00]">
+                  {areas.length} Area · {spvs.length} SPV
+                </span>
+              </div>
+
+              <div className="space-y-2.5">
+                {areaMetrics.rows.map((a) => {
+                  const pct = effectiveChartMetric === 'sell_out' ? a.pctOut : a.pctIn;
+                  const act = effectiveChartMetric === 'sell_out' ? a.aOut : a.aIn;
+                  const tgt = effectiveChartMetric === 'sell_out' ? a.tOut : a.tIn;
+                  const barW = Math.max(2, Math.min(100, pct));
+                  return (
+                    <div
+                      key={a.coverArea}
+                      className="p-2.5 rounded-lg bg-[#0B101A] border border-[#1E293B] space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <div className="min-w-0">
+                          <span className="font-extrabold text-white block truncate">
+                            {a.coverArea}
+                          </span>
+                          <span className="text-[10.5px] text-slate-400 block truncate">
+                            SPV: {a.spvLabel} · {a.salesCount} Sales
+                          </span>
+                        </div>
+                        <span
+                          className={`font-mono tabular-nums text-sm font-black shrink-0 ${
+                            pct >= 100
+                              ? 'text-emerald-400'
+                              : pct >= 75
+                              ? 'text-cyan-400'
+                              : 'text-amber-400'
+                          }`}
+                        >
+                          {pct.toFixed(1)}%
+                        </span>
+                      </div>
+
+                      <div className="w-full h-2.5 bg-[#161F30] rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-300 ${
+                            pct >= 100
+                              ? 'bg-gradient-to-r from-emerald-500 to-emerald-400'
+                              : effectiveChartMetric === 'sell_out'
+                              ? 'bg-gradient-to-r from-cyan-600 to-[#00D2FF]'
+                              : 'bg-gradient-to-r from-[#EA580C] to-[#FF8533]'
+                          }`}
+                          style={{ width: `${barW}%` }}
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between text-[10.5px] font-mono tabular-nums text-slate-400">
+                        <span>Aktual: {formatCompactIdr(act)}</span>
+                        <span>Target: {formatCompactIdr(tgt)}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Kontribusi Tim Sales Donut */}
+            <div className="pt-3 border-t border-[#1E293B] space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <h4 className="text-[11px] font-extrabold uppercase tracking-wider text-slate-200">
+                  Kontribusi Omset Tim Sales (
+                  {effectiveChartMetric === 'sell_out' ? 'Sell Out' : 'Sell In'})
+                </h4>
+                <span className="text-[10px] font-mono text-slate-400">
+                  {formatCompactIdr(shareBreakdown.totalAct)}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <div className="relative w-[108px] h-[108px] shrink-0 flex items-center justify-center">
+                  <svg className="w-full h-full -rotate-90" viewBox="0 0 120 120">
+                    <circle
+                      cx="60"
+                      cy="60"
+                      r={shareBreakdown.r}
+                      fill="none"
+                      stroke="#1B2436"
+                      strokeWidth="16"
+                    />
+                    {shareBreakdown.segments.map((seg) => (
+                      <circle
+                        key={seg.name}
+                        cx="60"
+                        cy="60"
+                        r={shareBreakdown.r}
+                        fill="none"
+                        stroke={seg.color}
+                        strokeWidth={selectedSalesName === seg.name ? 19 : 16}
+                        strokeDasharray={`${seg.strokeLength} ${shareBreakdown.circ}`}
+                        strokeDashoffset={seg.strokeOffset}
+                        className="cursor-pointer transition-all duration-150"
+                        onClick={() =>
+                          setSelectedSalesName((prev) =>
+                            prev === seg.name ? null : seg.name
+                          )
+                        }
+                      />
+                    ))}
+                  </svg>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center pointer-events-none px-1">
+                    <span className="text-xs font-black font-mono tabular-nums text-white leading-none">
+                      {shareBreakdown.items[0]
+                        ? `${shareBreakdown.items[0].share.toFixed(0)}%`
+                        : '0%'}
+                    </span>
+                    <span className="text-[8.5px] font-bold text-slate-400 truncate max-w-[64px] mt-0.5">
+                      {shareBreakdown.items[0]?.name || '-'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex-1 min-w-0 space-y-1 text-[11px]">
+                  {shareBreakdown.items.slice(0, 6).map((item) => (
+                    <button
+                      key={item.name}
+                      type="button"
+                      onClick={() =>
+                        setSelectedSalesName((prev) =>
+                          prev === item.name ? null : item.name
+                        )
+                      }
+                      className={`w-full flex items-center justify-between gap-2 px-1.5 py-0.5 rounded transition-colors cursor-pointer text-left ${
+                        selectedSalesName === item.name
+                          ? 'bg-[#17263D]'
+                          : 'hover:bg-[#172033]'
+                      }`}
+                    >
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <span
+                          className="w-2 h-2 rounded-full shrink-0"
+                          style={{ backgroundColor: item.color }}
+                        />
+                        <span className="font-semibold text-slate-200 truncate">
+                          {item.name}
+                        </span>
+                      </span>
+                      <span className="font-mono tabular-nums font-bold text-slate-300 shrink-0">
+                        {item.share.toFixed(1)}%
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* FULL-WIDTH TABLES SO ALL COLUMNS ARE 100% VISIBLE ON SCREEN */}
+        {/* TABLE 1: DAFTAR PENCAPAIAN TIM SALES */}
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl overflow-hidden flex flex-col">
+          <div className="px-4 py-3 border-b border-[#1E293B] bg-[#0E1523] flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#00D2FF]">
+              Daftar Pencapaian Tim Sales ({salesMetrics.sorted.length})
+            </h3>
+            <span className="text-[11px] font-mono text-slate-400">
+              {isSellInOnly
+                ? 'Menampilkan Kolom: Sales · Area · Target Sell In · Aktual Sell In · Achv'
+                : isSellOutOnly
+                ? 'Menampilkan Kolom: Sales · Area · Target Sell Out · Aktual Sell Out · Achv'
+                : 'Menampilkan Sell In & Sell Out Lengkap'}
+            </span>
+          </div>
+
+          <div className="w-full overflow-x-auto">
+            <table className="w-full text-xs text-left border-collapse">
+              <thead className="bg-[#0B101A]">
+                <tr className="text-[10.5px] uppercase text-slate-400 border-b border-[#1E293B]">
+                  <th className="py-2.5 px-3 font-bold">Sales</th>
+                  <th className="py-2.5 px-3 font-bold">Area</th>
+                  {!isSellOutOnly && (
+                    <>
+                      <th className="py-2.5 px-3 text-right font-bold">Target Sell In</th>
+                      <th className="py-2.5 px-3 text-right font-bold">Aktual Sell In</th>
+                      <th className="py-2.5 px-3 text-right font-bold">
+                        {isSellInOnly ? 'Achv' : 'Achv In'}
+                      </th>
+                    </>
+                  )}
+                  {!isSellInOnly && (
+                    <>
+                      <th className="py-2.5 px-3 text-right font-bold text-cyan-300">
+                        Target Sell Out
+                      </th>
+                      <th className="py-2.5 px-3 text-right font-bold text-cyan-300">
+                        Aktual Sell Out
+                      </th>
+                      <th className="py-2.5 px-3 text-right font-bold text-cyan-300">
+                        {isSellOutOnly ? 'Achv' : 'Achv Out'}
+                      </th>
+                    </>
+                  )}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
+                {salesMetrics.sorted.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={isSellInOnly || isSellOutOnly ? 5 : 8}
+                      className="py-8 text-center font-sans text-slate-400"
+                    >
+                      Tidak ada data pencapaian sales pada filter aktif.
+                    </td>
+                  </tr>
+                ) : (
+                  salesMetrics.sorted.map((s) => {
+                    const isHighlighted = selectedSalesName === s.salesName;
+                    return (
+                      <tr
+                        key={s.salesName}
+                        onClick={() =>
+                          setSelectedSalesName((prev) =>
+                            prev === s.salesName ? null : s.salesName
+                          )
+                        }
+                        className={`transition-colors cursor-pointer ${
+                          isHighlighted ? 'bg-[#17263D]' : 'hover:bg-[#172033]'
+                        }`}
+                      >
+                        <td className="py-2.5 px-3 font-sans font-bold text-white whitespace-nowrap">
+                          {s.salesName}
+                        </td>
+                        <td className="py-2.5 px-3 font-sans text-slate-300 whitespace-nowrap">
+                          {s.coverArea}
+                        </td>
+                        {!isSellOutOnly && (
+                          <>
+                            <td className="py-2.5 px-3 text-right text-slate-400 whitespace-nowrap">
+                              {formatRupiah(s.tIn)}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-bold text-white whitespace-nowrap">
+                              {formatRupiah(s.aIn)}
+                            </td>
+                            <td
+                              className={`py-2.5 px-3 text-right font-extrabold whitespace-nowrap ${
+                                s.pctIn >= 100
+                                  ? 'text-emerald-400'
+                                  : s.pctIn >= 75
+                                  ? 'text-cyan-400'
+                                  : 'text-amber-400'
+                              }`}
+                            >
+                              {s.pctIn.toFixed(1)}%
+                            </td>
+                          </>
+                        )}
+                        {!isSellInOnly && (
+                          <>
+                            <td className="py-2.5 px-3 text-right text-slate-400 whitespace-nowrap">
+                              {formatRupiah(s.tOut)}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-bold text-[#00D2FF] whitespace-nowrap">
+                              {formatRupiah(s.aOut)}
+                            </td>
+                            <td
+                              className={`py-2.5 px-3 text-right font-extrabold whitespace-nowrap ${
+                                s.pctOut >= 100
+                                  ? 'text-emerald-400'
+                                  : s.pctOut >= 75
+                                  ? 'text-cyan-400'
+                                  : 'text-amber-400'
+                              }`}
+                            >
+                              {s.pctOut.toFixed(1)}%
+                            </td>
+                          </>
+                        )}
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+              {salesMetrics.sorted.length > 0 && (
+                <tfoot className="bg-[#0E1523] border-t border-[#243147] font-mono tabular-nums text-xs">
+                  <tr>
+                    <td className="py-2.5 px-3 font-sans font-extrabold uppercase text-slate-200 whitespace-nowrap">
+                      Total Tim Sales ({salesMetrics.sorted.length})
+                    </td>
+                    <td className="py-2.5 px-3 font-sans text-slate-400 whitespace-nowrap">
+                      Semua Area
+                    </td>
+                    {!isSellOutOnly && (
+                      <>
+                        <td className="py-2.5 px-3 text-right font-bold text-slate-300 whitespace-nowrap">
+                          {formatRupiah(salesMetrics.totalTgtIn)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-black text-[#FF6B00] whitespace-nowrap">
+                          {formatRupiah(salesMetrics.totalActIn)}
+                        </td>
+                        <td
+                          className={`py-2.5 px-3 text-right font-black whitespace-nowrap ${
+                            salesMetrics.totalPctIn >= 100
+                              ? 'text-emerald-400'
+                              : salesMetrics.totalPctIn >= 75
+                              ? 'text-cyan-400'
+                              : 'text-amber-400'
+                          }`}
+                        >
+                          {salesMetrics.totalPctIn.toFixed(1)}%
+                        </td>
+                      </>
+                    )}
+                    {!isSellInOnly && (
+                      <>
+                        <td className="py-2.5 px-3 text-right font-bold text-slate-300 whitespace-nowrap">
+                          {formatRupiah(salesMetrics.totalTgtOut)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-black text-[#00D2FF] whitespace-nowrap">
+                          {formatRupiah(salesMetrics.totalActOut)}
+                        </td>
+                        <td
+                          className={`py-2.5 px-3 text-right font-black whitespace-nowrap ${
+                            salesMetrics.totalPctOut >= 100
+                              ? 'text-emerald-400'
+                              : salesMetrics.totalPctOut >= 75
+                              ? 'text-cyan-400'
+                              : 'text-amber-400'
+                          }`}
+                        >
+                          {salesMetrics.totalPctOut.toFixed(1)}%
+                        </td>
+                      </>
+                    )}
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+          </div>
+        </div>
+
+        {/* TABLE 2: DAFTAR AREA & SUPERVISOR */}
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl overflow-hidden flex flex-col">
+          <div className="px-4 py-3 border-b border-[#1E293B] bg-[#0E1523] flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#FF6B00]">
+              Daftar Area &amp; Supervisor ({areaMetrics.rows.length} Area)
+            </h3>
+            <span className="text-[11px] font-mono text-slate-400">
+              {isSellInOnly
+                ? 'Menampilkan Kolom: Cover Area · Supervisor · Target Sell In · Aktual Sell In · Achv'
+                : isSellOutOnly
+                ? 'Menampilkan Kolom: Cover Area · Supervisor · Target Sell Out · Aktual Sell Out · Achv'
+                : 'Menampilkan Sell In & Sell Out Area & Supervisor'}
+            </span>
+          </div>
+
+          <div className="w-full overflow-x-auto">
+            <table className="w-full text-xs text-left border-collapse">
+              <thead className="bg-[#0B101A]">
+                <tr className="text-[10.5px] uppercase text-slate-400 border-b border-[#1E293B]">
+                  <th className="py-2.5 px-3 font-bold">Cover Area</th>
+                  <th className="py-2.5 px-3 font-bold">Supervisor</th>
+                  {!isSellOutOnly && (
+                    <>
+                      <th className="py-2.5 px-3 text-right font-bold">Target Sell In</th>
+                      <th className="py-2.5 px-3 text-right font-bold">Aktual Sell In</th>
+                      <th className="py-2.5 px-3 text-right font-bold">
+                        {isSellInOnly ? 'Achv' : 'Achv In'}
+                      </th>
+                    </>
+                  )}
+                  {!isSellInOnly && (
+                    <>
+                      <th className="py-2.5 px-3 text-right font-bold text-cyan-300">
+                        Target Sell Out
+                      </th>
+                      <th className="py-2.5 px-3 text-right font-bold text-cyan-300">
+                        Aktual Sell Out
+                      </th>
+                      <th className="py-2.5 px-3 text-right font-bold text-cyan-300">
+                        {isSellOutOnly ? 'Achv' : 'Achv Out'}
+                      </th>
+                    </>
+                  )}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
+                {areaMetrics.rows.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={isSellInOnly || isSellOutOnly ? 5 : 8}
+                      className="py-8 text-center font-sans text-slate-400"
+                    >
+                      Tidak ada data area &amp; supervisor pada filter aktif.
+                    </td>
+                  </tr>
+                ) : (
+                  areaMetrics.rows.map((a) => (
+                    <tr key={a.coverArea} className="hover:bg-[#172033] transition-colors">
+                      <td className="py-2.5 px-3 font-sans font-bold text-white whitespace-nowrap">
+                        {a.coverArea}
+                      </td>
+                      <td className="py-2.5 px-3 font-sans text-slate-300 whitespace-nowrap">
+                        {a.spvLabel}
+                      </td>
+                      {!isSellOutOnly && (
+                        <>
+                          <td className="py-2.5 px-3 text-right text-slate-400 whitespace-nowrap">
+                            {formatRupiah(a.tIn)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-bold text-white whitespace-nowrap">
+                            {formatRupiah(a.aIn)}
+                          </td>
+                          <td
+                            className={`py-2.5 px-3 text-right font-extrabold whitespace-nowrap ${
+                              a.pctIn >= 100
+                                ? 'text-emerald-400'
+                                : a.pctIn >= 75
+                                ? 'text-cyan-400'
+                                : 'text-amber-400'
+                            }`}
+                          >
+                            {a.pctIn.toFixed(1)}%
+                          </td>
+                        </>
+                      )}
+                      {!isSellInOnly && (
+                        <>
+                          <td className="py-2.5 px-3 text-right text-slate-400 whitespace-nowrap">
+                            {formatRupiah(a.tOut)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-bold text-[#00D2FF] whitespace-nowrap">
+                            {formatRupiah(a.aOut)}
+                          </td>
+                          <td
+                            className={`py-2.5 px-3 text-right font-extrabold whitespace-nowrap ${
+                              a.pctOut >= 100
+                                ? 'text-emerald-400'
+                                : a.pctOut >= 75
+                                ? 'text-cyan-400'
+                                : 'text-amber-400'
+                            }`}
+                          >
+                            {a.pctOut.toFixed(1)}%
+                          </td>
+                        </>
+                      )}
+                    </tr>
+                  ))
+                )}
+              </tbody>
+              {areaMetrics.rows.length > 0 && (
+                <tfoot className="bg-[#0E1523] border-t border-[#243147] font-mono tabular-nums text-xs">
+                  <tr>
+                    <td className="py-2.5 px-3 font-sans font-extrabold uppercase text-slate-200 whitespace-nowrap">
+                      Total Area ({areaMetrics.rows.length})
+                    </td>
+                    <td className="py-2.5 px-3 font-sans text-slate-400 whitespace-nowrap">
+                      {spvs.length} SPV
+                    </td>
+                    {!isSellOutOnly && (
+                      <>
+                        <td className="py-2.5 px-3 text-right font-bold text-slate-300 whitespace-nowrap">
+                          {formatRupiah(areaMetrics.totalTgtIn)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-black text-[#FF6B00] whitespace-nowrap">
+                          {formatRupiah(areaMetrics.totalActIn)}
+                        </td>
+                        <td
+                          className={`py-2.5 px-3 text-right font-black whitespace-nowrap ${
+                            areaMetrics.totalPctIn >= 100
+                              ? 'text-emerald-400'
+                              : areaMetrics.totalPctIn >= 75
+                              ? 'text-cyan-400'
+                              : 'text-amber-400'
+                          }`}
+                        >
+                          {areaMetrics.totalPctIn.toFixed(1)}%
+                        </td>
+                      </>
+                    )}
+                    {!isSellInOnly && (
+                      <>
+                        <td className="py-2.5 px-3 text-right font-bold text-slate-300 whitespace-nowrap">
+                          {formatRupiah(areaMetrics.totalTgtOut)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-black text-[#00D2FF] whitespace-nowrap">
+                          {formatRupiah(areaMetrics.totalActOut)}
+                        </td>
+                        <td
+                          className={`py-2.5 px-3 text-right font-black whitespace-nowrap ${
+                            areaMetrics.totalPctOut >= 100
+                              ? 'text-emerald-400'
+                              : areaMetrics.totalPctOut >= 75
+                              ? 'text-cyan-400'
+                              : 'text-amber-400'
+                          }`}
+                        >
+                          {areaMetrics.totalPctOut.toFixed(1)}%
+                        </td>
+                      </>
+                    )}
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  }
+);
+
 // Isolated Memoized Store Gap Table (deferred search + smart row limit so typing/clicking stays instant)
 const TargetsGapPanel: React.FC<{
   storeGapDetails: StoreGapDetailItem[];
@@ -1401,28 +2678,34 @@ const TargetsGapPanel: React.FC<{
           </div>
         </div>
 
-        <div className="overflow-auto max-h-[calc(100vh-445px)] min-h-[220px] border border-[#1E293B] rounded-lg">
-          <table className="w-full text-[11px] text-left border-collapse">
+        <div className="overflow-y-auto overflow-x-auto max-h-[calc(100vh-445px)] min-h-[220px] border border-[#1E293B] rounded-lg">
+          <table className="w-full text-[10.5px] text-left border-collapse">
             <thead className="sticky top-0 z-10 bg-[#0D121D]">
-              <tr className="text-[10px] uppercase text-slate-400 border-b border-[#1E293B]">
-                <th className="py-2 px-2.5 text-center w-9">No</th>
-                <th className="py-2 px-2.5 min-w-[150px]">Nama Toko</th>
-                <th className="py-2 px-2.5 min-w-[110px]">Sales &amp; SPV</th>
-                <th className="py-2 px-2.5 min-w-[200px]">Kategori Penyebab</th>
-                <th className="py-2 px-2.5 text-right text-[#FF6B00] whitespace-nowrap">
-                  Sell In (Lalu → Skg)
+              <tr className="text-[9.5px] uppercase text-slate-400 border-b border-[#1E293B] leading-tight">
+                <th className="py-2 px-1.5 text-center w-8">No</th>
+                <th className="py-2 px-1.5 w-[16%]">Nama Toko</th>
+                <th className="py-2 px-1.5 w-[12%]">Sales &amp; SPV</th>
+                <th className="py-2 px-1.5 w-[21%]">Kategori Penyebab</th>
+                <th className="py-2 px-1.5 text-right text-[#FF6B00]">
+                  Sell In<br />
+                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">(Lalu → Skg)</span>
                 </th>
-                <th className="py-2 px-2.5 text-right text-[#00D2FF] whitespace-nowrap">
-                  Sell Out (Lalu → Skg)
+                <th className="py-2 px-1.5 text-right text-[#00D2FF]">
+                  Sell Out<br />
+                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">(Lalu → Skg)</span>
                 </th>
-                <th className="py-2 px-2.5 text-right text-[#FF6B00] whitespace-nowrap">
-                  Gap Sell In
+                <th className="py-2 px-1.5 text-right text-[#FF6B00]">
+                  Gap<br />Sell In
                 </th>
-                <th className="py-2 px-2.5 text-right text-[#00D2FF] whitespace-nowrap">
-                  Gap Sell Out
+                <th className="py-2 px-1.5 text-right text-[#00D2FF]">
+                  Gap<br />Sell Out
                 </th>
-                <th className="py-2 px-2.5 text-right whitespace-nowrap">Porsi In</th>
-                <th className="py-2 px-2.5 text-right whitespace-nowrap">Porsi Out</th>
+                <th className="py-2 px-1.5 text-right">
+                  Porsi<br />In
+                </th>
+                <th className="py-2 px-1.5 text-right">
+                  Porsi<br />Out
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
@@ -1449,18 +2732,18 @@ const TargetsGapPanel: React.FC<{
 
                   return (
                     <tr key={`${st.storeName}-${idx}`} className="hover:bg-[#172033] align-top">
-                      <td className="py-2 px-2.5 text-center text-slate-500">{idx + 1}</td>
-                      <td className="py-2 px-2.5 font-sans">
-                        <div className="font-bold text-white leading-snug">{st.storeName}</div>
-                        <div className="text-[10px] text-slate-400">{st.region}</div>
+                      <td className="py-2 px-1.5 text-center text-slate-500">{idx + 1}</td>
+                      <td className="py-2 px-1.5 font-sans">
+                        <div className="font-bold text-white leading-snug break-words">{st.storeName}</div>
+                        <div className="text-[9.5px] text-slate-400 break-words">{st.region}</div>
                       </td>
-                      <td className="py-2 px-2.5 font-sans whitespace-nowrap">
-                        <div className="font-semibold text-slate-200">{st.salesName}</div>
-                        <div className="text-[10px] text-slate-400">SPV: {st.spvName}</div>
+                      <td className="py-2 px-1.5 font-sans">
+                        <div className="font-semibold text-slate-200 leading-snug break-words">{st.salesName}</div>
+                        <div className="text-[9.5px] text-slate-400 break-words">SPV: {st.spvName}</div>
                       </td>
-                      <td className="py-2 px-2.5 font-sans">
+                      <td className="py-2 px-1.5 font-sans">
                         <span
-                          className={`text-[10px] font-bold block ${
+                          className={`text-[9.5px] font-bold block ${
                             st.gapCategory === 'lost_outlet'
                               ? 'text-rose-400'
                               : st.gapCategory === 'return_impact'
@@ -1474,60 +2757,62 @@ const TargetsGapPanel: React.FC<{
                             ? 'Dampak Retur'
                             : 'Turun Order'}
                         </span>
-                        <div className="text-[10.5px] text-slate-300 mt-0.5 whitespace-normal break-words leading-snug">
+                        <div className="text-[10px] text-slate-300 mt-0.5 whitespace-normal break-words leading-snug">
                           {st.primaryReason}
                         </div>
                       </td>
-                      <td className="py-2 px-2.5 text-right whitespace-nowrap">
-                        <div className="text-[10px] text-slate-400">
+                      <td className="py-2 px-1.5 text-right whitespace-nowrap">
+                        <div className="text-[9.5px] text-slate-400" title={formatRupiah(st.sellInPrevious)}>
                           {formatCompactIdr(st.sellInPrevious)}
                         </div>
-                        <div className="font-bold text-white">
+                        <div className="font-bold text-white" title={formatRupiah(st.sellInCurrent)}>
                           → {formatCompactIdr(st.sellInCurrent)}
                         </div>
                       </td>
-                      <td className="py-2 px-2.5 text-right whitespace-nowrap">
-                        <div className="text-[10px] text-slate-400">
+                      <td className="py-2 px-1.5 text-right whitespace-nowrap">
+                        <div className="text-[9.5px] text-slate-400" title={formatRupiah(st.sellOutPrevious)}>
                           {formatCompactIdr(st.sellOutPrevious)}
                         </div>
-                        <div className="font-bold text-[#00D2FF]">
+                        <div className="font-bold text-[#00D2FF]" title={formatRupiah(st.sellOutCurrent)}>
                           → {formatCompactIdr(st.sellOutCurrent)}
                         </div>
                       </td>
                       <td
-                        className={`py-2 px-2.5 text-right font-bold whitespace-nowrap ${
+                        className={`py-2 px-1.5 text-right font-bold whitespace-nowrap ${
                           sellInGap < 0
                             ? 'text-rose-400'
                             : sellInGap > 0
                             ? 'text-emerald-400'
                             : 'text-slate-500'
                         }`}
+                        title={formatRupiah(sellInGap)}
                       >
                         {sellInGap < 0
-                          ? `-${formatRupiah(Math.abs(sellInGap))}`
+                          ? `-${formatCompactIdr(Math.abs(sellInGap))}`
                           : sellInGap > 0
-                          ? `+${formatRupiah(sellInGap)}`
+                          ? `+${formatCompactIdr(sellInGap)}`
                           : 'Rp 0'}
                       </td>
                       <td
-                        className={`py-2 px-2.5 text-right font-bold whitespace-nowrap ${
+                        className={`py-2 px-1.5 text-right font-bold whitespace-nowrap ${
                           sellOutGap < 0
                             ? 'text-rose-400'
                             : sellOutGap > 0
                             ? 'text-emerald-400'
                             : 'text-slate-500'
                         }`}
+                        title={formatRupiah(sellOutGap)}
                       >
                         {sellOutGap < 0
-                          ? `-${formatRupiah(Math.abs(sellOutGap))}`
+                          ? `-${formatCompactIdr(Math.abs(sellOutGap))}`
                           : sellOutGap > 0
-                          ? `+${formatRupiah(sellOutGap)}`
+                          ? `+${formatCompactIdr(sellOutGap)}`
                           : 'Rp 0'}
                       </td>
-                      <td className="py-2 px-2.5 text-right font-bold text-[#FF6B00] whitespace-nowrap">
+                      <td className="py-2 px-1.5 text-right font-bold text-[#FF6B00] whitespace-nowrap">
                         {porsiIn.toFixed(1)}%
                       </td>
-                      <td className="py-2 px-2.5 text-right font-bold text-[#00D2FF] whitespace-nowrap">
+                      <td className="py-2 px-1.5 text-right font-bold text-[#00D2FF] whitespace-nowrap">
                         {porsiOut.toFixed(1)}%
                       </td>
                     </tr>
@@ -1558,6 +2843,1844 @@ const TargetsGapPanel: React.FC<{
     );
   }
 );
+
+function parsePeriodOrderKey(periodStr: string): number {
+  const parts = String(periodStr || '').trim().toUpperCase().split(/\s+/);
+  let monthNum = 99;
+  let yearNum = 2026;
+  for (const p of parts) {
+    if (MONTH_ORDER[p]) monthNum = MONTH_ORDER[p];
+    else if (/^\d{4}$/.test(p)) yearNum = Number(p);
+  }
+  return yearNum * 100 + monthNum;
+}
+
+function formatShortMonthPeriod(periodStr: string): string {
+  const parts = String(periodStr || '').trim().toUpperCase().split(/\s+/);
+  const shortMap: Record<string, string> = {
+    JANUARI: 'JAN',
+    FEBRUARI: 'FEB',
+    MARET: 'MAR',
+    APRIL: 'APR',
+    MEI: 'MEI',
+    JUNI: 'JUN',
+    JULI: 'JUL',
+    AGUSTUS: 'AGT',
+    SEPTEMBER: 'SEP',
+    OKTOBER: 'OKT',
+    NOVEMBER: 'NOV',
+    DESEMBER: 'DES',
+  };
+  const m = shortMap[parts[0]] || parts[0]?.slice(0, 3) || '-';
+  const y = parts[1] ? ` '${parts[1].slice(-2)}` : '';
+  return `${m}${y}`;
+}
+
+const DASHBOARD_KPI_3_SALES = new Set(['ILHAMSYAH', 'TIWI', 'ALBERT FERNANDO']);
+
+function syncKpiSalesItemsForDashboard(items: KpiSalesScorecardItem[]): KpiSalesScorecardItem[] {
+  // 1. Sinkronkan setiap baris dengan override Target Sell Out per bulan dari Pusat Kelola Target
+  const targetSynced = items.map((item) => {
+    const monthTargets = loadSalesSellOutTargets(item.monthPeriod || 'ALL');
+    const matchKey = Object.keys(monthTargets).find(
+      (k) => k.toUpperCase().trim() === item.salesName.toUpperCase().trim()
+    );
+    const overrideTarget = matchKey ? monthTargets[matchKey] : undefined;
+    if (overrideTarget && overrideTarget > 0 && overrideTarget !== item.sellOutTarget) {
+      const newPct = (item.sellOutActual / overrideTarget) * 100;
+      const calc = calculateKpiPoints({
+        sellOutAchievementPct: newPct,
+        overdueStoresUp45Count: item.overdueStoresUp45Count,
+        visitLogsCount: item.visitLogsCount,
+        baReportWeeklyPct: item.baReportWeeklyPct,
+        baStockOpnameAppPct: item.baStockOpnameAppPct,
+        storesUsingBufferAppPct: item.storesUsingBufferAppPct,
+      });
+      const finalTHP =
+        item.baseSalary +
+        item.sellInIncentive +
+        item.baBonus -
+        item.baPenalty +
+        calc.kpiIncentive -
+        calc.kpiPenalty -
+        item.tagihanPenalty;
+      return {
+        ...item,
+        sellOutTarget: overrideTarget,
+        sellOutAchievementPct: newPct,
+        pointSellOut: calc.pointSellOut,
+        pointTagihan45H: calc.pointTagihan45H,
+        pointKunjungan: calc.pointKunjungan,
+        pointBaReportWeekly: calc.pointBaReportWeekly,
+        pointBaStockOpname: calc.pointBaStockOpname,
+        pointMonitoringBa: calc.pointMonitoringBa,
+        pointBufferStock: calc.pointBufferStock,
+        totalScore: calc.totalScore,
+        grade: calc.grade,
+        kpiIncentive: calc.kpiIncentive,
+        kpiPenalty: calc.kpiPenalty,
+        hasSp1: calc.hasSp1,
+        finalTakeHomePay: finalTHP,
+      };
+    }
+    return item;
+  });
+
+  // 2. Kumpulkan data ABDUL RAHIM per bulan untuk digabungkan ke Sell Out & Target Sell Out ALBERT FERNANDO
+  const abdulByMonth = new Map<string, KpiSalesScorecardItem>();
+  targetSynced.forEach((item) => {
+    if (item.salesName.trim().toUpperCase() === 'ABDUL RAHIM') {
+      abdulByMonth.set((item.monthPeriod || '').trim().toUpperCase(), item);
+    }
+  });
+
+  // 3. Tampilkan hanya 3 Sales (ILHAMSYAH, TIWI, ALBERT FERNANDO) dengan penggabungan Sell Out Abdul Rahim -> Albert Fernando
+  return targetSynced
+    .filter((item) => DASHBOARD_KPI_3_SALES.has(item.salesName.trim().toUpperCase()))
+    .map((item) => {
+      if (item.salesName.trim().toUpperCase() !== 'ALBERT FERNANDO') return item;
+      const periodKey = (item.monthPeriod || '').trim().toUpperCase();
+      const abdul = abdulByMonth.get(periodKey);
+      if (!abdul) return item;
+
+      const combinedTarget = (item.sellOutTarget || 0) + (abdul.sellOutTarget || 0);
+      const combinedActual = (item.sellOutActual || 0) + (abdul.sellOutActual || 0);
+      const combinedPct = combinedTarget > 0 ? (combinedActual / combinedTarget) * 100 : 0;
+      const calc = calculateKpiPoints({
+        sellOutAchievementPct: combinedPct,
+        overdueStoresUp45Count: item.overdueStoresUp45Count,
+        visitLogsCount: item.visitLogsCount,
+        baReportWeeklyPct: item.baReportWeeklyPct,
+        baStockOpnameAppPct: item.baStockOpnameAppPct,
+        storesUsingBufferAppPct: item.storesUsingBufferAppPct,
+      });
+      const finalTHP =
+        item.baseSalary +
+        item.sellInIncentive +
+        item.baBonus -
+        item.baPenalty +
+        calc.kpiIncentive -
+        calc.kpiPenalty -
+        item.tagihanPenalty;
+
+      return {
+        ...item,
+        sellOutTarget: combinedTarget,
+        sellOutActual: combinedActual,
+        sellOutAchievementPct: combinedPct,
+        pointSellOut: calc.pointSellOut,
+        pointTagihan45H: calc.pointTagihan45H,
+        pointKunjungan: calc.pointKunjungan,
+        pointBaReportWeekly: calc.pointBaReportWeekly,
+        pointBaStockOpname: calc.pointBaStockOpname,
+        pointMonitoringBa: calc.pointMonitoringBa,
+        pointBufferStock: calc.pointBufferStock,
+        totalScore: calc.totalScore,
+        grade: calc.grade,
+        kpiIncentive: calc.kpiIncentive,
+        kpiPenalty: calc.kpiPenalty,
+        hasSp1: calc.hasSp1,
+        finalTakeHomePay: finalTHP,
+      };
+    });
+}
+
+function syncKpiTrainerItemsForDashboard(
+  items: KpiTrainerScorecardItem[]
+): KpiTrainerScorecardItem[] {
+  const trainerConfigs = loadTrainerConfigs();
+  return items.map((item) => {
+    const monthTargets = loadTrainerTargets(item.monthPeriod || 'ALL');
+    const cfg = trainerConfigs.find(
+      (t) => t.trainerName.toUpperCase().trim() === item.trainerName.toUpperCase().trim()
+    );
+    const mOv =
+      (cfg ? monthTargets[cfg.id] : undefined) ||
+      monthTargets[item.trainerName] ||
+      monthTargets[item.trainerName.toUpperCase()];
+
+    if (mOv?.targetSellOut && mOv.targetSellOut > 0 && mOv.targetSellOut !== item.sellOutTarget) {
+      const calc = calculateTrainerKpiPoints({
+        sellOutTarget: mOv.targetSellOut,
+        sellOutActual: item.sellOutActual,
+        eventOmsetTarget: item.eventOmsetTarget,
+        eventOmsetActual: item.eventOmsetActual,
+        visitTarget: item.visitTarget,
+        visitActual: item.visitActual,
+        trainingTarget: item.trainingTarget,
+        trainingActual: item.trainingActual,
+        baProductivityTarget: item.baProductivityTarget,
+        baProductivityActual: item.baProductivityActual,
+      });
+      return {
+        ...item,
+        sellOutTarget: mOv.targetSellOut,
+        sellOutAchievementPct: calc.sellOutAchievementPct,
+        pointSellOut: calc.pointSellOut,
+        totalScore: calc.totalScore,
+        grade: calc.grade,
+        scoreCategory: calc.scoreCategory,
+        hasSp1: calc.hasSp1,
+      };
+    }
+    return item;
+  });
+}
+
+const KPI_SALES_COLORS: Record<string, string> = {
+  'ALBERT FERNANDO': '#10B981',
+  ILHAMSYAH: '#00D2FF',
+  TIWI: '#FF6B00',
+  'ABDUL RAHIM': '#A855F7',
+  PARETO: '#3B82F6',
+  'LUAR KOTA': '#F59E0B',
+};
+
+// Isolated Memoized KPI Sales Panel (Monthly Trend Chart + Full-Column Scorecard Table)
+const KpiSalesDashboardPanel: React.FC<{
+  filters: DashboardFilters;
+  selectedYear: number;
+  onNavigateTab: (tab: ActiveTab) => void;
+}> = React.memo(({ filters, selectedYear, onNavigateTab }) => {
+  const [rawItems, setRawItems] = useState<KpiSalesScorecardItem[]>(() =>
+    syncKpiSalesItemsForDashboard(loadKpiSalesData())
+  );
+  const [chartViewMode, setChartViewMode] = useState<'per_sales' | 'team_avg'>('per_sales');
+  const [selectedPeriod, setSelectedPeriod] = useState<string>('ALL');
+  const [highlightedSales, setHighlightedSales] = useState<string | null>(null);
+  const [hoveredBar, setHoveredBar] = useState<{
+    period: string;
+    salesName?: string;
+    score: number;
+    sellOutPct: number;
+    grade: string;
+    incentive: number;
+  } | null>(null);
+
+  useEffect(() => {
+    const refresh = () => setRawItems(syncKpiSalesItemsForDashboard(loadKpiSalesData()));
+    window.addEventListener(TARGETS_UPDATED_EVENT, refresh);
+    window.addEventListener('storage', refresh);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, refresh);
+      window.removeEventListener('storage', refresh);
+    };
+  }, []);
+
+  // Sync period filter with global BULAN when user picks a specific month in header
+  useEffect(() => {
+    if (!filters.BULAN || filters.BULAN === 'ALL') {
+      setSelectedPeriod('ALL');
+    } else {
+      const upper = filters.BULAN.trim().toUpperCase();
+      const target = upper.includes(String(selectedYear)) ? upper : `${upper} ${selectedYear}`;
+      setSelectedPeriod(target);
+    }
+  }, [filters.BULAN, selectedYear]);
+
+  const {
+    monthsList,
+    scopedAllMonthsItems,
+    monthlySeries,
+    tableRows,
+    latestPeriodRows,
+    summary,
+  } = useMemo(() => {
+    const salesFilterUpper =
+      filters.SALES && filters.SALES !== 'ALL'
+        ? filters.SALES.trim().toUpperCase() === 'ALBERT'
+          ? 'ALBERT FERNANDO'
+          : filters.SALES.trim().toUpperCase()
+        : 'ALL';
+    const regionFilterUpper =
+      filters.REGION && filters.REGION !== 'ALL' ? filters.REGION.trim().toUpperCase() : 'ALL';
+
+    const scoped = rawItems.filter((item) => {
+      if (salesFilterUpper !== 'ALL' && item.salesName.trim().toUpperCase() !== salesFilterUpper) {
+        return false;
+      }
+      if (regionFilterUpper !== 'ALL') {
+        const areaMatch = (item.coverArea || '').toUpperCase().includes(regionFilterUpper);
+        const cfg = SALES_MASTER_6_CONFIG[item.salesName];
+        const cfgMatch = cfg ? cfg.area.toUpperCase().includes(regionFilterUpper) : false;
+        if (!areaMatch && !cfgMatch) return false;
+      }
+      return true;
+    });
+
+    const periodSet = new Set<string>();
+    scoped.forEach((i) => periodSet.add((i.monthPeriod || 'OKTOBER 2026').toUpperCase()));
+    const sortedMonths = Array.from(periodSet).sort(
+      (a, b) => parsePeriodOrderKey(a) - parsePeriodOrderKey(b)
+    );
+
+    const series = sortedMonths.map((period) => {
+      const rows = scoped
+        .filter((i) => (i.monthPeriod || '').toUpperCase() === period)
+        .sort((a, b) => b.totalScore - a.totalScore || b.sellOutAchievementPct - a.sellOutAchievementPct);
+      const count = rows.length;
+      const avgScore =
+        count > 0 ? rows.reduce((s, r) => s + (r.totalScore || 0), 0) / count : 0;
+      const totalTgt = rows.reduce((s, r) => s + (r.sellOutTarget || 0), 0);
+      const totalAct = rows.reduce((s, r) => s + (r.sellOutActual || 0), 0);
+      const sellOutPct = totalTgt > 0 ? (totalAct / totalTgt) * 100 : 0;
+      const totalInc = rows.reduce((s, r) => s + (r.kpiIncentive || 0), 0);
+      const totalPen = rows.reduce((s, r) => s + (r.kpiPenalty || 0), 0);
+      const sp1Count = rows.filter((r) => r.hasSp1 || r.totalScore < 70).length;
+      return {
+        period,
+        shortLabel: formatShortMonthPeriod(period),
+        rows,
+        avgScore,
+        totalTgt,
+        totalAct,
+        sellOutPct,
+        totalInc,
+        totalPen,
+        sp1Count,
+      };
+    });
+
+    const activePeriodKey =
+      selectedPeriod !== 'ALL' && sortedMonths.includes(selectedPeriod)
+        ? selectedPeriod
+        : 'ALL';
+
+    const filteredTable = scoped
+      .filter((item) => {
+        if (activePeriodKey !== 'ALL' && (item.monthPeriod || '').toUpperCase() !== activePeriodKey) {
+          return false;
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        const pd = parsePeriodOrderKey(b.monthPeriod) - parsePeriodOrderKey(a.monthPeriod);
+        if (pd !== 0) return pd;
+        if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+        return b.sellOutAchievementPct - a.sellOutAchievementPct;
+      });
+
+    const latestPeriod =
+      activePeriodKey !== 'ALL'
+        ? activePeriodKey
+        : sortedMonths[sortedMonths.length - 1] || 'OKTOBER 2026';
+
+    const latestRows = scoped
+      .filter((i) => (i.monthPeriod || '').toUpperCase() === latestPeriod)
+      .sort((a, b) => b.totalScore - a.totalScore || b.sellOutAchievementPct - a.sellOutAchievementPct);
+
+    const avgScore =
+      filteredTable.length > 0
+        ? filteredTable.reduce((s, r) => s + (r.totalScore || 0), 0) / filteredTable.length
+        : 0;
+    const totalSellOutTarget = filteredTable.reduce((s, r) => s + (r.sellOutTarget || 0), 0);
+    const totalSellOutActual = filteredTable.reduce((s, r) => s + (r.sellOutActual || 0), 0);
+    const sellOutAchvPct =
+      totalSellOutTarget > 0 ? (totalSellOutActual / totalSellOutTarget) * 100 : 0;
+    const totalIncentive = filteredTable.reduce((s, r) => s + (r.kpiIncentive || 0), 0);
+    const totalPenalty = filteredTable.reduce((s, r) => s + (r.kpiPenalty || 0), 0);
+    const sp1Count = filteredTable.filter((r) => r.hasSp1 || r.totalScore < 70).length;
+    const gradeACount = filteredTable.filter((r) => r.grade === 'A').length;
+
+    return {
+      monthsList: sortedMonths,
+      scopedAllMonthsItems: scoped,
+      monthlySeries: series,
+      tableRows: filteredTable,
+      latestPeriodRows: { period: latestPeriod, rows: latestRows },
+      summary: {
+        avgScore,
+        totalSellOutTarget,
+        totalSellOutActual,
+        sellOutAchvPct,
+        totalIncentive,
+        totalPenalty,
+        sp1Count,
+        gradeACount,
+      },
+    };
+  }, [rawItems, filters.SALES, filters.REGION, selectedPeriod]);
+
+  const uniqueSalesInChart = useMemo(() => {
+    const names = new Set<string>();
+    scopedAllMonthsItems.forEach((i) => names.add(i.salesName));
+    return Array.from(names);
+  }, [scopedAllMonthsItems]);
+
+  return (
+    <div className="flex-1 flex flex-col gap-3">
+      {/* Header + Controls */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
+        <div>
+          <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
+            Pencapaian KPI Sales Bulanan (Balanced Scorecard 100 Poin)
+          </h2>
+          <p className="text-xs text-slate-400">
+            3 Sales Utama (Ilhamsyah, Tiwi &amp; Albert Fernando · Sell Out &amp; Target Albert + Abdul Rahim) per bulan
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex items-center p-0.5 rounded-lg bg-[#0D121D] border border-[#243147] text-[11px] font-bold">
+            <button
+              type="button"
+              onClick={() => setSelectedPeriod('ALL')}
+              className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors whitespace-nowrap ${
+                selectedPeriod === 'ALL'
+                  ? 'bg-[#FF6B00] text-white font-extrabold'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Semua Bulan ({monthsList.length})
+            </button>
+            {monthsList.map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setSelectedPeriod(m)}
+                className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors whitespace-nowrap ${
+                  selectedPeriod === m
+                    ? 'bg-[#00D2FF] text-slate-950 font-extrabold'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                {formatShortMonthPeriod(m)}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onNavigateTab('kpi')}
+            className="px-3 py-1.5 rounded-lg bg-[#FF6B00] hover:bg-[#EA580C] text-white text-xs font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap"
+          >
+            <span>Kelola KPI Sales</span>
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* 4 Summary KPI Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2.5 font-mono tabular-nums">
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+          <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">
+            Rata-rata Skor KPI Sales
+          </span>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span
+              className={`text-xl font-black ${
+                summary.avgScore >= 90
+                  ? 'text-emerald-400'
+                  : summary.avgScore >= 80
+                  ? 'text-[#00D2FF]'
+                  : summary.avgScore >= 70
+                  ? 'text-amber-400'
+                  : 'text-rose-400'
+              }`}
+            >
+              {summary.avgScore.toFixed(1)} pt
+            </span>
+            <span className="text-xs text-slate-400">/ 100</span>
+          </div>
+          <span className="text-[10.5px] font-sans text-emerald-400 font-semibold mt-0.5 block">
+            {summary.gradeACount} Scorecard Grade A (≥90 pt)
+          </span>
+        </div>
+
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+          <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">
+            Pencapaian Sell Out KPI
+          </span>
+          <span
+            className="text-lg font-black text-[#00D2FF] mt-1 block whitespace-nowrap"
+            title={formatRupiah(summary.totalSellOutActual)}
+          >
+            {formatRupiah(summary.totalSellOutActual)}
+          </span>
+          <span className="text-[10.5px] text-slate-300 mt-0.5 block whitespace-nowrap">
+            Target: {formatCompactIdr(summary.totalSellOutTarget)} ·{' '}
+            <strong
+              className={
+                summary.sellOutAchvPct >= 100 ? 'text-emerald-400' : 'text-amber-400'
+              }
+            >
+              {summary.sellOutAchvPct.toFixed(1)}%
+            </strong>
+          </span>
+        </div>
+
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+          <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">
+            Total Reward Insentif KPI
+          </span>
+          <span className="text-lg font-black text-emerald-400 mt-1 block whitespace-nowrap">
+            +{formatRupiah(summary.totalIncentive)}
+          </span>
+          <span className="text-[10.5px] font-sans text-slate-400 mt-0.5 block">
+            Periode {selectedPeriod === 'ALL' ? `${monthsList.length} Bulan` : selectedPeriod}
+          </span>
+        </div>
+
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+          <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">
+            Status Kepatuhan &amp; Denda SP1
+          </span>
+          <span
+            className={`text-lg font-black mt-1 block whitespace-nowrap ${
+              summary.sp1Count > 0 ? 'text-rose-400' : 'text-emerald-400'
+            }`}
+          >
+            {summary.sp1Count > 0
+              ? `${summary.sp1Count} Kasus SP1`
+              : '0 SP1 (100% Aman)'}
+          </span>
+          <span className="text-[10.5px] text-slate-400 mt-0.5 block whitespace-nowrap">
+            Total Denda KPI: {summary.totalPenalty > 0 ? `-${formatRupiah(summary.totalPenalty)}` : 'Rp 0'}
+          </span>
+        </div>
+      </div>
+
+      {/* MONTHLY KPI SALES ACHIEVEMENT CHART + LATEST PERIOD RANKING */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
+        {/* LEFT: Monthly KPI Sales Trend / Grouped Bars */}
+        <div className="xl:col-span-8 bg-[#121926] border border-[#1F293B] rounded-xl p-4 flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#1E293B]">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-lg bg-[#FF6B00]/15 border border-[#FF6B00]/30 text-[#FF6B00] shrink-0">
+                <BarChart3 className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="text-xs font-extrabold uppercase tracking-wider text-white">
+                  Grafik Pencapaian KPI Sales Setiap Bulan
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Skala 0–100 Poin · Garis merah batas SP1 (70 pt) &amp; garis hijau Grade A (90 pt). Klik bulan untuk filter tabel.
+                </p>
+              </div>
+            </div>
+
+            <div className="inline-flex items-center p-0.5 rounded-lg bg-[#0B101A] border border-[#243147] text-[10.5px] font-bold">
+              <button
+                type="button"
+                onClick={() => setChartViewMode('per_sales')}
+                className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors ${
+                  chartViewMode === 'per_sales'
+                    ? 'bg-[#FF6B00] text-white'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Per Sales / Bulan
+              </button>
+              <button
+                type="button"
+                onClick={() => setChartViewMode('team_avg')}
+                className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors ${
+                  chartViewMode === 'team_avg'
+                    ? 'bg-[#00D2FF] text-slate-950'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Rata-rata Tim / Bulan
+              </button>
+            </div>
+          </div>
+
+          {/* Interactive Inspect Strip */}
+          {hoveredBar && (
+            <div className="px-3 py-1.5 rounded-lg bg-[#0B101A] border border-[#243147] flex flex-wrap items-center justify-between gap-2 text-xs font-mono tabular-nums">
+              <div className="flex items-center gap-2 font-sans">
+                <span className="text-[#00D2FF] font-extrabold">{hoveredBar.period}</span>
+                {hoveredBar.salesName && (
+                  <>
+                    <span className="text-slate-500">·</span>
+                    <span className="font-bold text-white">{hoveredBar.salesName}</span>
+                  </>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-3 text-[11px]">
+                <span className="font-black text-white">
+                  Skor: <span className="text-emerald-400">{hoveredBar.score.toFixed(1)} pt</span>
+                </span>
+                <span className="text-slate-300">
+                  Sell Out: <strong className="text-[#00D2FF]">{hoveredBar.sellOutPct.toFixed(1)}%</strong>
+                </span>
+                <span className="text-amber-300 font-bold">Grade {hoveredBar.grade}</span>
+                <span className="text-emerald-400 font-bold">
+                  Insentif: +{formatCompactIdr(hoveredBar.incentive)}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {monthlySeries.length === 0 ? (
+            <div className="py-12 text-center text-xs text-slate-400">
+              Belum ada data KPI Sales untuk filter saat ini.
+            </div>
+          ) : (
+            <div className="relative pt-2">
+              <div className="flex items-stretch gap-2.5">
+                {/* Y-Axis 0-100 */}
+                <div className="flex flex-col justify-between text-right font-mono text-[10px] text-slate-500 tabular-nums py-7 pr-2 border-r border-[#1E293B] shrink-0 w-10">
+                  <span>100</span>
+                  <span>75</span>
+                  <span>50</span>
+                  <span>0</span>
+                </div>
+
+                {/* Plot Area */}
+                <div className="flex-1 relative h-60 flex items-end gap-3 pt-7 pb-1 min-w-0">
+                  {/* Threshold 90 pt (Grade A) & 70 pt (SP1 limit) */}
+                  <div
+                    className="absolute left-0 right-0 border-t border-dashed border-emerald-500/40 pointer-events-none"
+                    style={{ bottom: 'calc(28px + 0.9 * (100% - 56px))' }}
+                  >
+                    <span className="text-[9px] font-mono text-emerald-400/80 bg-[#121926] px-1">
+                      90 pt (Grade A)
+                    </span>
+                  </div>
+                  <div
+                    className="absolute left-0 right-0 border-t border-dashed border-rose-500/45 pointer-events-none"
+                    style={{ bottom: 'calc(28px + 0.7 * (100% - 56px))' }}
+                  >
+                    <span className="text-[9px] font-mono text-rose-400/80 bg-[#121926] px-1">
+                      70 pt (Batas SP1)
+                    </span>
+                  </div>
+
+                  {monthlySeries.map((m) => {
+                    const isMonthSelected = selectedPeriod === m.period;
+                    if (chartViewMode === 'team_avg') {
+                      const heightPct = Math.max(6, Math.min(100, m.avgScore));
+                      return (
+                        <button
+                          key={m.period}
+                          type="button"
+                          onClick={() =>
+                            setSelectedPeriod((prev) => (prev === m.period ? 'ALL' : m.period))
+                          }
+                          onMouseEnter={() =>
+                            setHoveredBar({
+                              period: m.period,
+                              score: m.avgScore,
+                              sellOutPct: m.sellOutPct,
+                              grade:
+                                m.avgScore >= 90
+                                  ? 'A'
+                                  : m.avgScore >= 80
+                                  ? 'B'
+                                  : m.avgScore >= 70
+                                  ? 'C'
+                                  : 'D',
+                              incentive: m.totalInc,
+                            })
+                          }
+                          onMouseLeave={() => setHoveredBar(null)}
+                          className={`flex-1 min-w-0 flex flex-col items-center h-full justify-end rounded-lg px-1.5 py-1 cursor-pointer transition-colors ${
+                            isMonthSelected ? 'bg-[#17263D] ring-1 ring-[#00D2FF]/50' : 'hover:bg-[#151F33]'
+                          }`}
+                        >
+                          <div className="mb-1 text-center">
+                            <span className="text-[11px] font-mono font-black text-white block">
+                              {m.avgScore.toFixed(1)}
+                            </span>
+                            <span className="text-[9.5px] font-mono text-[#00D2FF] block">
+                              SO {m.sellOutPct.toFixed(0)}%
+                            </span>
+                          </div>
+                          <div className="w-full h-full flex items-end justify-center px-2">
+                            <div
+                              style={{ height: `${heightPct}%` }}
+                              className={`w-full max-w-[54px] rounded-t-md transition-all duration-200 ${
+                                m.avgScore >= 90
+                                  ? 'bg-gradient-to-t from-emerald-600 to-emerald-400'
+                                  : m.avgScore >= 80
+                                  ? 'bg-gradient-to-t from-cyan-600 to-[#00D2FF]'
+                                  : 'bg-gradient-to-t from-amber-600 to-amber-400'
+                              }`}
+                            />
+                          </div>
+                          <span className="mt-1.5 text-[10.5px] font-extrabold text-slate-200 truncate">
+                            {m.shortLabel}
+                          </span>
+                        </button>
+                      );
+                    }
+
+                    // Grouped Per Sales Bars per Month
+                    return (
+                      <div
+                        key={m.period}
+                        onClick={() =>
+                          setSelectedPeriod((prev) => (prev === m.period ? 'ALL' : m.period))
+                        }
+                        className={`flex-1 min-w-0 flex flex-col items-center h-full justify-end rounded-lg px-2 py-1 cursor-pointer transition-colors ${
+                          isMonthSelected ? 'bg-[#17263D] ring-1 ring-[#00D2FF]/50' : 'hover:bg-[#141D2E]/70'
+                        }`}
+                      >
+                        <div className="w-full h-full flex items-end justify-center gap-1 sm:gap-1.5">
+                          {m.rows.map((r) => {
+                            const hPct = Math.max(8, Math.min(100, r.totalScore));
+                            const color = KPI_SALES_COLORS[r.salesName] || '#3B82F6';
+                            const isDimmed =
+                              highlightedSales !== null && highlightedSales !== r.salesName;
+                            return (
+                              <div
+                                key={r.salesName}
+                                onMouseEnter={(e) => {
+                                  e.stopPropagation();
+                                  setHoveredBar({
+                                    period: m.period,
+                                    salesName: r.salesName,
+                                    score: r.totalScore,
+                                    sellOutPct: r.sellOutAchievementPct,
+                                    grade: r.grade,
+                                    incentive: r.kpiIncentive,
+                                  });
+                                }}
+                                onMouseLeave={() => setHoveredBar(null)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setHighlightedSales((prev) =>
+                                    prev === r.salesName ? null : r.salesName
+                                  );
+                                }}
+                                className="flex-1 flex flex-col items-center justify-end h-full min-w-[10px] max-w-[26px] group"
+                              >
+                                <span className="text-[9px] font-mono font-bold text-slate-300 mb-0.5 leading-none">
+                                  {r.totalScore}
+                                </span>
+                                <div
+                                  style={{
+                                    height: `${hPct}%`,
+                                    backgroundColor: color,
+                                    opacity: isDimmed ? 0.28 : 1,
+                                  }}
+                                  className="w-full rounded-t-sm transition-all duration-200 group-hover:brightness-110"
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div className="mt-1.5 text-center w-full">
+                          <span className="text-[10.5px] font-extrabold text-white block truncate">
+                            {m.shortLabel}
+                          </span>
+                          <span className="text-[9.5px] font-mono text-slate-400 block">
+                            Avg {m.avgScore.toFixed(1)} pt
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Legend */}
+          {chartViewMode === 'per_sales' && (
+            <div className="pt-2 border-t border-[#1E293B] flex flex-wrap items-center justify-between gap-2 text-[10.5px]">
+              <div className="flex flex-wrap items-center gap-3">
+                {uniqueSalesInChart.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() =>
+                      setHighlightedSales((prev) => (prev === name ? null : name))
+                    }
+                    className={`inline-flex items-center gap-1.5 cursor-pointer transition-opacity ${
+                      highlightedSales && highlightedSales !== name ? 'opacity-40' : 'opacity-100'
+                    }`}
+                  >
+                    <span
+                      className="w-2.5 h-2.5 rounded-xs shrink-0"
+                      style={{ backgroundColor: KPI_SALES_COLORS[name] || '#3B82F6' }}
+                    />
+                    <span className="font-bold text-slate-200">{name}</span>
+                  </button>
+                ))}
+              </div>
+              {highlightedSales && (
+                <button
+                  type="button"
+                  onClick={() => setHighlightedSales(null)}
+                  className="text-cyan-300 font-bold hover:underline cursor-pointer"
+                >
+                  Reset Sorotan
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* RIGHT: Per-Sales KPI Gauge Ranking (Active / Latest Month) */}
+        <div className="xl:col-span-4 bg-[#121926] border border-[#1F293B] rounded-xl p-4 flex flex-col justify-between gap-2.5">
+          <div>
+            <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#1E293B]">
+              <h3 className="text-xs font-extrabold uppercase tracking-wider text-white">
+                Peringkat Skor KPI Sales
+              </h3>
+              <span className="text-[10px] font-mono font-bold text-[#00D2FF]">
+                {latestPeriodRows.period}
+              </span>
+            </div>
+
+            <div className="space-y-2 mt-2.5">
+              {latestPeriodRows.rows.map((r, idx) => {
+                const color = KPI_SALES_COLORS[r.salesName] || '#3B82F6';
+                return (
+                  <button
+                    key={r.salesName}
+                    type="button"
+                    onClick={() =>
+                      setHighlightedSales((prev) => (prev === r.salesName ? null : r.salesName))
+                    }
+                    className={`w-full text-left p-2 rounded-lg border transition-colors cursor-pointer ${
+                      highlightedSales === r.salesName
+                        ? 'bg-[#17263D] border-[#00D2FF]/50'
+                        : 'bg-[#0B101A] border-[#1E293B] hover:bg-[#151E30]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <span className="font-bold text-white truncate">
+                        #{idx + 1} {r.salesName}
+                        {r.salesName.trim().toUpperCase() === 'ALBERT FERNANDO' && (
+                          <span className="ml-1.5 text-[9.5px] font-semibold text-emerald-300">
+                            (+SO Abdul Rahim)
+                          </span>
+                        )}
+                      </span>
+                      <span
+                        className={`font-mono font-black tabular-nums shrink-0 ${
+                          r.totalScore >= 90
+                            ? 'text-emerald-400'
+                            : r.totalScore >= 80
+                            ? 'text-[#00D2FF]'
+                            : r.totalScore >= 70
+                            ? 'text-amber-400'
+                            : 'text-rose-400'
+                        }`}
+                      >
+                        {r.totalScore} pt · Grade {r.grade}
+                      </span>
+                    </div>
+                    <div className="w-full h-1.5 bg-[#192234] rounded-full overflow-hidden mt-1.5">
+                      <div
+                        className="h-full rounded-full transition-all duration-300"
+                        style={{
+                          width: `${Math.max(4, Math.min(100, r.totalScore))}%`,
+                          backgroundColor: color,
+                        }}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] font-mono tabular-nums text-slate-400 mt-1">
+                      <span>Sell Out: {r.sellOutAchievementPct.toFixed(1)}%</span>
+                      <span>
+                        {r.kpiIncentive > 0
+                          ? `+${formatCompactIdr(r.kpiIncentive)}`
+                          : r.kpiPenalty > 0
+                          ? `-${formatCompactIdr(r.kpiPenalty)} (SP1)`
+                          : 'Rp 0'}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* FULL-WIDTH TABLE: ALL COLUMNS VISIBLE ON SCREEN */}
+      <div className="bg-[#121926] border border-[#1F293B] rounded-xl overflow-hidden flex flex-col">
+        <div className="px-4 py-3 border-b border-[#1E293B] bg-[#0E1523] flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#00D2FF]">
+            Rekap Lengkap Scorecard KPI Sales ({tableRows.length} Data)
+          </h3>
+          <span className="text-[11px] font-mono text-slate-400">
+            5 Pilar Balanced Scorecard (100 Poin) · Tampilan Penuh Semua Kolom
+          </span>
+        </div>
+
+        <div className="w-full overflow-x-auto">
+          <table className="w-full text-[10.5px] text-left border-collapse">
+            <thead className="bg-[#0B101A]">
+              <tr className="text-[9.5px] uppercase text-slate-400 border-b border-[#1E293B] leading-tight">
+                <th className="py-2.5 px-2">Periode</th>
+                <th className="py-2.5 px-2">Sales &amp; Area</th>
+                <th className="py-2.5 px-2 text-right">
+                  Sell Out<br />
+                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">
+                    (Tgt → Akt / %)
+                  </span>
+                </th>
+                <th className="py-2.5 px-1.5 text-center text-[#00D2FF]">
+                  P1: Out<br />
+                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">(Maks 40)</span>
+                </th>
+                <th className="py-2.5 px-1.5 text-center">
+                  P2: Tag &gt;45H<br />
+                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">(Maks 30)</span>
+                </th>
+                <th className="py-2.5 px-1.5 text-center">
+                  P3: Visit<br />
+                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">(Maks 10)</span>
+                </th>
+                <th className="py-2.5 px-1.5 text-center">
+                  P4: Mon BA<br />
+                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">(Maks 10)</span>
+                </th>
+                <th className="py-2.5 px-1.5 text-center">
+                  P5: Buffer<br />
+                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">(Maks 10)</span>
+                </th>
+                <th className="py-2.5 px-2 text-center text-white">Total<br />Skor</th>
+                <th className="py-2.5 px-2 text-center">Grade &amp;<br />Status</th>
+                <th className="py-2.5 px-2 text-right">Insentif /<br />Denda KPI</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
+              {tableRows.length === 0 ? (
+                <tr>
+                  <td colSpan={11} className="py-8 text-center font-sans text-slate-400">
+                    Tidak ada data KPI Sales untuk filter yang dipilih.
+                  </td>
+                </tr>
+              ) : (
+                tableRows.map((row) => {
+                  const isHighlighted = highlightedSales === row.salesName;
+                  return (
+                    <tr
+                      key={row.id || `${row.salesName}-${row.monthPeriod}`}
+                      onClick={() =>
+                        setHighlightedSales((prev) =>
+                          prev === row.salesName ? null : row.salesName
+                        )
+                      }
+                      className={`transition-colors cursor-pointer ${
+                        isHighlighted ? 'bg-[#17263D]' : 'hover:bg-[#172033]'
+                      }`}
+                    >
+                      <td className="py-2 px-2 font-bold text-cyan-300 whitespace-nowrap">
+                        {formatShortMonthPeriod(row.monthPeriod)}
+                      </td>
+                      <td className="py-2 px-2 font-sans">
+                        <div className="font-bold text-white leading-snug">{row.salesName}</div>
+                        <div className="text-[9.5px] text-slate-400 leading-tight">
+                          {row.salesName.trim().toUpperCase() === 'ALBERT FERNANDO'
+                            ? `${row.coverArea} · + Sell Out & Target Abdul Rahim`
+                            : row.coverArea}
+                        </div>
+                      </td>
+                      <td className="py-2 px-2 text-right whitespace-nowrap">
+                        <div
+                          className="text-[9.5px] text-slate-400"
+                          title={`Target: ${formatRupiah(row.sellOutTarget)}`}
+                        >
+                          T: {formatCompactIdr(row.sellOutTarget)}
+                        </div>
+                        <div
+                          className="font-bold text-white"
+                          title={`Aktual: ${formatRupiah(row.sellOutActual)}`}
+                        >
+                          A: {formatCompactIdr(row.sellOutActual)}{' '}
+                          <span
+                            className={
+                              row.sellOutAchievementPct >= 100
+                                ? 'text-emerald-400'
+                                : row.sellOutAchievementPct >= 80
+                                ? 'text-cyan-400'
+                                : 'text-amber-400'
+                            }
+                          >
+                            ({row.sellOutAchievementPct.toFixed(1)}%)
+                          </span>
+                        </div>
+                      </td>
+                      <td className="py-2 px-1.5 text-center font-bold text-[#00D2FF] whitespace-nowrap">
+                        {row.pointSellOut} pt
+                      </td>
+                      <td className="py-2 px-1.5 text-center whitespace-nowrap">
+                        <div className="font-bold text-white">{row.pointTagihan45H} pt</div>
+                        <div className="text-[9px] text-slate-400">
+                          {row.overdueStoresUp45Count} tk
+                        </div>
+                      </td>
+                      <td className="py-2 px-1.5 text-center whitespace-nowrap">
+                        <div className="font-bold text-white">{row.pointKunjungan} pt</div>
+                        <div className="text-[9px] text-slate-400">{row.visitLogsCount}x</div>
+                      </td>
+                      <td className="py-2 px-1.5 text-center whitespace-nowrap">
+                        <div className="font-bold text-white">{row.pointMonitoringBa} pt</div>
+                        <div className="text-[9px] text-slate-400">
+                          {row.baReportWeeklyPct}%/{row.baStockOpnameAppPct}%
+                        </div>
+                      </td>
+                      <td className="py-2 px-1.5 text-center whitespace-nowrap">
+                        <div className="font-bold text-white">{row.pointBufferStock} pt</div>
+                        <div className="text-[9px] text-slate-400">
+                          {row.storesUsingBufferAppPct}%
+                        </div>
+                      </td>
+                      <td
+                        className={`py-2 px-2 text-center font-black text-xs whitespace-nowrap ${
+                          row.totalScore >= 90
+                            ? 'text-emerald-400'
+                            : row.totalScore >= 80
+                            ? 'text-[#00D2FF]'
+                            : row.totalScore >= 70
+                            ? 'text-amber-400'
+                            : 'text-rose-400'
+                        }`}
+                      >
+                        {row.totalScore}
+                      </td>
+                      <td className="py-2 px-2 text-center whitespace-nowrap">
+                        <span
+                          className={`font-extrabold ${
+                            row.grade === 'A'
+                              ? 'text-emerald-400'
+                              : row.grade === 'B'
+                              ? 'text-[#00D2FF]'
+                              : row.grade === 'C'
+                              ? 'text-amber-400'
+                              : 'text-rose-400'
+                          }`}
+                        >
+                          Grade {row.grade}
+                        </span>
+                        <div
+                          className={`text-[9px] font-sans font-bold ${
+                            row.hasSp1 ? 'text-rose-400' : 'text-emerald-400/80'
+                          }`}
+                        >
+                          {row.hasSp1 ? 'Kena SP1' : 'Aman'}
+                        </div>
+                      </td>
+                      <td className="py-2 px-2 text-right whitespace-nowrap font-bold">
+                        {row.kpiIncentive > 0 ? (
+                          <span className="text-emerald-400">
+                            +{formatRupiah(row.kpiIncentive)}
+                          </span>
+                        ) : row.kpiPenalty > 0 ? (
+                          <span className="text-rose-400">-{formatRupiah(row.kpiPenalty)}</span>
+                        ) : (
+                          <span className="text-slate-500">Rp 0</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+            {tableRows.length > 0 && (
+              <tfoot className="bg-[#0E1523] border-t border-[#243147] font-mono tabular-nums text-[10.5px]">
+                <tr>
+                  <td colSpan={2} className="py-2.5 px-2 font-sans font-extrabold uppercase text-slate-200">
+                    Total / Rata-rata ({tableRows.length} Scorecard)
+                  </td>
+                  <td className="py-2.5 px-2 text-right whitespace-nowrap">
+                    <div className="text-[9.5px] text-slate-400">
+                      T: {formatCompactIdr(summary.totalSellOutTarget)}
+                    </div>
+                    <div className="font-black text-[#00D2FF]">
+                      A: {formatCompactIdr(summary.totalSellOutActual)} ({summary.sellOutAchvPct.toFixed(1)}%)
+                    </div>
+                  </td>
+                  <td colSpan={5} className="py-2.5 px-2 text-center font-sans text-slate-400">
+                    Rata-rata Skor Tim Sales
+                  </td>
+                  <td className="py-2.5 px-2 text-center font-black text-emerald-400">
+                    {summary.avgScore.toFixed(1)}
+                  </td>
+                  <td className="py-2.5 px-2 text-center font-bold text-slate-300">
+                    {summary.sp1Count} SP1
+                  </td>
+                  <td className="py-2.5 px-2 text-right font-black text-emerald-400 whitespace-nowrap">
+                    +{formatCompactIdr(summary.totalIncentive)}
+                    {summary.totalPenalty > 0 ? ` / -${formatCompactIdr(summary.totalPenalty)}` : ''}
+                  </td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+const KPI_TRAINER_COLORS: Record<string, string> = {
+  ARA: '#00D2FF',
+  RATIH: '#FF6B00',
+};
+
+// Isolated Memoized KPI Trainer Panel (Monthly Achievement Chart + Full-Column Scorecard Table)
+const KpiTrainerDashboardPanel: React.FC<{
+  filters: DashboardFilters;
+  selectedYear: number;
+  onNavigateTab: (tab: ActiveTab) => void;
+}> = React.memo(({ filters, selectedYear, onNavigateTab }) => {
+  const [rawItems, setRawItems] = useState<KpiTrainerScorecardItem[]>(() =>
+    syncKpiTrainerItemsForDashboard(loadKpiTrainerData())
+  );
+  const [chartMetric, setChartMetric] = useState<'score' | 'sell_out'>('score');
+  const [selectedPeriod, setSelectedPeriod] = useState<string>('ALL');
+  const [highlightedTrainer, setHighlightedTrainer] = useState<string | null>(null);
+  const [hoveredItem, setHoveredItem] = useState<KpiTrainerScorecardItem | null>(null);
+
+  useEffect(() => {
+    const refresh = () => setRawItems(syncKpiTrainerItemsForDashboard(loadKpiTrainerData()));
+    window.addEventListener(TARGETS_UPDATED_EVENT, refresh);
+    window.addEventListener('storage', refresh);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, refresh);
+      window.removeEventListener('storage', refresh);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!filters.BULAN || filters.BULAN === 'ALL') {
+      setSelectedPeriod('ALL');
+    } else {
+      const upper = filters.BULAN.trim().toUpperCase();
+      const target = upper.includes(String(selectedYear)) ? upper : `${upper} ${selectedYear}`;
+      setSelectedPeriod(target);
+    }
+  }, [filters.BULAN, selectedYear]);
+
+  const {
+    monthsList,
+    trainerNames,
+    monthlySeries,
+    tableRows,
+    latestPeriodRows,
+    summary,
+  } = useMemo(() => {
+    const trainerFilterUpper =
+      filters.TRAINER && filters.TRAINER !== 'ALL'
+        ? filters.TRAINER.trim().toUpperCase()
+        : 'ALL';
+
+    const scoped = rawItems.filter((item) => {
+      if (
+        trainerFilterUpper !== 'ALL' &&
+        !item.trainerName.trim().toUpperCase().includes(trainerFilterUpper)
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    const periodSet = new Set<string>();
+    const trainerSet = new Set<string>();
+    scoped.forEach((i) => {
+      periodSet.add((i.monthPeriod || 'OKTOBER 2026').toUpperCase());
+      trainerSet.add(i.trainerName.toUpperCase());
+    });
+
+    const sortedMonths = Array.from(periodSet).sort(
+      (a, b) => parsePeriodOrderKey(a) - parsePeriodOrderKey(b)
+    );
+    const trainers = Array.from(trainerSet).sort();
+
+    const series = sortedMonths.map((period) => {
+      const rows = scoped
+        .filter((i) => (i.monthPeriod || '').toUpperCase() === period)
+        .sort((a, b) => b.totalScore - a.totalScore);
+      const avgScore =
+        rows.length > 0 ? rows.reduce((s, r) => s + (r.totalScore || 0), 0) / rows.length : 0;
+      const totalTgt = rows.reduce((s, r) => s + (r.sellOutTarget || 0), 0);
+      const totalAct = rows.reduce((s, r) => s + (r.sellOutActual || 0), 0);
+      const sellOutPct = totalTgt > 0 ? (totalAct / totalTgt) * 100 : 0;
+      return {
+        period,
+        shortLabel: formatShortMonthPeriod(period),
+        rows,
+        avgScore,
+        sellOutPct,
+      };
+    });
+
+    const activePeriodKey =
+      selectedPeriod !== 'ALL' && sortedMonths.includes(selectedPeriod)
+        ? selectedPeriod
+        : 'ALL';
+
+    const filteredTable = scoped
+      .filter((item) => {
+        if (activePeriodKey !== 'ALL' && (item.monthPeriod || '').toUpperCase() !== activePeriodKey) {
+          return false;
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        const pd = parsePeriodOrderKey(b.monthPeriod) - parsePeriodOrderKey(a.monthPeriod);
+        if (pd !== 0) return pd;
+        return b.totalScore - a.totalScore;
+      });
+
+    const latestPeriod =
+      activePeriodKey !== 'ALL'
+        ? activePeriodKey
+        : sortedMonths[sortedMonths.length - 1] || 'OKTOBER 2026';
+
+    const latestRows = scoped
+      .filter((i) => (i.monthPeriod || '').toUpperCase() === latestPeriod)
+      .sort((a, b) => b.totalScore - a.totalScore);
+
+    const avgScore =
+      filteredTable.length > 0
+        ? filteredTable.reduce((s, r) => s + (r.totalScore || 0), 0) / filteredTable.length
+        : 0;
+    const totalSellOutTarget = filteredTable.reduce((s, r) => s + (r.sellOutTarget || 0), 0);
+    const totalSellOutActual = filteredTable.reduce((s, r) => s + (r.sellOutActual || 0), 0);
+    const sellOutAchvPct =
+      totalSellOutTarget > 0 ? (totalSellOutActual / totalSellOutTarget) * 100 : 0;
+    const totalEventTarget = filteredTable.reduce((s, r) => s + (r.eventOmsetTarget || 0), 0);
+    const totalEventActual = filteredTable.reduce((s, r) => s + (r.eventOmsetActual || 0), 0);
+    const eventAchvPct =
+      totalEventTarget > 0 ? (totalEventActual / totalEventTarget) * 100 : 0;
+    const totalVisitAct = filteredTable.reduce((s, r) => s + (r.visitActual || 0), 0);
+    const totalVisitTgt = filteredTable.reduce((s, r) => s + (r.visitTarget || 0), 0);
+    const totalTrainAct = filteredTable.reduce((s, r) => s + (r.trainingActual || 0), 0);
+    const totalTrainTgt = filteredTable.reduce((s, r) => s + (r.trainingTarget || 0), 0);
+
+    return {
+      monthsList: sortedMonths,
+      trainerNames: trainers,
+      monthlySeries: series,
+      tableRows: filteredTable,
+      latestPeriodRows: { period: latestPeriod, rows: latestRows },
+      summary: {
+        avgScore,
+        totalSellOutTarget,
+        totalSellOutActual,
+        sellOutAchvPct,
+        totalEventTarget,
+        totalEventActual,
+        eventAchvPct,
+        totalVisitAct,
+        totalVisitTgt,
+        totalTrainAct,
+        totalTrainTgt,
+      },
+    };
+  }, [rawItems, filters.TRAINER, selectedPeriod]);
+
+  const maxChartScale = useMemo(() => {
+    if (chartMetric === 'score') return 100;
+    const maxPct = Math.max(
+      110,
+      ...monthlySeries.flatMap((m) => m.rows.map((r) => r.sellOutAchievementPct || 0))
+    );
+    return Math.ceil(maxPct / 10) * 10;
+  }, [chartMetric, monthlySeries]);
+
+  return (
+    <div className="flex-1 flex flex-col gap-3">
+      {/* Header + Controls */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
+        <div>
+          <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
+            Pencapaian KPI Trainer Bulanan (5 Indikator · 100 Poin)
+          </h2>
+          <p className="text-xs text-slate-400">
+            Monitoring poin Sell Out, Omset Event, Kunjungan, Training &amp; Produktivitas BA per Trainer setiap bulan
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex items-center p-0.5 rounded-lg bg-[#0D121D] border border-[#243147] text-[11px] font-bold">
+            <button
+              type="button"
+              onClick={() => setSelectedPeriod('ALL')}
+              className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors whitespace-nowrap ${
+                selectedPeriod === 'ALL'
+                  ? 'bg-[#FF6B00] text-white font-extrabold'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Semua Bulan ({monthsList.length})
+            </button>
+            {monthsList.map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setSelectedPeriod(m)}
+                className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors whitespace-nowrap ${
+                  selectedPeriod === m
+                    ? 'bg-[#00D2FF] text-slate-950 font-extrabold'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                {formatShortMonthPeriod(m)}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onNavigateTab('kpi_trainer')}
+            className="px-3 py-1.5 rounded-lg bg-[#FF6B00] hover:bg-[#EA580C] text-white text-xs font-bold flex items-center gap-1 cursor-pointer whitespace-nowrap"
+          >
+            <span>Kelola KPI Trainer</span>
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* 4 Summary KPI Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2.5 font-mono tabular-nums">
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+          <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">
+            Rata-rata Skor KPI Trainer
+          </span>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span
+              className={`text-xl font-black ${
+                summary.avgScore >= 90
+                  ? 'text-emerald-400'
+                  : summary.avgScore >= 80
+                  ? 'text-[#00D2FF]'
+                  : 'text-amber-400'
+              }`}
+            >
+              {summary.avgScore.toFixed(1)} pt
+            </span>
+            <span className="text-xs text-slate-400">/ 100</span>
+          </div>
+          <span className="text-[10.5px] font-sans text-slate-400 mt-0.5 block">
+            {trainerNames.length} Trainer Aktif ({trainerNames.join(' & ') || '-'})
+          </span>
+        </div>
+
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+          <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">
+            Sell Out Binaan Trainer
+          </span>
+          <span className="text-lg font-black text-[#00D2FF] mt-1 block whitespace-nowrap">
+            {formatRupiah(summary.totalSellOutActual)}
+          </span>
+          <span className="text-[10.5px] text-slate-300 mt-0.5 block whitespace-nowrap">
+            Target: {formatCompactIdr(summary.totalSellOutTarget)} ·{' '}
+            <strong
+              className={
+                summary.sellOutAchvPct >= 100 ? 'text-emerald-400' : 'text-amber-400'
+              }
+            >
+              {summary.sellOutAchvPct.toFixed(1)}%
+            </strong>
+          </span>
+        </div>
+
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+          <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">
+            Realisasi Omset Event
+          </span>
+          <span className="text-lg font-black text-[#FF6B00] mt-1 block whitespace-nowrap">
+            {formatRupiah(summary.totalEventActual)}
+          </span>
+          <span className="text-[10.5px] text-slate-300 mt-0.5 block whitespace-nowrap">
+            Target: {formatCompactIdr(summary.totalEventTarget)} ·{' '}
+            <strong
+              className={
+                summary.eventAchvPct >= 100 ? 'text-emerald-400' : 'text-amber-400'
+              }
+            >
+              {summary.eventAchvPct.toFixed(1)}%
+            </strong>
+          </span>
+        </div>
+
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+          <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">
+            Training &amp; Kunjungan Lapangan
+          </span>
+          <span className="text-lg font-black text-emerald-400 mt-1 block whitespace-nowrap">
+            {summary.totalTrainAct}/{summary.totalTrainTgt} Training
+          </span>
+          <span className="text-[10.5px] text-slate-300 mt-0.5 block whitespace-nowrap">
+            Kunjungan: {summary.totalVisitAct} / {summary.totalVisitTgt} visit
+          </span>
+        </div>
+      </div>
+
+      {/* MONTHLY KPI TRAINER CHART + PILLAR BREAKDOWN */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-3">
+        <div className="xl:col-span-7 bg-[#121926] border border-[#1F293B] rounded-xl p-4 flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#1E293B]">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-lg bg-[#00D2FF]/15 border border-[#00D2FF]/30 text-[#00D2FF] shrink-0">
+                <BarChart3 className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="text-xs font-extrabold uppercase tracking-wider text-white">
+                  Grafik Pencapaian KPI Trainer Setiap Bulan
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Perbandingan bulanan skor KPI &amp; capaian Sell Out antar Trainer. Klik bulan untuk filter tabel.
+                </p>
+              </div>
+            </div>
+
+            <div className="inline-flex items-center p-0.5 rounded-lg bg-[#0B101A] border border-[#243147] text-[10.5px] font-bold">
+              <button
+                type="button"
+                onClick={() => setChartMetric('score')}
+                className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors ${
+                  chartMetric === 'score'
+                    ? 'bg-[#00D2FF] text-slate-950'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Skor KPI (Poin)
+              </button>
+              <button
+                type="button"
+                onClick={() => setChartMetric('sell_out')}
+                className={`px-2.5 py-1 rounded-md cursor-pointer transition-colors ${
+                  chartMetric === 'sell_out'
+                    ? 'bg-[#FF6B00] text-white'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                % Sell Out
+              </button>
+            </div>
+          </div>
+
+          {hoveredItem && (
+            <div className="px-3 py-1.5 rounded-lg bg-[#0B101A] border border-[#243147] flex flex-wrap items-center justify-between gap-2 text-xs font-mono tabular-nums">
+              <div className="flex items-center gap-2 font-sans">
+                <span className="text-[#00D2FF] font-extrabold">{hoveredItem.monthPeriod}</span>
+                <span className="text-slate-500">·</span>
+                <span className="font-bold text-white">{hoveredItem.trainerName}</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 text-[11px]">
+                <span className="font-black text-emerald-400">
+                  Skor: {hoveredItem.totalScore} pt ({hoveredItem.grade})
+                </span>
+                <span className="text-cyan-300">
+                  SO: {hoveredItem.sellOutAchievementPct.toFixed(1)}%
+                </span>
+                <span className="text-[#FF6B00]">
+                  Event: {hoveredItem.eventOmsetAchievementPct.toFixed(1)}%
+                </span>
+              </div>
+            </div>
+          )}
+
+          {monthlySeries.length === 0 ? (
+            <div className="py-12 text-center text-xs text-slate-400">
+              Belum ada data KPI Trainer pada filter aktif.
+            </div>
+          ) : (
+            <div className="flex items-stretch gap-2.5 pt-2">
+              <div className="flex flex-col justify-between text-right font-mono text-[10px] text-slate-500 tabular-nums py-7 pr-2 border-r border-[#1E293B] shrink-0 w-10">
+                <span>{maxChartScale}{chartMetric === 'sell_out' ? '%' : ''}</span>
+                <span>{Math.round(maxChartScale * 0.5)}{chartMetric === 'sell_out' ? '%' : ''}</span>
+                <span>0</span>
+              </div>
+
+              <div className="flex-1 flex items-end gap-4 h-60 pt-7 pb-1 min-w-0">
+                {monthlySeries.map((m) => {
+                  const isMonthSelected = selectedPeriod === m.period;
+                  return (
+                    <div
+                      key={m.period}
+                      onClick={() =>
+                        setSelectedPeriod((prev) => (prev === m.period ? 'ALL' : m.period))
+                      }
+                      className={`flex-1 min-w-0 flex flex-col items-center h-full justify-end rounded-lg px-2 py-1 cursor-pointer transition-colors ${
+                        isMonthSelected ? 'bg-[#17263D] ring-1 ring-[#00D2FF]/50' : 'hover:bg-[#141D2E]/70'
+                      }`}
+                    >
+                      <div className="w-full h-full flex items-end justify-center gap-2 sm:gap-3">
+                        {m.rows.map((r) => {
+                          const val =
+                            chartMetric === 'score' ? r.totalScore : r.sellOutAchievementPct;
+                          const hPct =
+                            maxChartScale > 0
+                              ? Math.max(8, Math.min(100, (val / maxChartScale) * 100))
+                              : 8;
+                          const color =
+                            KPI_TRAINER_COLORS[r.trainerName.toUpperCase()] || '#10B981';
+                          const isDimmed =
+                            highlightedTrainer !== null &&
+                            highlightedTrainer !== r.trainerName.toUpperCase();
+
+                          return (
+                            <div
+                              key={r.trainerName}
+                              onMouseEnter={(e) => {
+                                e.stopPropagation();
+                                setHoveredItem(r);
+                              }}
+                              onMouseLeave={() => setHoveredItem(null)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const upper = r.trainerName.toUpperCase();
+                                setHighlightedTrainer((prev) => (prev === upper ? null : upper));
+                              }}
+                              className="flex flex-col items-center justify-end h-full w-10 sm:w-14 group"
+                            >
+                              <span className="text-[10.5px] font-mono font-black text-white mb-0.5 whitespace-nowrap">
+                                {chartMetric === 'score' ? `${r.totalScore}` : `${val.toFixed(0)}%`}
+                              </span>
+                              <div
+                                style={{
+                                  height: `${hPct}%`,
+                                  backgroundColor: color,
+                                  opacity: isDimmed ? 0.3 : 1,
+                                }}
+                                className="w-full rounded-t-md transition-all duration-200 group-hover:brightness-110"
+                              />
+                              <span className="text-[9.5px] font-bold text-slate-300 mt-1">
+                                {r.trainerName}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div className="mt-1.5 text-center w-full border-t border-[#1E293B] pt-1">
+                        <span className="text-[10.5px] font-extrabold text-white block truncate">
+                          {m.shortLabel}
+                        </span>
+                        <span className="text-[9.5px] font-mono text-slate-400 block">
+                          Avg {m.avgScore.toFixed(1)} pt
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div className="pt-2 border-t border-[#1E293B] flex flex-wrap items-center justify-between gap-2 text-[10.5px]">
+            <div className="flex flex-wrap items-center gap-4">
+              {trainerNames.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() =>
+                    setHighlightedTrainer((prev) => (prev === t ? null : t))
+                  }
+                  className={`inline-flex items-center gap-1.5 cursor-pointer ${
+                    highlightedTrainer && highlightedTrainer !== t ? 'opacity-40' : 'opacity-100'
+                  }`}
+                >
+                  <span
+                    className="w-2.5 h-2.5 rounded-xs shrink-0"
+                    style={{ backgroundColor: KPI_TRAINER_COLORS[t] || '#10B981' }}
+                  />
+                  <span className="font-bold text-slate-200">Trainer {t}</span>
+                </button>
+              ))}
+            </div>
+            {highlightedTrainer && (
+              <button
+                type="button"
+                onClick={() => setHighlightedTrainer(null)}
+                className="text-cyan-300 font-bold hover:underline cursor-pointer"
+              >
+                Reset Sorotan
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* RIGHT: 5-Indicator Breakdown per Trainer */}
+        <div className="xl:col-span-5 bg-[#121926] border border-[#1F293B] rounded-xl p-4 flex flex-col justify-between gap-3">
+          <div>
+            <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#1E293B]">
+              <h3 className="text-xs font-extrabold uppercase tracking-wider text-white">
+                Breakdown 5 Indikator Trainer
+              </h3>
+              <span className="text-[10px] font-mono font-bold text-[#FF6B00]">
+                {latestPeriodRows.period}
+              </span>
+            </div>
+
+            <div className="space-y-3 mt-3">
+              {latestPeriodRows.rows.map((r) => {
+                const color = KPI_TRAINER_COLORS[r.trainerName.toUpperCase()] || '#10B981';
+                const pillars = [
+                  { label: 'Sell Out (40)', pt: r.pointSellOut, max: 40 },
+                  { label: 'Event (30)', pt: r.pointEvent, max: 30 },
+                  { label: 'Visit (10)', pt: r.pointKunjungan, max: 10 },
+                  { label: 'Training (10)', pt: r.pointTraining, max: 10 },
+                  { label: 'Prod. BA (10)', pt: r.pointBaProductivity, max: 10 },
+                ];
+                return (
+                  <div
+                    key={r.id || r.trainerName}
+                    className="p-3 rounded-lg bg-[#0B101A] border border-[#1E293B] space-y-2"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <span className="text-xs font-extrabold text-white">
+                          TRAINER {r.trainerName}
+                        </span>
+                        <span className="text-[10px] text-slate-400 block">{r.region}</span>
+                      </div>
+                      <div className="text-right font-mono tabular-nums">
+                        <span className="text-sm font-black" style={{ color }}>
+                          {r.totalScore} / 100 pt
+                        </span>
+                        <span className="block text-[10px] text-emerald-400 font-bold">
+                          {r.grade}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-5 gap-1.5 text-center font-mono tabular-nums">
+                      {pillars.map((p) => (
+                        <div
+                          key={p.label}
+                          className="p-1.5 rounded bg-[#121926] border border-[#1E293B]"
+                        >
+                          <span className="text-[9px] font-sans text-slate-400 block truncate">
+                            {p.label}
+                          </span>
+                          <span
+                            className={`text-[11px] font-extrabold ${
+                              p.pt >= p.max
+                                ? 'text-emerald-400'
+                                : p.pt > 0
+                                ? 'text-cyan-300'
+                                : 'text-rose-400'
+                            }`}
+                          >
+                            {p.pt} pt
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* FULL-WIDTH TABLE: ALL COLUMNS VISIBLE ON SCREEN */}
+      <div className="bg-[#121926] border border-[#1F293B] rounded-xl overflow-hidden flex flex-col">
+        <div className="px-4 py-3 border-b border-[#1E293B] bg-[#0E1523] flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#FF6B00]">
+            Rekap Lengkap Scorecard KPI Trainer ({tableRows.length} Data)
+          </h3>
+          <span className="text-[11px] font-mono text-slate-400">
+            5 Indikator Penilaian · Seluruh Kolom Tampil Penuh di Layar
+          </span>
+        </div>
+
+        <div className="w-full overflow-x-auto">
+          <table className="w-full text-[10.5px] text-left border-collapse">
+            <thead className="bg-[#0B101A]">
+              <tr className="text-[9.5px] uppercase text-slate-400 border-b border-[#1E293B] leading-tight">
+                <th className="py-2.5 px-2">Periode</th>
+                <th className="py-2.5 px-2">Trainer &amp; Area</th>
+                <th className="py-2.5 px-2 text-right text-[#00D2FF]">
+                  Sell Out (Maks 40 pt)<br />
+                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">
+                    (Tgt → Akt / % · Poin)
+                  </span>
+                </th>
+                <th className="py-2.5 px-2 text-right text-[#FF6B00]">
+                  Omset Event (Maks 30 pt)<br />
+                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">
+                    (Tgt → Akt / % · Poin)
+                  </span>
+                </th>
+                <th className="py-2.5 px-2 text-center">
+                  Kunjungan<br />
+                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">(Maks 10)</span>
+                </th>
+                <th className="py-2.5 px-2 text-center">
+                  Training<br />
+                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">(Maks 10)</span>
+                </th>
+                <th className="py-2.5 px-2 text-center">
+                  Prod. BA<br />
+                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">(Maks 10)</span>
+                </th>
+                <th className="py-2.5 px-2 text-center text-white">Total<br />Skor</th>
+                <th className="py-2.5 px-2 text-center">Kategori &amp;<br />Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
+              {tableRows.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="py-8 text-center font-sans text-slate-400">
+                    Tidak ada data KPI Trainer pada filter yang dipilih.
+                  </td>
+                </tr>
+              ) : (
+                tableRows.map((row) => {
+                  const isHighlighted =
+                    highlightedTrainer === row.trainerName.toUpperCase();
+                  return (
+                    <tr
+                      key={row.id || `${row.trainerName}-${row.monthPeriod}`}
+                      onClick={() => {
+                        const upper = row.trainerName.toUpperCase();
+                        setHighlightedTrainer((prev) => (prev === upper ? null : upper));
+                      }}
+                      className={`transition-colors cursor-pointer ${
+                        isHighlighted ? 'bg-[#17263D]' : 'hover:bg-[#172033]'
+                      }`}
+                    >
+                      <td className="py-2 px-2 font-bold text-cyan-300 whitespace-nowrap">
+                        {formatShortMonthPeriod(row.monthPeriod)}
+                      </td>
+                      <td className="py-2 px-2 font-sans">
+                        <div className="font-extrabold text-white">{row.trainerName}</div>
+                        <div className="text-[9.5px] text-slate-400 leading-tight">
+                          {row.region}
+                        </div>
+                      </td>
+                      <td className="py-2 px-2 text-right whitespace-nowrap">
+                        <div className="text-[9.5px] text-slate-400">
+                          T: {formatCompactIdr(row.sellOutTarget)} ·{' '}
+                          <strong className="text-[#00D2FF]">{row.pointSellOut} pt</strong>
+                        </div>
+                        <div className="font-bold text-white">
+                          A: {formatCompactIdr(row.sellOutActual)}{' '}
+                          <span
+                            className={
+                              row.sellOutAchievementPct >= 100
+                                ? 'text-emerald-400'
+                                : 'text-amber-400'
+                            }
+                          >
+                            ({row.sellOutAchievementPct.toFixed(1)}%)
+                          </span>
+                        </div>
+                      </td>
+                      <td className="py-2 px-2 text-right whitespace-nowrap">
+                        <div className="text-[9.5px] text-slate-400">
+                          T: {formatCompactIdr(row.eventOmsetTarget)} ·{' '}
+                          <strong className="text-[#FF6B00]">{row.pointEvent} pt</strong>
+                        </div>
+                        <div className="font-bold text-white">
+                          A: {formatCompactIdr(row.eventOmsetActual)}{' '}
+                          <span
+                            className={
+                              row.eventOmsetAchievementPct >= 100
+                                ? 'text-emerald-400'
+                                : 'text-amber-400'
+                            }
+                          >
+                            ({row.eventOmsetAchievementPct.toFixed(1)}%)
+                          </span>
+                        </div>
+                      </td>
+                      <td className="py-2 px-2 text-center whitespace-nowrap">
+                        <div className="font-bold text-white">{row.pointKunjungan} pt</div>
+                        <div className="text-[9.5px] text-slate-400">
+                          {row.visitActual}/{row.visitTarget} ({row.visitAchievementPct.toFixed(0)}%)
+                        </div>
+                      </td>
+                      <td className="py-2 px-2 text-center whitespace-nowrap">
+                        <div className="font-bold text-white">{row.pointTraining} pt</div>
+                        <div className="text-[9.5px] text-slate-400">
+                          {row.trainingActual}/{row.trainingTarget} ({row.trainingAchievementPct.toFixed(0)}%)
+                        </div>
+                      </td>
+                      <td className="py-2 px-2 text-center whitespace-nowrap">
+                        <div className="font-bold text-white">{row.pointBaProductivity} pt</div>
+                        <div className="text-[9.5px] text-slate-400">
+                          {row.baProductivityActual}/{row.baProductivityTarget} ({row.baProductivityAchievementPct.toFixed(0)}%)
+                        </div>
+                      </td>
+                      <td
+                        className={`py-2 px-2 text-center font-black text-xs whitespace-nowrap ${
+                          row.totalScore >= 90
+                            ? 'text-emerald-400'
+                            : row.totalScore >= 80
+                            ? 'text-[#00D2FF]'
+                            : 'text-amber-400'
+                        }`}
+                      >
+                        {row.totalScore}
+                      </td>
+                      <td className="py-2 px-2 text-center whitespace-nowrap">
+                        <span
+                          className={`font-extrabold ${
+                            row.totalScore >= 90
+                              ? 'text-emerald-400'
+                              : row.totalScore >= 80
+                              ? 'text-[#00D2FF]'
+                              : row.totalScore >= 70
+                              ? 'text-amber-400'
+                              : 'text-rose-400'
+                          }`}
+                        >
+                          {row.grade}
+                        </span>
+                        <div
+                          className={`text-[9px] font-sans font-bold ${
+                            row.hasSp1 ? 'text-rose-400' : 'text-emerald-400/80'
+                          }`}
+                        >
+                          {row.hasSp1 ? 'SP1 (<70)' : 'Aman'}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+            {tableRows.length > 0 && (
+              <tfoot className="bg-[#0E1523] border-t border-[#243147] font-mono tabular-nums text-[10.5px]">
+                <tr>
+                  <td colSpan={2} className="py-2.5 px-2 font-sans font-extrabold uppercase text-slate-200">
+                    Total / Rata-rata ({tableRows.length} Scorecard)
+                  </td>
+                  <td className="py-2.5 px-2 text-right whitespace-nowrap">
+                    <div className="text-[9.5px] text-slate-400">
+                      T: {formatCompactIdr(summary.totalSellOutTarget)}
+                    </div>
+                    <div className="font-black text-[#00D2FF]">
+                      A: {formatCompactIdr(summary.totalSellOutActual)} ({summary.sellOutAchvPct.toFixed(1)}%)
+                    </div>
+                  </td>
+                  <td className="py-2.5 px-2 text-right whitespace-nowrap">
+                    <div className="text-[9.5px] text-slate-400">
+                      T: {formatCompactIdr(summary.totalEventTarget)}
+                    </div>
+                    <div className="font-black text-[#FF6B00]">
+                      A: {formatCompactIdr(summary.totalEventActual)} ({summary.eventAchvPct.toFixed(1)}%)
+                    </div>
+                  </td>
+                  <td className="py-2.5 px-2 text-center font-bold text-slate-200">
+                    {summary.totalVisitAct}/{summary.totalVisitTgt}
+                  </td>
+                  <td className="py-2.5 px-2 text-center font-bold text-slate-200">
+                    {summary.totalTrainAct}/{summary.totalTrainTgt}
+                  </td>
+                  <td className="py-2.5 px-2 text-center text-slate-400 font-sans">
+                    Rata-rata
+                  </td>
+                  <td className="py-2.5 px-2 text-center font-black text-emerald-400">
+                    {summary.avgScore.toFixed(1)}
+                  </td>
+                  <td className="py-2.5 px-2 text-center font-bold text-slate-300">
+                    {tableRows.filter((r) => r.hasSp1).length} SP1
+                  </td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+});
 
 export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewProps> = ({
   allRecords,
@@ -1906,6 +5029,8 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     { id: 'promo_ba', label: 'Tim BA, Promo & Visit', icon: <Tag className="w-3.5 h-3.5" /> },
     { id: 'finance_bills', label: 'Profit, Cost & Tagihan', icon: <Wallet className="w-3.5 h-3.5" /> },
     { id: 'targets_alerts', label: 'Target & Analisa Gap', icon: <Target className="w-3.5 h-3.5" /> },
+    { id: 'kpi_sales', label: 'KPI Sales', icon: <Award className="w-3.5 h-3.5" /> },
+    { id: 'kpi_trainer', label: 'KPI Trainer', icon: <GraduationCap className="w-3.5 h-3.5" /> },
     { id: 'achieve_quartal', label: 'Achieve Quartal', icon: <Crown className="w-3.5 h-3.5" /> },
   ];
 
@@ -2703,11 +5828,11 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                 </div>
               </div>
 
-              {/* ROW 3: PERBANDINGAN PERFORMA BRAND (MoM) + PERBANDINGAN PERFORMA SALES (MoM) */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5">
+              {/* ROW 3: PERBANDINGAN PERFORMA BRAND (MoM) + PERBANDINGAN PERFORMA SALES (MoM) (Full-Width Stack so all columns are 100% visible) */}
+              <div className="flex flex-col gap-2.5">
                 {/* PANEL 3A: BRAND COMPARISON (MoM) */}
-                <div className="lg:col-span-5 bg-[#121926] border border-[#1F293B] rounded-xl p-3 flex flex-col justify-between">
-                  <div className="flex items-center justify-between gap-2 mb-1.5 flex-wrap">
+                <div className="w-full bg-[#121926] border border-[#1F293B] rounded-xl p-3 flex flex-col justify-between">
+                  <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
                     <h2 className="text-[11px] font-extrabold uppercase tracking-wider text-slate-100">
                       PERBANDINGAN PERFORMA BRAND (MoM)
                     </h2>
@@ -2720,98 +5845,126 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                     <table className="w-full text-[11px] text-left border-collapse">
                       <thead>
                         <tr className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 border-b border-[#1E293B]">
-                          <th className="py-1.5 pr-2 whitespace-nowrap">BRAND</th>
-                          <th className="py-1.5 px-2 text-right whitespace-nowrap">BLN LALU</th>
-                          <th className="py-1.5 px-2 text-right whitespace-nowrap">BLN INI</th>
-                          <th className="py-1.5 px-2 text-right whitespace-nowrap">MoM</th>
-                          <th className="py-1.5 pl-2 text-right whitespace-nowrap">SHARE</th>
+                          <th className="py-1.5 pr-3 whitespace-nowrap">BRAND</th>
+                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">BLN LALU ({snap.previousPeriodLabel || 'OKTOBER 2026'})</th>
+                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">BLN INI ({snap.currentPeriodLabel || 'NOVEMBER 2026'})</th>
+                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">SELISIH (Δ)</th>
+                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">MoM</th>
+                          <th className="py-1.5 pl-2.5 text-right whitespace-nowrap">SHARE</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
-                        {snap.brandComparisonRows.slice(0, 5).map((row) => (
-                          <tr key={row.name} className="hover:bg-[#172033] transition-colors">
-                            <td className="py-1.5 pr-2 font-sans font-semibold text-slate-200 whitespace-nowrap">
-                              <span className="inline-flex items-center gap-1.5">
-                                <span
-                                  className="w-2 h-2 rounded-full shrink-0"
-                                  style={{ backgroundColor: row.color }}
-                                />
-                                <span>{row.name}</span>
-                              </span>
-                            </td>
-                            <td
-                              className="py-1.5 px-2 text-right text-slate-400 whitespace-nowrap"
-                              title={formatRupiah(row.previous)}
-                            >
-                              {formatCompactIdr(row.previous)}
-                            </td>
-                            <td
-                              className="py-1.5 px-2 text-right font-bold text-white whitespace-nowrap"
-                              title={formatRupiah(row.current)}
-                            >
-                              {formatCompactIdr(row.current)}
-                            </td>
-                            <td
-                              className={`py-1.5 px-2 text-right font-bold whitespace-nowrap ${
-                                row.growth >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                              }`}
-                            >
-                              {row.growth >= 0 ? `+${row.growth}% ↑` : `${row.growth}% ↓`}
-                            </td>
-                            <td className="py-1.5 pl-2 text-right text-slate-300 whitespace-nowrap">
-                              {row.sharePct}%
-                            </td>
-                          </tr>
-                        ))}
+                        {snap.brandComparisonRows.map((row) => {
+                          const delta = row.current - row.previous;
+                          return (
+                            <tr key={row.name} className="hover:bg-[#172033] transition-colors">
+                              <td className="py-1.5 pr-3 font-sans font-semibold text-slate-200 whitespace-nowrap">
+                                <span className="inline-flex items-center gap-1.5">
+                                  <span
+                                    className="w-2 h-2 rounded-xs shrink-0"
+                                    style={{ backgroundColor: row.color }}
+                                  />
+                                  <span>{row.name}</span>
+                                </span>
+                              </td>
+                              <td
+                                className="py-1.5 px-2.5 text-right text-slate-400 whitespace-nowrap"
+                                title={formatRupiah(row.previous)}
+                              >
+                                {formatRupiah(row.previous)}
+                              </td>
+                              <td
+                                className="py-1.5 px-2.5 text-right font-bold text-white whitespace-nowrap"
+                                title={formatRupiah(row.current)}
+                              >
+                                {formatRupiah(row.current)}
+                              </td>
+                              <td
+                                className={`py-1.5 px-2.5 text-right font-bold whitespace-nowrap ${
+                                  delta >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                                }`}
+                                title={formatRupiah(delta)}
+                              >
+                                {delta >= 0 ? `+${formatCompactIdr(delta)}` : `-${formatCompactIdr(Math.abs(delta))}`}
+                              </td>
+                              <td
+                                className={`py-1.5 px-2.5 text-right font-bold whitespace-nowrap ${
+                                  row.growth >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                                }`}
+                              >
+                                {row.growth >= 0 ? `+${row.growth}% ↑` : `${row.growth}% ↓`}
+                              </td>
+                              <td className="py-1.5 pl-2.5 text-right text-slate-300 font-semibold whitespace-nowrap">
+                                {row.sharePct}%
+                              </td>
+                            </tr>
+                          );
+                        })}
 
                         {snap.brandComparisonRows.length === 0 && (
                           <tr>
-                            <td colSpan={5} className="py-5 text-center font-sans text-slate-500">
+                            <td colSpan={6} className="py-5 text-center font-sans text-slate-500">
                               Data perbandingan belum tersedia pada filter ini.
                             </td>
                           </tr>
                         )}
                       </tbody>
                       <tfoot>
-                        <tr className="border-t border-[#28354D] font-mono tabular-nums text-[11px]">
-                          <td className="pt-1.5 pr-2 font-sans font-extrabold text-white whitespace-nowrap">
-                            TOTAL PORTFOLIO
-                          </td>
-                          <td
-                            className="pt-1.5 px-2 text-right font-bold text-slate-300 whitespace-nowrap"
-                            title={formatRupiah(snap.brandComparisonTotals.previous)}
-                          >
-                            {formatCompactIdr(snap.brandComparisonTotals.previous)}
-                          </td>
-                          <td
-                            className="pt-1.5 px-2 text-right font-black text-[#FF6B00] whitespace-nowrap"
-                            title={formatRupiah(snap.brandComparisonTotals.current)}
-                          >
-                            {formatCompactIdr(snap.brandComparisonTotals.current)}
-                          </td>
-                          <td
-                            className={`pt-1.5 px-2 text-right font-bold whitespace-nowrap ${
-                              snap.brandComparisonTotals.growth >= 0
-                                ? 'text-emerald-400'
-                                : 'text-rose-400'
-                            }`}
-                          >
-                            {snap.brandComparisonTotals.growth >= 0 ? '+' : ''}
-                            {snap.brandComparisonTotals.growth}%
-                          </td>
-                          <td className="pt-1.5 pl-2 text-right font-bold text-white whitespace-nowrap">
-                            100.0%
-                          </td>
-                        </tr>
+                        {(() => {
+                          const totalDelta =
+                            snap.brandComparisonTotals.current - snap.brandComparisonTotals.previous;
+                          return (
+                            <tr className="border-t border-[#28354D] font-mono tabular-nums text-[11px]">
+                              <td className="pt-2 pr-3 font-sans font-extrabold text-white whitespace-nowrap">
+                                TOTAL PORTFOLIO ({snap.brandComparisonRows.length} Brand)
+                              </td>
+                              <td
+                                className="pt-2 px-2.5 text-right font-bold text-slate-300 whitespace-nowrap"
+                                title={formatRupiah(snap.brandComparisonTotals.previous)}
+                              >
+                                {formatRupiah(snap.brandComparisonTotals.previous)}
+                              </td>
+                              <td
+                                className="pt-2 px-2.5 text-right font-black text-[#FF6B00] whitespace-nowrap"
+                                title={formatRupiah(snap.brandComparisonTotals.current)}
+                              >
+                                {formatRupiah(snap.brandComparisonTotals.current)}
+                              </td>
+                              <td
+                                className={`pt-2 px-2.5 text-right font-bold whitespace-nowrap ${
+                                  totalDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                                }`}
+                                title={formatRupiah(totalDelta)}
+                              >
+                                {totalDelta >= 0
+                                  ? `+${formatCompactIdr(totalDelta)}`
+                                  : `-${formatCompactIdr(Math.abs(totalDelta))}`}
+                              </td>
+                              <td
+                                className={`pt-2 px-2.5 text-right font-bold whitespace-nowrap ${
+                                  snap.brandComparisonTotals.growth >= 0
+                                    ? 'text-emerald-400'
+                                    : 'text-rose-400'
+                                }`}
+                              >
+                                {snap.brandComparisonTotals.growth >= 0 ? '+' : ''}
+                                {snap.brandComparisonTotals.growth}%
+                              </td>
+                              <td className="pt-2 pl-2.5 text-right font-bold text-white whitespace-nowrap">
+                                100.0%
+                              </td>
+                            </tr>
+                          );
+                        })()}
                       </tfoot>
                     </table>
                   </div>
                 </div>
 
                 {/* PANEL 3B: PERBANDINGAN PERFORMA SALES (MoM) */}
-                <div className="lg:col-span-7 bg-[#121926] border border-[#1F293B] rounded-xl p-3 flex flex-col justify-between">
-                  <div className="flex items-center justify-between gap-2 mb-1.5 flex-wrap">
-                    <div className="flex items-center gap-2">
+                <div className="w-full bg-[#121926] border border-[#1F293B] rounded-xl p-3 flex flex-col justify-between">
+                  <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <h2 className="text-[11px] font-extrabold uppercase tracking-wider text-slate-100">
                         PERBANDINGAN PERFORMA SALES (MoM)
                       </h2>
@@ -2830,62 +5983,63 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                     <table className="w-full text-[11px] text-left border-collapse">
                       <thead>
                         <tr className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 border-b border-[#1E293B]">
-                          <th className="py-1.5 pr-2 whitespace-nowrap">NAMA SALES</th>
-                          <th className="py-1.5 px-2 text-right whitespace-nowrap">
+                          <th className="py-1.5 pr-3 whitespace-nowrap">NAMA SALES</th>
+                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">
                             {snap.previousPeriodLabel || 'OKTOBER 2026'}
                           </th>
-                          <th className="py-1.5 px-2 text-right whitespace-nowrap">
+                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">
                             {snap.currentPeriodLabel || 'NOVEMBER 2026'}
                           </th>
-                          <th className="py-1.5 px-2 text-right whitespace-nowrap">SELISIH (Δ)</th>
-                          <th className="py-1.5 px-2 text-right whitespace-nowrap">MoM (%)</th>
-                          <th className="py-1.5 pl-2 text-right whitespace-nowrap">SHARE</th>
+                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">SELISIH (Δ)</th>
+                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">MoM (%)</th>
+                          <th className="py-1.5 pl-2.5 text-right whitespace-nowrap">SHARE</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
                         {snap.salesComparisonRows.map((row) => (
                           <tr key={row.name} className="hover:bg-[#172033] transition-colors">
-                            <td className="py-1.5 pr-2 font-sans font-semibold text-slate-200 whitespace-nowrap">
+                            <td className="py-1.5 pr-3 font-sans font-semibold text-slate-200 whitespace-nowrap">
                               <div className="inline-flex items-center gap-1.5">
                                 <span
-                                  className="w-2 h-2 rounded-full shrink-0"
+                                  className="w-2 h-2 rounded-xs shrink-0"
                                   style={{ backgroundColor: row.color }}
                                 />
                                 <span>{row.name}</span>
-                                <span className="text-[9.5px] text-slate-400 font-normal hidden sm:inline">
+                                <span className="text-[9.5px] text-slate-400 font-normal">
                                   ({row.subLabel})
                                 </span>
                               </div>
                             </td>
                             <td
-                              className="py-1.5 px-2 text-right text-slate-400 whitespace-nowrap"
+                              className="py-1.5 px-2.5 text-right text-slate-400 whitespace-nowrap"
                               title={formatRupiah(row.previous)}
                             >
-                              {formatCompactIdr(row.previous)}
+                              {formatRupiah(row.previous)}
                             </td>
                             <td
-                              className="py-1.5 px-2 text-right font-bold text-white whitespace-nowrap"
+                              className="py-1.5 px-2.5 text-right font-bold text-white whitespace-nowrap"
                               title={formatRupiah(row.current)}
                             >
-                              {formatCompactIdr(row.current)}
+                              {formatRupiah(row.current)}
                             </td>
                             <td
-                              className={`py-1.5 px-2 text-right font-bold whitespace-nowrap ${
+                              className={`py-1.5 px-2.5 text-right font-bold whitespace-nowrap ${
                                 row.delta >= 0 ? 'text-emerald-400' : 'text-rose-400'
                               }`}
                               title={formatRupiah(row.delta)}
                             >
-                              {row.delta >= 0 ? '+' : ''}
-                              {formatCompactIdr(row.delta)}
+                              {row.delta >= 0
+                                ? `+${formatCompactIdr(row.delta)}`
+                                : `-${formatCompactIdr(Math.abs(row.delta))}`}
                             </td>
                             <td
-                              className={`py-1.5 px-2 text-right font-bold whitespace-nowrap ${
+                              className={`py-1.5 px-2.5 text-right font-bold whitespace-nowrap ${
                                 row.growth >= 0 ? 'text-emerald-400' : 'text-rose-400'
                               }`}
                             >
                               {row.growth >= 0 ? `+${row.growth}% ↑` : `${row.growth}% ↓`}
                             </td>
-                            <td className="py-1.5 pl-2 text-right text-cyan-300 font-semibold whitespace-nowrap">
+                            <td className="py-1.5 pl-2.5 text-right text-cyan-300 font-semibold whitespace-nowrap">
                               {row.sharePct}%
                             </td>
                           </tr>
@@ -2901,34 +6055,35 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                       </tbody>
                       <tfoot>
                         <tr className="border-t border-[#28354D] font-mono tabular-nums text-[11px]">
-                          <td className="pt-1.5 pr-2 font-sans font-extrabold text-white whitespace-nowrap">
+                          <td className="pt-2 pr-3 font-sans font-extrabold text-white whitespace-nowrap">
                             TOTAL TIM SALES ({snap.salesComparisonRows.length})
                           </td>
                           <td
-                            className="pt-1.5 px-2 text-right font-bold text-slate-300 whitespace-nowrap"
+                            className="pt-2 px-2.5 text-right font-bold text-slate-300 whitespace-nowrap"
                             title={formatRupiah(snap.salesComparisonTotals.previous)}
                           >
-                            {formatCompactIdr(snap.salesComparisonTotals.previous)}
+                            {formatRupiah(snap.salesComparisonTotals.previous)}
                           </td>
                           <td
-                            className="pt-1.5 px-2 text-right font-black text-[#00D2FF] whitespace-nowrap"
+                            className="pt-2 px-2.5 text-right font-black text-[#00D2FF] whitespace-nowrap"
                             title={formatRupiah(snap.salesComparisonTotals.current)}
                           >
-                            {formatCompactIdr(snap.salesComparisonTotals.current)}
+                            {formatRupiah(snap.salesComparisonTotals.current)}
                           </td>
                           <td
-                            className={`pt-1.5 px-2 text-right font-bold whitespace-nowrap ${
+                            className={`pt-2 px-2.5 text-right font-bold whitespace-nowrap ${
                               snap.salesComparisonTotals.delta >= 0
                                 ? 'text-emerald-400'
                                 : 'text-rose-400'
                             }`}
                             title={formatRupiah(snap.salesComparisonTotals.delta)}
                           >
-                            {snap.salesComparisonTotals.delta >= 0 ? '+' : ''}
-                            {formatCompactIdr(snap.salesComparisonTotals.delta)}
+                            {snap.salesComparisonTotals.delta >= 0
+                              ? `+${formatCompactIdr(snap.salesComparisonTotals.delta)}`
+                              : `-${formatCompactIdr(Math.abs(snap.salesComparisonTotals.delta))}`}
                           </td>
                           <td
-                            className={`pt-1.5 px-2 text-right font-bold whitespace-nowrap ${
+                            className={`pt-2 px-2.5 text-right font-bold whitespace-nowrap ${
                               snap.salesComparisonTotals.growth >= 0
                                 ? 'text-emerald-400'
                                 : 'text-rose-400'
@@ -2937,7 +6092,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                             {snap.salesComparisonTotals.growth >= 0 ? '+' : ''}
                             {snap.salesComparisonTotals.growth}%
                           </td>
-                          <td className="pt-1.5 pl-2 text-right font-bold text-white whitespace-nowrap">
+                          <td className="pt-2 pl-2.5 text-right font-bold text-white whitespace-nowrap">
                             100.0%
                           </td>
                         </tr>
@@ -3191,99 +6346,15 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
 
           {/* SUB-LENS: AREA & TIM SALES */}
           {activeLens === 'regional' && (
-            <div className="flex-1 flex flex-col gap-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
-                    Performa Area, Supervisor &amp; Tim Sales
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Data pencapaian aktual vs target Sell In &amp; Sell Out dari SalesPro Analytics
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('sales')}
-                    className="px-3 py-1.5 rounded-lg bg-[#FF6B00] hover:bg-[#EA580C] text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
-                  >
-                    <span>Buka Analisis Sales</span>
-                    <ChevronRight className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('spv')}
-                    className="px-3 py-1.5 rounded-lg bg-[#192234] hover:bg-[#233049] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer"
-                  >
-                    Buka Analisis SPV
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 flex-1">
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3.5 flex flex-col">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-[#00D2FF] mb-2">
-                    Daftar Pencapaian Tim Sales ({snap.targetMatrix.sales.length})
-                  </h3>
-                  <div className="overflow-auto max-h-[calc(100vh-280px)]">
-                    <table className="w-full text-xs text-left">
-                      <thead className="sticky top-0 bg-[#121926] z-10">
-                        <tr className="text-[10px] uppercase text-slate-400 border-b border-[#1E293B]">
-                          <th className="py-2 pr-2 whitespace-nowrap">Sales</th>
-                          <th className="py-2 px-2 whitespace-nowrap">Area</th>
-                          <th className="py-2 px-2 text-right whitespace-nowrap">Target Sell In</th>
-                          <th className="py-2 px-2 text-right whitespace-nowrap">Aktual Sell In</th>
-                          <th className="py-2 pl-2 text-right whitespace-nowrap">Achv</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
-                        {snap.targetMatrix.sales.map((s) => (
-                          <tr key={s.salesName} className="hover:bg-[#172033]">
-                            <td className="py-2 pr-2 font-sans font-bold text-white whitespace-nowrap">{s.salesName}</td>
-                            <td className="py-2 px-2 font-sans text-slate-400 whitespace-nowrap">{s.coverArea}</td>
-                            <td className="py-2 px-2 text-right text-slate-400 whitespace-nowrap">{formatRupiah(s.targetSellIn)}</td>
-                            <td className="py-2 px-2 text-right font-bold text-white whitespace-nowrap">{formatRupiah(s.actualSellIn)}</td>
-                            <td className={`py-2 pl-2 text-right font-bold whitespace-nowrap ${s.achievementPct >= 100 ? 'text-emerald-400' : s.achievementPct >= 75 ? 'text-cyan-400' : 'text-amber-400'}`}>
-                              {s.achievementPct.toFixed(1)}%
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3.5 flex flex-col">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-[#FF6B00] mb-2">
-                    Daftar Area &amp; Supervisor ({snap.targetMatrix.areas.length} Area)
-                  </h3>
-                  <div className="overflow-auto max-h-[calc(100vh-280px)]">
-                    <table className="w-full text-xs text-left">
-                      <thead className="sticky top-0 bg-[#121926] z-10">
-                        <tr className="text-[10px] uppercase text-slate-400 border-b border-[#1E293B]">
-                          <th className="py-2 pr-2 whitespace-nowrap">Cover Area</th>
-                          <th className="py-2 px-2 text-right whitespace-nowrap">Target</th>
-                          <th className="py-2 px-2 text-right whitespace-nowrap">Sell In</th>
-                          <th className="py-2 px-2 text-right whitespace-nowrap">Sell Out</th>
-                          <th className="py-2 pl-2 text-right whitespace-nowrap">Achv</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
-                        {snap.targetMatrix.areas.map((a) => (
-                          <tr key={a.coverArea} className="hover:bg-[#172033]">
-                            <td className="py-2 pr-2 font-sans font-bold text-white whitespace-nowrap">{a.coverArea}</td>
-                            <td className="py-2 px-2 text-right text-slate-400 whitespace-nowrap">{formatRupiah(a.targetOmzet)}</td>
-                            <td className="py-2 px-2 text-right text-white whitespace-nowrap">{formatRupiah(a.actualSellIn)}</td>
-                            <td className="py-2 px-2 text-right text-cyan-400 whitespace-nowrap">{formatRupiah(a.actualSellOut)}</td>
-                            <td className="py-2 pl-2 text-right font-bold text-emerald-400 whitespace-nowrap">{a.achievementPct.toFixed(1)}%</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <RegionalSalesPanel
+              sales={snap.targetMatrix.sales}
+              areas={snap.targetMatrix.areas}
+              spvs={snap.targetMatrix.spvs}
+              ketFilter={filters.KET}
+              selectedMonthLabel={snap.selectedMonthLabel}
+              onChangeKet={(ket) => onChangeFilter('KET', ket as DashboardFilters['KET'])}
+              onNavigateTab={onNavigateTab}
+            />
           )}
 
           {/* SUB-LENS: MARKET SHARE MISSGLAM */}
@@ -3361,16 +6432,21 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                       )}
                     </div>
 
-                    <div className="grid grid-cols-1 xl:grid-cols-12 divide-y xl:divide-y-0 xl:divide-x divide-[#1E293B]">
-                      {/* Left Chart: Monthly Market Share (%) Trend */}
-                      <div className="xl:col-span-5 p-4 flex flex-col justify-between space-y-3">
-                        <div>
-                          <h4 className="text-xs font-extrabold text-white">
-                            Tren Market Share Bulanan (%)
-                          </h4>
-                          <p className="text-[11px] text-slate-400 mt-0.5">
-                            Klik batang bulan untuk memfilter tabel. Angka di atas batang menunjukkan selisih poin % MoM.
-                          </p>
+                    <div className="flex flex-col divide-y divide-[#1E293B]">
+                      {/* Top Full-Width Chart: Monthly Market Share (%) Trend — all months visible on screen */}
+                      <div className="w-full p-4 flex flex-col justify-between space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <h4 className="text-xs font-extrabold text-white">
+                              Tren Market Share Bulanan (%)
+                            </h4>
+                            <p className="text-[11px] text-slate-400 mt-0.5">
+                              Klik batang bulan untuk memfilter tabel. Angka di atas batang menunjukkan selisih poin % MoM.
+                            </p>
+                          </div>
+                          <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                            {marketShareData.mgStoreAnalytics.monthlyTrendChartData.length} Bulan Terdata
+                          </span>
                         </div>
 
                         <div className="relative pt-7">
@@ -3395,14 +6471,14 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                               );
                             })()}
 
-                          <div className="flex items-stretch gap-2.5">
-                            <div className="flex flex-col justify-between text-right font-mono text-[10px] text-slate-500 tabular-nums py-7 pr-2 border-r border-[#1E293B] shrink-0 w-12">
+                          <div className="flex items-stretch gap-2">
+                            <div className="flex flex-col justify-between text-right font-mono text-[10px] text-slate-500 tabular-nums py-7 pr-2 border-r border-[#1E293B] shrink-0 w-11">
                               <span>{formatSharePct(mgMaxChartSharePct)}</span>
                               <span>{formatSharePct(mgMaxChartSharePct * 0.5)}</span>
                               <span>0%</span>
                             </div>
 
-                            <div className="flex-1 flex items-end gap-2.5 h-56 pt-8 pb-2 overflow-x-auto">
+                            <div className="flex-1 flex items-end gap-1.5 sm:gap-2.5 h-56 pt-8 pb-2 min-w-0">
                               {marketShareData.mgStoreAnalytics.monthlyTrendChartData.map((pt, idx) => {
                                 const heightPct =
                                   mgMaxChartSharePct > 0
@@ -3421,12 +6497,12 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                                     }
                                     onMouseEnter={() => setMgHoveredChartMonthIdx(idx)}
                                     onMouseLeave={() => setMgHoveredChartMonthIdx(null)}
-                                    className="flex-1 min-w-[58px] max-w-[96px] flex flex-col items-center h-full justify-end group cursor-pointer focus:outline-none"
+                                    className="flex-1 min-w-0 flex flex-col items-center h-full justify-end group cursor-pointer focus:outline-none"
                                   >
-                                    <div className="mb-1 flex flex-col items-center">
+                                    <div className="mb-1 flex flex-col items-center w-full">
                                       {pt.deltaSharePercent !== null ? (
                                         <span
-                                          className={`text-[10px] font-mono font-bold tabular-nums leading-none ${
+                                          className={`text-[9.5px] font-mono font-bold tabular-nums leading-none truncate max-w-full ${
                                             isUp
                                               ? 'text-emerald-400'
                                               : isDown
@@ -3438,19 +6514,19 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                                           {pt.deltaSharePercent.toFixed(1).replace('.', ',')}%
                                         </span>
                                       ) : (
-                                        <span className="text-[10px] font-mono text-slate-500 leading-none">
+                                        <span className="text-[9.5px] font-mono text-slate-500 leading-none">
                                           Awal
                                         </span>
                                       )}
-                                      <span className="text-[11px] font-mono font-extrabold text-[#00D2FF] tabular-nums mt-0.5">
+                                      <span className="text-[10.5px] font-mono font-extrabold text-[#00D2FF] tabular-nums mt-0.5 truncate max-w-full">
                                         {formatSharePct(pt.marketSharePercent)}
                                       </span>
                                     </div>
 
-                                    <div className="w-full relative flex items-end justify-center h-full px-1.5">
+                                    <div className="w-full relative flex items-end justify-center h-full px-1">
                                       <div
                                         style={{ height: `${heightPct}%` }}
-                                        className={`w-full max-w-[44px] rounded-t-md transition-all duration-200 ${
+                                        className={`w-full max-w-[46px] rounded-t-md transition-all duration-200 ${
                                           isSelected
                                             ? 'bg-pink-500 ring-2 ring-pink-300'
                                             : isUp
@@ -3466,7 +6542,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                                       <span className="block text-[10px] font-bold text-slate-200 truncate">
                                         {pt.monthPeriod}
                                       </span>
-                                      <span className="block text-[10px] font-mono text-slate-400 tabular-nums">
+                                      <span className="block text-[9.5px] font-mono text-slate-400 tabular-nums truncate">
                                         {formatCompactIdr(pt.totalActual)}
                                       </span>
                                     </div>
@@ -3478,8 +6554,8 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                         </div>
                       </div>
 
-                      {/* Right Chart: Per-Store Market Share (%) & Movement Comparison */}
-                      <div className="xl:col-span-7 p-4 space-y-3">
+                      {/* Bottom Full-Width Chart: Per-Store Market Share (%) & Movement Comparison */}
+                      <div className="w-full p-4 space-y-3">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div>
                             <h4 className="text-xs font-extrabold text-white">
@@ -3505,7 +6581,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                           </div>
                         </div>
 
-                        <div className="space-y-2 max-h-[340px] overflow-y-auto pr-1">
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5 max-h-[340px] overflow-y-auto pr-1">
                           {marketShareData.mgStoreAnalytics.allActiveStores.map((st) => {
                             const barPct =
                               mgMaxChartSharePct > 0
@@ -3533,7 +6609,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                                 className={`w-full text-left px-2.5 py-2 rounded-lg transition-colors cursor-pointer border ${
                                   isSelected
                                     ? 'bg-pink-500/15 border-pink-500/45'
-                                    : 'border-transparent hover:bg-[#172033]'
+                                    : 'border-[#1A2334] hover:bg-[#172033]'
                                 }`}
                               >
                                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-1">
@@ -3892,69 +6968,130 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
-                    Brand Kosmetik, Kategori &amp; Top SKU
+                    Brand Kosmetik, Kategori &amp; Performa SKU
                   </h2>
                   <p className="text-xs text-slate-400">
-                    Pangsa pasar per brand, kategori produk, serta peringkat SKU terlaris
+                    Top Kategori (Makeup, Personal Care, Skin Care, Tools, Hued), Top 10 SKU Terlaris &amp; 10 SKU Slow Moving
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     onClick={() => onNavigateTab('brand')}
-                    className="px-3 py-1.5 rounded-lg bg-[#FF6B00] text-white text-xs font-bold cursor-pointer"
+                    className="px-3 py-1.5 rounded-lg bg-[#FF6B00] hover:bg-[#EA580C] text-white text-xs font-bold cursor-pointer whitespace-nowrap"
                   >
                     Buka Brand
                   </button>
                   <button
                     type="button"
                     onClick={() => onNavigateTab('category')}
-                    className="px-3 py-1.5 rounded-lg bg-[#192234] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer"
+                    className="px-3 py-1.5 rounded-lg bg-[#192234] hover:bg-[#233049] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer whitespace-nowrap"
                   >
                     Buka Kategori
                   </button>
                   <button
                     type="button"
                     onClick={() => onNavigateTab('sku')}
-                    className="px-3 py-1.5 rounded-lg bg-[#192234] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer"
+                    className="px-3 py-1.5 rounded-lg bg-[#192234] hover:bg-[#233049] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer whitespace-nowrap"
                   >
                     Buka SKU
                   </button>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 flex-1">
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3.5 overflow-auto max-h-[calc(100vh-280px)]">
-                  <h3 className="text-xs font-bold uppercase text-[#FF6B00] mb-2.5">
-                    Top Kategori Produk ({productMixData.topCategories.length})
-                  </h3>
-                  <div className="space-y-2 text-xs">
-                    {productMixData.topCategories.slice(0, 10).map((cat) => (
-                      <div key={cat.category} className="space-y-1">
-                        <div className="flex justify-between gap-2 font-mono tabular-nums">
-                          <span className="font-sans font-semibold text-white truncate">{cat.category}</span>
-                          <span className="text-cyan-400 font-bold whitespace-nowrap shrink-0">
-                            {formatRupiah(cat.totalValue)} ({cat.contributionPercent.toFixed(1)}%)
-                          </span>
-                        </div>
-                        <div className="w-full h-1.5 bg-[#1B2436] rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-gradient-to-r from-[#2563EB] to-[#00D2FF]"
-                            style={{ width: `${Math.min(100, Math.max(2, cat.contributionPercent))}%` }}
-                          />
-                        </div>
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3">
+                {/* LEFT: TOP KATEGORI PRODUK (Strictly 5 Categories: MAKEUP, PERSONAL CARE, SKIN CARE, TOOLS, HUED) */}
+                <div className="lg:col-span-5 bg-[#121926] border border-[#1F293B] rounded-xl p-3.5 flex flex-col justify-between gap-3">
+                  <div>
+                    <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#1E293B] mb-3">
+                      <div>
+                        <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#FF6B00]">
+                          Top Kategori Produk ({productMixData.topCategories.length})
+                        </h3>
+                        <p className="text-[10.5px] text-slate-400 mt-0.5">
+                          MAKEUP · PERSONAL CARE · SKIN CARE · TOOLS · HUED
+                        </p>
                       </div>
-                    ))}
+                    </div>
+
+                    <div className="space-y-3 text-xs">
+                      {productMixData.topCategories.map((cat) => {
+                        const barGradient =
+                          cat.category === 'MAKEUP'
+                            ? 'from-[#EA580C] to-[#FF8533]'
+                            : cat.category === 'PERSONAL CARE'
+                            ? 'from-emerald-600 to-emerald-400'
+                            : cat.category === 'SKIN CARE'
+                            ? 'from-cyan-600 to-[#00D2FF]'
+                            : cat.category === 'TOOLS'
+                            ? 'from-violet-600 to-purple-400'
+                            : 'from-pink-600 to-rose-400';
+
+                        return (
+                          <div key={cat.category} className="space-y-1.5">
+                            <div className="flex items-baseline justify-between gap-2 font-mono tabular-nums">
+                              <div className="min-w-0">
+                                <span className="font-sans font-extrabold text-white tracking-wide">
+                                  {cat.category}
+                                </span>
+                                <span className="text-[10px] text-slate-400 ml-1.5">
+                                  · {formatNumber(cat.totalQty)} pcs
+                                </span>
+                              </div>
+                              <span className="text-cyan-400 font-bold whitespace-nowrap shrink-0">
+                                {formatRupiah(cat.totalValue)}{' '}
+                                <span className="text-slate-300">({cat.contributionPercent.toFixed(1)}%)</span>
+                              </span>
+                            </div>
+                            <div className="w-full h-2 bg-[#1B2436] rounded-full overflow-hidden">
+                              <div
+                                className={`h-full bg-gradient-to-r ${barGradient} rounded-full transition-all duration-300`}
+                                style={{
+                                  width: `${
+                                    cat.totalValue > 0
+                                      ? Math.min(100, Math.max(3, cat.contributionPercent))
+                                      : 0
+                                  }%`,
+                                }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="pt-2.5 border-t border-[#1E293B] flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums">
+                    <span className="font-sans font-bold text-slate-400">
+                      Total 5 Kategori Utama
+                    </span>
+                    <span className="font-black text-[#FF6B00] whitespace-nowrap">
+                      {formatRupiah(
+                        productMixData.topCategories.reduce((sum, c) => sum + c.totalValue, 0)
+                      )}{' '}
+                      ·{' '}
+                      {formatNumber(
+                        productMixData.topCategories.reduce((sum, c) => sum + c.totalQty, 0)
+                      )}{' '}
+                      pcs
+                    </span>
                   </div>
                 </div>
 
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3.5 overflow-auto max-h-[calc(100vh-280px)]">
-                  <h3 className="text-xs font-bold uppercase text-[#00D2FF] mb-2.5">
-                    Top 10 SKU Terlaris
-                  </h3>
-                  <table className="w-full text-xs text-left">
+                {/* RIGHT: TOP 10 SKU TERLARIS */}
+                <div className="lg:col-span-7 bg-[#121926] border border-[#1F293B] rounded-xl p-3.5 overflow-auto max-h-[430px]">
+                  <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#1E293B] mb-2">
+                    <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#00D2FF]">
+                      Top 10 SKU Terlaris
+                    </h3>
+                    <span className="text-[10.5px] font-mono text-slate-400">
+                      Urutan Omset Tertinggi
+                    </span>
+                  </div>
+                  <table className="w-full text-xs text-left border-collapse">
                     <thead className="sticky top-0 bg-[#121926] z-10">
                       <tr className="text-[10px] uppercase text-slate-400 border-b border-[#1E293B]">
+                        <th className="py-2 pr-2 text-center w-7">No</th>
                         <th className="py-2 pr-2">SKU</th>
                         <th className="py-2 px-2 text-right whitespace-nowrap">Qty</th>
                         <th className="py-2 px-2 text-right whitespace-nowrap">Omset</th>
@@ -3962,16 +7099,114 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
-                      {productMixData.topSkus.slice(0, 10).map((sku) => (
-                        <tr key={sku.name} className="hover:bg-[#172033]">
-                          <td className="py-2 pr-2 font-sans font-semibold text-white min-w-[180px] whitespace-normal break-words leading-snug">
+                      {productMixData.topSkus.slice(0, 10).map((sku, idx) => (
+                        <tr key={sku.name} className="hover:bg-[#172033] transition-colors">
+                          <td className="py-2 pr-2 text-center text-slate-500 font-bold">
+                            {idx + 1}
+                          </td>
+                          <td className="py-2 pr-2 font-sans font-semibold text-white whitespace-normal break-words leading-snug">
                             {sku.name}
                           </td>
-                          <td className="py-2 px-2 text-right text-slate-300 whitespace-nowrap">{formatNumber(sku.totalQty)}</td>
-                          <td className="py-2 px-2 text-right font-bold text-[#FF6B00] whitespace-nowrap">{formatRupiah(sku.totalValue)}</td>
-                          <td className="py-2 pl-2 text-right text-emerald-400 whitespace-nowrap">{sku.contributionPercent.toFixed(1)}%</td>
+                          <td className="py-2 px-2 text-right text-slate-300 whitespace-nowrap">
+                            {formatNumber(sku.totalQty)}
+                          </td>
+                          <td className="py-2 px-2 text-right font-bold text-[#FF6B00] whitespace-nowrap">
+                            {formatRupiah(sku.totalValue)}
+                          </td>
+                          <td className="py-2 pl-2 text-right text-emerald-400 font-bold whitespace-nowrap">
+                            {sku.contributionPercent.toFixed(1)}%
+                          </td>
                         </tr>
                       ))}
+                      {productMixData.topSkus.length === 0 && (
+                        <tr>
+                          <td colSpan={5} className="py-6 text-center font-sans text-slate-400">
+                            Belum ada data SKU pada filter aktif.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* BOTTOM FULL-WIDTH: 10 SKU SLOW MOVING */}
+              <div className="w-full bg-[#121926] border border-[#1F293B] rounded-xl overflow-hidden flex flex-col">
+                <div className="px-4 py-3 border-b border-[#1E293B] bg-[#0E1523] flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-xs font-extrabold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                      <span>10 SKU Slow Moving</span>
+                    </h3>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Daftar 10 SKU aktif dengan perputaran Qty &amp; Omset terendah pada filter periode aktif untuk evaluasi promo atau stok
+                    </p>
+                  </div>
+                  <span className="text-[11px] font-mono font-bold text-slate-300 tabular-nums whitespace-nowrap">
+                    Total 10 SKU:{' '}
+                    {formatNumber(
+                      productMixData.slowMovingSkus.reduce((s, r) => s + r.totalQty, 0)
+                    )}{' '}
+                    pcs ·{' '}
+                    <span className="text-amber-400">
+                      {formatRupiah(
+                        productMixData.slowMovingSkus.reduce((s, r) => s + r.totalValue, 0)
+                      )}
+                    </span>
+                  </span>
+                </div>
+
+                <div className="w-full overflow-x-auto">
+                  <table className="w-full text-xs text-left border-collapse">
+                    <thead className="bg-[#0B101A]">
+                      <tr className="text-[10px] uppercase text-slate-400 border-b border-[#1E293B]">
+                        <th className="py-2.5 px-3 text-center w-10">No</th>
+                        <th className="py-2.5 px-3">Nama SKU</th>
+                        <th className="py-2.5 px-3 whitespace-nowrap">Brand</th>
+                        <th className="py-2.5 px-3 whitespace-nowrap">Kategori</th>
+                        <th className="py-2.5 px-3 text-right whitespace-nowrap">Qty (Pcs)</th>
+                        <th className="py-2.5 px-3 text-right whitespace-nowrap">Tx / Toko</th>
+                        <th className="py-2.5 px-3 text-right whitespace-nowrap">Omset</th>
+                        <th className="py-2.5 px-3 text-right whitespace-nowrap">Share</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
+                      {productMixData.slowMovingSkus.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="py-8 text-center font-sans text-slate-400">
+                            Belum ada data SKU slow moving pada filter yang dipilih.
+                          </td>
+                        </tr>
+                      ) : (
+                        productMixData.slowMovingSkus.map((sku, idx) => (
+                          <tr key={sku.name} className="hover:bg-[#172033] transition-colors">
+                            <td className="py-2.5 px-3 text-center font-bold text-amber-400">
+                              {idx + 1}
+                            </td>
+                            <td className="py-2.5 px-3 font-sans font-semibold text-white whitespace-normal break-words leading-snug">
+                              {sku.name}
+                            </td>
+                            <td className="py-2.5 px-3 font-sans font-bold text-slate-200 whitespace-nowrap">
+                              {sku.brand}
+                            </td>
+                            <td className="py-2.5 px-3 font-sans text-cyan-300 whitespace-nowrap">
+                              {sku.category}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-extrabold text-amber-400 whitespace-nowrap">
+                              {formatNumber(sku.totalQty)} pcs
+                            </td>
+                            <td className="py-2.5 px-3 text-right text-slate-300 whitespace-nowrap">
+                              {sku.transactionCount} tx · {sku.storeCount} toko
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-bold text-slate-200 whitespace-nowrap">
+                              {formatRupiah(sku.totalValue)}
+                            </td>
+                            <td className="py-2.5 px-3 text-right text-rose-400 whitespace-nowrap">
+                              {sku.contributionPercent.toFixed(2)}%
+                            </td>
+                          </tr>
+                        ))
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -4757,6 +7992,24 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                 </div>
               </div>
             </div>
+          )}
+
+          {/* SUB-LENS: KPI SALES */}
+          {activeLens === 'kpi_sales' && (
+            <KpiSalesDashboardPanel
+              filters={filters}
+              selectedYear={snap.selectedYear}
+              onNavigateTab={onNavigateTab}
+            />
+          )}
+
+          {/* SUB-LENS: KPI TRAINER */}
+          {activeLens === 'kpi_trainer' && (
+            <KpiTrainerDashboardPanel
+              filters={filters}
+              selectedYear={snap.selectedYear}
+              onNavigateTab={onNavigateTab}
+            />
           )}
 
           {/* BOTTOM QUIET FOOTER */}
