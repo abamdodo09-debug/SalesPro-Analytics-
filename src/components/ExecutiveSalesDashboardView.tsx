@@ -27,7 +27,10 @@ import {
   MonthlyTrajectoryPoint,
   MonthlyProfitHrSummary,
 } from '../services/executiveDashboardService';
-import { calculateQuarterlySummary } from '../services/quarterlySummaryService';
+import {
+  calculateQuarterlySummary,
+  saveQuarterlyTargetOverride,
+} from '../services/quarterlySummaryService';
 import { SALES_MASTER_6_CONFIG } from '../services/kpiSalesData';
 import { loadKpiSalesData, calculateKpiPoints } from '../services/agingAndKpiService';
 import { loadKpiTrainerData, calculateTrainerKpiPoints } from '../services/kpiTrainerService';
@@ -75,6 +78,7 @@ import {
   PanelTopOpen,
   PanelTopClose,
   Edit3,
+  Check,
   Crown,
   Medal,
 } from 'lucide-react';
@@ -991,7 +995,7 @@ const PromoMonthlyGrowthPanel: React.FC<{
               </div>
 
               {/* Bars */}
-              <div className="flex-1 flex items-end gap-2.5 sm:gap-4 h-56 pt-8 pb-1 overflow-x-auto">
+              <div className="flex-1 flex items-end gap-1.5 sm:gap-2.5 h-48 pt-6 pb-1 overflow-x-auto">
                 {promoMonthlyRecap.map((row, idx) => {
                   const heightPct =
                     stats.maxActual > 0
@@ -1012,14 +1016,14 @@ const PromoMonthlyGrowthPanel: React.FC<{
                       }
                       onMouseEnter={() => setHoveredIdx(idx)}
                       onMouseLeave={() => setHoveredIdx(null)}
-                      className={`flex-1 min-w-[78px] max-w-[136px] flex flex-col items-center h-full justify-end group cursor-pointer focus:outline-none rounded-lg px-1 py-1 transition-colors ${
+                      className={`flex-1 min-w-[52px] flex flex-col items-center h-full justify-end group cursor-pointer focus:outline-none rounded-lg px-1 py-1 transition-colors ${
                         isSelected ? 'bg-[#172236]/80' : 'hover:bg-[#141D2E]/60'
                       }`}
                     >
-                      <div className="mb-1.5 flex flex-col items-center">
+                      <div className="mb-1 flex flex-col items-center">
                         {row.growthPercent !== null ? (
                           <span
-                            className={`text-[10px] font-mono font-extrabold tabular-nums leading-none px-1.5 py-0.5 rounded ${
+                            className={`text-[9.5px] font-mono font-extrabold tabular-nums leading-none px-1 py-0.5 rounded ${
                               isPositive
                                 ? 'text-emerald-400 bg-emerald-500/10'
                                 : 'text-rose-400 bg-rose-500/10'
@@ -1029,12 +1033,12 @@ const PromoMonthlyGrowthPanel: React.FC<{
                             {row.growthPercent.toFixed(1).replace('.', ',')}%
                           </span>
                         ) : (
-                          <span className="text-[10px] font-mono text-slate-500 leading-none">
+                          <span className="text-[9.5px] font-mono text-slate-500 leading-none">
                             Awal
                           </span>
                         )}
                         <span
-                          className={`text-[10.5px] font-mono font-extrabold tabular-nums mt-1 whitespace-nowrap ${
+                          className={`text-[10px] font-mono font-extrabold tabular-nums mt-0.5 whitespace-nowrap ${
                             isSelected
                               ? 'text-[#00D2FF]'
                               : isPeak
@@ -1046,10 +1050,10 @@ const PromoMonthlyGrowthPanel: React.FC<{
                         </span>
                       </div>
 
-                      <div className="w-full relative flex items-end justify-center h-full px-2">
+                      <div className="w-full relative flex items-end justify-center h-full px-1.5">
                         <div
                           style={{ height: `${heightPct}%` }}
-                          className={`w-full max-w-[52px] rounded-t-md transition-all duration-200 ${
+                          className={`w-full max-w-[46px] rounded-t-md transition-all duration-200 ${
                             isSelected
                               ? 'bg-[#00D2FF] ring-2 ring-[#00D2FF]/40'
                               : isPeak
@@ -1059,9 +1063,9 @@ const PromoMonthlyGrowthPanel: React.FC<{
                         />
                       </div>
 
-                      <div className="mt-2 text-center w-full">
+                      <div className="mt-1.5 text-center w-full">
                         <span
-                          className={`block text-[10.5px] font-bold truncate ${
+                          className={`block text-[10px] font-bold truncate ${
                             isSelected
                               ? 'text-[#00D2FF]'
                               : isPeak
@@ -1071,8 +1075,8 @@ const PromoMonthlyGrowthPanel: React.FC<{
                         >
                           {row.monthPeriod}
                         </span>
-                        <span className="block text-[9.5px] font-mono text-slate-400 tabular-nums">
-                          {row.promoDaysCount} hr · {row.storeCount} toko
+                        <span className="block text-[9px] font-mono text-slate-400 tabular-nums truncate">
+                          {row.promoDaysCount} hr · {row.storeCount} tk
                         </span>
                       </div>
                     </button>
@@ -1081,7 +1085,7 @@ const PromoMonthlyGrowthPanel: React.FC<{
               </div>
             </div>
 
-            <div className="mt-3 pt-2.5 border-t border-[#1E293B] flex flex-wrap items-center justify-between gap-3 text-[11px] text-slate-400">
+            <div className="mt-2.5 pt-2 border-t border-[#1E293B] flex flex-wrap items-center justify-between gap-3 text-[10.5px] text-slate-400">
               <div className="flex flex-wrap items-center gap-4 font-medium">
                 <span className="flex items-center gap-1.5 text-emerald-400 font-semibold">
                   <span className="w-2.5 h-2.5 rounded-xs bg-emerald-500 inline-block" />
@@ -1105,19 +1109,21 @@ const PromoMonthlyGrowthPanel: React.FC<{
             </div>
           </div>
 
-          {/* Monthly Table */}
-          <div className="overflow-auto max-h-[300px]">
-            <table className="w-full text-xs text-left">
+          {/* Monthly Table — Full Columns & Compact Multi-Row Viewport */}
+          <div className="overflow-auto max-h-[420px]">
+            <table className="w-full text-[10.5px] text-left border-collapse">
               <thead className="sticky top-0 bg-[#0E1523] z-10">
-                <tr className="text-[10px] uppercase text-slate-400 border-b border-[#1E293B]">
-                  <th className="py-2.5 px-4 whitespace-nowrap">Bulan</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Hari Promo</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Toko</th>
-                  <th className="py-2.5 px-3 text-right whitespace-nowrap">Rata-rata / Hari</th>
-                  <th className="py-2.5 px-3 text-right whitespace-nowrap">Actual Bulanan</th>
-                  <th className="py-2.5 px-4 text-right whitespace-nowrap">
-                    Growth Bulanan (MoM)
-                  </th>
+                <tr className="text-[9.5px] uppercase text-slate-400 border-b border-[#1E293B]">
+                  <th className="py-2 px-2.5 whitespace-nowrap">Bulan</th>
+                  <th className="py-2 px-2 text-center whitespace-nowrap">Hari Promo</th>
+                  <th className="py-2 px-2 text-center whitespace-nowrap">Aktif %</th>
+                  <th className="py-2 px-2 text-center whitespace-nowrap">Toko</th>
+                  <th className="py-2 px-2 text-center whitespace-nowrap">Entri</th>
+                  <th className="py-2 px-2 text-right whitespace-nowrap">Avg / Hari</th>
+                  <th className="py-2 px-2 text-right whitespace-nowrap">Bulan Lalu</th>
+                  <th className="py-2 px-2 text-right whitespace-nowrap text-[#FF6B00]">Actual Bln Ini</th>
+                  <th className="py-2 px-2 text-right whitespace-nowrap">Selisih (Δ)</th>
+                  <th className="py-2 px-2.5 text-right whitespace-nowrap">Growth MoM</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
@@ -1125,6 +1131,10 @@ const PromoMonthlyGrowthPanel: React.FC<{
                   const isSelected = selectedMonth === r.monthPeriod;
                   const isPeak = idx === stats.peakIdx && r.totalActual > 0;
                   const isPos = r.growthPercent !== null && r.growthPercent >= 0;
+                  const activeDaysPct =
+                    r.calendarDaysInMonth > 0
+                      ? (r.promoDaysCount / r.calendarDaysInMonth) * 100
+                      : 0;
                   return (
                     <tr
                       key={r.monthPeriod}
@@ -1137,83 +1147,112 @@ const PromoMonthlyGrowthPanel: React.FC<{
                         isSelected ? 'bg-[#17263D]' : 'hover:bg-[#172033]'
                       }`}
                     >
-                      <td className="py-2.5 px-4 font-sans font-bold text-white whitespace-nowrap">
-                        <div className="flex items-center gap-2">
+                      <td className="py-1.5 px-2.5 font-sans font-bold text-white whitespace-nowrap">
+                        <div className="flex items-center gap-1.5">
                           <span>{r.monthPeriod}</span>
                           {isPeak && (
-                            <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                            <span className="text-[8.5px] font-mono px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
                               PEAK
                             </span>
                           )}
                         </div>
                       </td>
-                      <td className="py-2.5 px-3 text-center text-slate-300 whitespace-nowrap">
-                        {r.promoDaysCount} hr{' '}
-                        <span className="text-slate-500">/ {r.calendarDaysInMonth} hr</span>
+                      <td className="py-1.5 px-2 text-center text-slate-300 whitespace-nowrap">
+                        {r.promoDaysCount}/{r.calendarDaysInMonth} hr
                       </td>
-                      <td className="py-2.5 px-3 text-center text-cyan-300 font-bold whitespace-nowrap">
+                      <td className="py-1.5 px-2 text-center text-slate-300 whitespace-nowrap">
+                        {activeDaysPct.toFixed(0)}%
+                      </td>
+                      <td className="py-1.5 px-2 text-center text-cyan-300 font-bold whitespace-nowrap">
                         {r.storeCount}
                       </td>
-                      <td className="py-2.5 px-3 text-right text-cyan-400 whitespace-nowrap">
-                        {formatRupiah(r.avgPerPromoDay)}
+                      <td className="py-1.5 px-2 text-center text-slate-400 whitespace-nowrap">
+                        {r.entryCount}
                       </td>
-                      <td className="py-2.5 px-3 text-right font-extrabold text-[#FF6B00] whitespace-nowrap">
+                      <td
+                        className="py-1.5 px-2 text-right text-cyan-400 whitespace-nowrap"
+                        title={formatRupiah(r.avgPerPromoDay)}
+                      >
+                        {formatCompactIdr(r.avgPerPromoDay)}
+                      </td>
+                      <td
+                        className="py-1.5 px-2 text-right text-slate-400 whitespace-nowrap"
+                        title={
+                          r.previousTotalActual !== null
+                            ? `${r.previousMonthPeriod || 'Bulan Lalu'}: ${formatRupiah(r.previousTotalActual)}`
+                            : '-'
+                        }
+                      >
+                        {r.previousTotalActual !== null ? formatCompactIdr(r.previousTotalActual) : '-'}
+                      </td>
+                      <td
+                        className="py-1.5 px-2 text-right font-extrabold text-[#FF6B00] whitespace-nowrap"
+                        title={formatRupiah(r.totalActual)}
+                      >
                         {formatRupiah(r.totalActual)}
                       </td>
-                      <td className="py-2.5 px-4 text-right whitespace-nowrap">
+                      <td
+                        className={`py-1.5 px-2 text-right font-bold whitespace-nowrap ${
+                          r.growthDelta === null
+                            ? 'text-slate-500'
+                            : r.growthDelta >= 0
+                            ? 'text-emerald-400'
+                            : 'text-rose-400'
+                        }`}
+                        title={r.growthDelta !== null ? formatRupiah(r.growthDelta) : '-'}
+                      >
+                        {r.growthDelta !== null
+                          ? `${r.growthDelta >= 0 ? '+' : '-'}${formatCompactIdr(Math.abs(r.growthDelta))}`
+                          : '-'}
+                      </td>
+                      <td className="py-1.5 px-2.5 text-right whitespace-nowrap">
                         {r.growthPercent !== null ? (
-                          <div className="inline-flex flex-col items-end">
-                            <span
-                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold ${
-                                isPos
-                                  ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                                  : 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
-                              }`}
-                            >
-                              {isPos ? (
-                                <TrendingUp className="w-3 h-3" />
-                              ) : (
-                                <TrendingDown className="w-3 h-3" />
-                              )}
-                              {isPos ? '+' : ''}
-                              {r.growthPercent.toFixed(1).replace('.', ',')}%
-                            </span>
-                            {r.growthDelta !== null && (
-                              <span className="text-[10px] text-slate-400 mt-0.5">
-                                {r.growthDelta >= 0 ? '+' : '-'}
-                                {formatCompactIdr(Math.abs(r.growthDelta))}
-                                {r.previousMonthPeriod ? ` vs ${r.previousMonthPeriod}` : ''}
-                              </span>
+                          <span
+                            className={`inline-flex items-center gap-0.5 font-extrabold ${
+                              isPos ? 'text-emerald-400' : 'text-rose-400'
+                            }`}
+                          >
+                            {isPos ? (
+                              <TrendingUp className="w-3 h-3" />
+                            ) : (
+                              <TrendingDown className="w-3 h-3" />
                             )}
-                          </div>
-                        ) : (
-                          <span className="text-[11px] text-slate-500 font-sans">
-                            Bulan Awal (-)
+                            {isPos ? '+' : ''}
+                            {r.growthPercent.toFixed(1).replace('.', ',')}%
                           </span>
+                        ) : (
+                          <span className="text-[10px] text-slate-500 font-sans">Awal</span>
                         )}
                       </td>
                     </tr>
                   );
                 })}
               </tbody>
-              <tfoot className="bg-[#0E1523] border-t border-[#243147] font-mono tabular-nums text-[11px]">
+              <tfoot className="bg-[#0E1523] border-t border-[#243147] font-mono tabular-nums text-[10.5px]">
                 <tr>
-                  <td className="py-2.5 px-4 font-sans font-extrabold uppercase text-slate-300 whitespace-nowrap">
-                    Total / Rata-rata ({promoMonthlyRecap.length} Bln)
+                  <td className="py-2 px-2.5 font-sans font-extrabold uppercase text-slate-300 whitespace-nowrap">
+                    Total ({promoMonthlyRecap.length} Bln)
                   </td>
-                  <td className="py-2.5 px-3 text-center font-bold text-slate-200 whitespace-nowrap">
+                  <td className="py-2 px-2 text-center font-bold text-slate-200 whitespace-nowrap">
                     {stats.totalPromoDays} hr
                   </td>
-                  <td className="py-2.5 px-3 text-center text-slate-400 whitespace-nowrap">
-                    {stats.totalEntries} lap
+                  <td className="py-2 px-2 text-center text-slate-400 whitespace-nowrap">-</td>
+                  <td className="py-2 px-2 text-center text-slate-400 whitespace-nowrap">-</td>
+                  <td className="py-2 px-2 text-center text-slate-300 whitespace-nowrap">
+                    {stats.totalEntries}
                   </td>
-                  <td className="py-2.5 px-3 text-right font-bold text-cyan-300 whitespace-nowrap">
-                    {formatRupiah(stats.avgOverallPerDay)}
+                  <td
+                    className="py-2 px-2 text-right font-bold text-cyan-300 whitespace-nowrap"
+                    title={formatRupiah(stats.avgOverallPerDay)}
+                  >
+                    {formatCompactIdr(stats.avgOverallPerDay)}
                   </td>
-                  <td className="py-2.5 px-3 text-right font-black text-[#FF6B00] whitespace-nowrap">
+                  <td className="py-2 px-2 text-right text-slate-500 whitespace-nowrap">-</td>
+                  <td className="py-2 px-2 text-right font-black text-[#FF6B00] whitespace-nowrap">
                     {formatRupiah(stats.totalActual)}
                   </td>
-                  <td className="py-2.5 px-4 text-right font-bold whitespace-nowrap">
+                  <td className="py-2 px-2 text-right text-slate-500 whitespace-nowrap">-</td>
+                  <td className="py-2 px-2.5 text-right font-bold whitespace-nowrap">
                     {stats.avgGrowthPct !== null ? (
                       <span
                         className={
@@ -2561,11 +2600,11 @@ const TargetsGapPanel: React.FC<{
 
     const visibleRows = showAllRows
       ? storeGapStats.filtered
-      : storeGapStats.filtered.slice(0, 80);
+      : storeGapStats.filtered.slice(0, 120);
 
     return (
-      <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3.5 flex flex-col gap-3">
-        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-2.5 pb-2.5 border-b border-[#1E293B]">
+      <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3 flex flex-col gap-2.5">
+        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-2 pb-2 border-b border-[#1E293B]">
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <h3 className="text-xs font-extrabold uppercase tracking-wider text-white flex items-center gap-1.5">
@@ -2577,19 +2616,19 @@ const TargetsGapPanel: React.FC<{
               </span>
             </div>
             <p className="text-[11px] text-slate-400 mt-0.5">
-              Daftar asal toko penyumbang defisit omzet Sell In &amp; Sell Out (mengikuti filter Periode, Area, Sales &amp; Brand)
+              Seluruh kolom Sell In/Out (Lalu &amp; Skg), Gap, Defisit, Growth &amp; Porsi ditampilkan penuh agar langsung terlihat di layar
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <div className="relative min-w-[200px]">
+            <div className="relative min-w-[190px]">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
                 value={storeGapSearch}
                 onChange={(e) => setStoreGapSearch(e.target.value)}
                 placeholder="Cari toko, sales, SPV..."
-                className="w-full pl-8 pr-7 py-1.5 text-[11px] rounded-lg bg-[#0D121D] border border-[#243147] text-white placeholder-slate-500 focus:outline-none focus:border-[#FF6B00]"
+                className="w-full pl-8 pr-7 py-1 text-[11px] rounded-lg bg-[#0D121D] border border-[#243147] text-white placeholder-slate-500 focus:outline-none focus:border-[#FF6B00]"
               />
               {storeGapSearch && (
                 <button
@@ -2602,7 +2641,7 @@ const TargetsGapPanel: React.FC<{
               )}
             </div>
 
-            <div className="flex flex-wrap items-center gap-1 p-0.5 bg-[#0D121D] rounded-lg border border-[#243147] text-[10.5px] font-bold">
+            <div className="flex flex-wrap items-center gap-1 p-0.5 bg-[#0D121D] rounded-lg border border-[#243147] text-[10px] font-bold">
               <button
                 type="button"
                 onClick={() => setStoreGapCategory('ALL')}
@@ -2652,7 +2691,7 @@ const TargetsGapPanel: React.FC<{
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs font-mono tabular-nums">
-          <div className="px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 flex items-center justify-between gap-2">
+          <div className="px-3 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/30 flex items-center justify-between gap-2">
             <span className="font-sans font-bold text-rose-300 text-[11px]">
               Toko Pasif ({storeGapStats.lostCount})
             </span>
@@ -2660,7 +2699,7 @@ const TargetsGapPanel: React.FC<{
               -{formatRupiah(storeGapStats.lostSum)}
             </span>
           </div>
-          <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-2">
+          <div className="px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-2">
             <span className="font-sans font-bold text-amber-300 text-[11px]">
               Turun Order ({storeGapStats.volCount})
             </span>
@@ -2668,7 +2707,7 @@ const TargetsGapPanel: React.FC<{
               -{formatRupiah(storeGapStats.volSum)}
             </span>
           </div>
-          <div className="px-3 py-2 rounded-lg bg-[#0D121D] border border-[#243147] flex items-center justify-between gap-2">
+          <div className="px-3 py-1.5 rounded-lg bg-[#0D121D] border border-[#243147] flex items-center justify-between gap-2">
             <span className="font-sans font-bold text-slate-300 text-[11px]">
               Total Defisit Toko ({storeGapStats.allCount})
             </span>
@@ -2678,40 +2717,30 @@ const TargetsGapPanel: React.FC<{
           </div>
         </div>
 
-        <div className="overflow-y-auto overflow-x-auto max-h-[calc(100vh-445px)] min-h-[220px] border border-[#1E293B] rounded-lg">
-          <table className="w-full text-[10.5px] text-left border-collapse">
+        <div className="overflow-y-auto overflow-x-auto max-h-[540px] min-h-[260px] border border-[#1E293B] rounded-lg">
+          <table className="w-full table-fixed text-[10px] text-left border-collapse">
             <thead className="sticky top-0 z-10 bg-[#0D121D]">
-              <tr className="text-[9.5px] uppercase text-slate-400 border-b border-[#1E293B] leading-tight">
-                <th className="py-2 px-1.5 text-center w-8">No</th>
-                <th className="py-2 px-1.5 w-[16%]">Nama Toko</th>
-                <th className="py-2 px-1.5 w-[12%]">Sales &amp; SPV</th>
-                <th className="py-2 px-1.5 w-[21%]">Kategori Penyebab</th>
-                <th className="py-2 px-1.5 text-right text-[#FF6B00]">
-                  Sell In<br />
-                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">(Lalu → Skg)</span>
-                </th>
-                <th className="py-2 px-1.5 text-right text-[#00D2FF]">
-                  Sell Out<br />
-                  <span className="text-[8.5px] font-normal text-slate-400 normal-case">(Lalu → Skg)</span>
-                </th>
-                <th className="py-2 px-1.5 text-right text-[#FF6B00]">
-                  Gap<br />Sell In
-                </th>
-                <th className="py-2 px-1.5 text-right text-[#00D2FF]">
-                  Gap<br />Sell Out
-                </th>
-                <th className="py-2 px-1.5 text-right">
-                  Porsi<br />In
-                </th>
-                <th className="py-2 px-1.5 text-right">
-                  Porsi<br />Out
-                </th>
+              <tr className="text-[9px] uppercase text-slate-400 border-b border-[#1E293B] leading-tight">
+                <th className="py-2 px-1 text-center w-[3%]">No</th>
+                <th className="py-2 px-1.5 w-[15%]">Nama Toko &amp; Area</th>
+                <th className="py-2 px-1 w-[9%]">Sales / SPV</th>
+                <th className="py-2 px-1.5 w-[15%]">Penyebab Gap</th>
+                <th className="py-2 px-1 text-right w-[6%] text-slate-400">In Lalu</th>
+                <th className="py-2 px-1 text-right w-[6%] text-[#FF6B00]">In Skg</th>
+                <th className="py-2 px-1 text-right w-[6.5%] text-[#FF6B00]">Gap In</th>
+                <th className="py-2 px-1 text-right w-[6%] text-slate-400">Out Lalu</th>
+                <th className="py-2 px-1 text-right w-[6%] text-[#00D2FF]">Out Skg</th>
+                <th className="py-2 px-1 text-right w-[6.5%] text-[#00D2FF]">Gap Out</th>
+                <th className="py-2 px-1 text-right w-[6.5%] text-rose-300">Defisit</th>
+                <th className="py-2 px-1 text-right w-[5.5%]">Growth</th>
+                <th className="py-2 px-1 text-right w-[4.5%]">P. In</th>
+                <th className="py-2 px-1 text-right w-[4.5%]">P. Out</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
               {visibleRows.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="py-8 text-center font-sans text-slate-500">
+                  <td colSpan={14} className="py-8 text-center font-sans text-slate-500">
                     Tidak ada toko penyumbang gap yang cocok dengan filter saat ini.
                   </td>
                 </tr>
@@ -2731,19 +2760,27 @@ const TargetsGapPanel: React.FC<{
                       : 0;
 
                   return (
-                    <tr key={`${st.storeName}-${idx}`} className="hover:bg-[#172033] align-top">
-                      <td className="py-2 px-1.5 text-center text-slate-500">{idx + 1}</td>
-                      <td className="py-2 px-1.5 font-sans">
-                        <div className="font-bold text-white leading-snug break-words">{st.storeName}</div>
-                        <div className="text-[9.5px] text-slate-400 break-words">{st.region}</div>
+                    <tr key={`${st.storeName}-${idx}`} className="hover:bg-[#172033]">
+                      <td className="py-1.5 px-1 text-center text-slate-500">{idx + 1}</td>
+                      <td className="py-1.5 px-1.5 font-sans">
+                        <div className="font-bold text-white truncate" title={st.storeName}>
+                          {st.storeName}
+                        </div>
+                        <div className="text-[8.5px] text-slate-400 truncate" title={st.region}>
+                          {st.region}
+                        </div>
                       </td>
-                      <td className="py-2 px-1.5 font-sans">
-                        <div className="font-semibold text-slate-200 leading-snug break-words">{st.salesName}</div>
-                        <div className="text-[9.5px] text-slate-400 break-words">SPV: {st.spvName}</div>
+                      <td className="py-1.5 px-1 font-sans">
+                        <div className="font-semibold text-slate-200 truncate" title={st.salesName}>
+                          {st.salesName}
+                        </div>
+                        <div className="text-[8.5px] text-slate-400 truncate" title={`SPV: ${st.spvName}`}>
+                          {st.spvName}
+                        </div>
                       </td>
-                      <td className="py-2 px-1.5 font-sans">
+                      <td className="py-1.5 px-1.5 font-sans" title={st.primaryReason}>
                         <span
-                          className={`text-[9.5px] font-bold block ${
+                          className={`text-[9px] font-bold block truncate ${
                             st.gapCategory === 'lost_outlet'
                               ? 'text-rose-400'
                               : st.gapCategory === 'return_impact'
@@ -2757,28 +2794,24 @@ const TargetsGapPanel: React.FC<{
                             ? 'Dampak Retur'
                             : 'Turun Order'}
                         </span>
-                        <div className="text-[10px] text-slate-300 mt-0.5 whitespace-normal break-words leading-snug">
+                        <div className="text-[9px] text-slate-400 truncate">
                           {st.primaryReason}
                         </div>
                       </td>
-                      <td className="py-2 px-1.5 text-right whitespace-nowrap">
-                        <div className="text-[9.5px] text-slate-400" title={formatRupiah(st.sellInPrevious)}>
-                          {formatCompactIdr(st.sellInPrevious)}
-                        </div>
-                        <div className="font-bold text-white" title={formatRupiah(st.sellInCurrent)}>
-                          → {formatCompactIdr(st.sellInCurrent)}
-                        </div>
-                      </td>
-                      <td className="py-2 px-1.5 text-right whitespace-nowrap">
-                        <div className="text-[9.5px] text-slate-400" title={formatRupiah(st.sellOutPrevious)}>
-                          {formatCompactIdr(st.sellOutPrevious)}
-                        </div>
-                        <div className="font-bold text-[#00D2FF]" title={formatRupiah(st.sellOutCurrent)}>
-                          → {formatCompactIdr(st.sellOutCurrent)}
-                        </div>
+                      <td
+                        className="py-1.5 px-1 text-right text-slate-400 whitespace-nowrap"
+                        title={formatRupiah(st.sellInPrevious)}
+                      >
+                        {formatCompactIdr(st.sellInPrevious)}
                       </td>
                       <td
-                        className={`py-2 px-1.5 text-right font-bold whitespace-nowrap ${
+                        className="py-1.5 px-1 text-right font-bold text-white whitespace-nowrap"
+                        title={formatRupiah(st.sellInCurrent)}
+                      >
+                        {formatCompactIdr(st.sellInCurrent)}
+                      </td>
+                      <td
+                        className={`py-1.5 px-1 text-right font-bold whitespace-nowrap ${
                           sellInGap < 0
                             ? 'text-rose-400'
                             : sellInGap > 0
@@ -2791,10 +2824,22 @@ const TargetsGapPanel: React.FC<{
                           ? `-${formatCompactIdr(Math.abs(sellInGap))}`
                           : sellInGap > 0
                           ? `+${formatCompactIdr(sellInGap)}`
-                          : 'Rp 0'}
+                          : '0'}
                       </td>
                       <td
-                        className={`py-2 px-1.5 text-right font-bold whitespace-nowrap ${
+                        className="py-1.5 px-1 text-right text-slate-400 whitespace-nowrap"
+                        title={formatRupiah(st.sellOutPrevious)}
+                      >
+                        {formatCompactIdr(st.sellOutPrevious)}
+                      </td>
+                      <td
+                        className="py-1.5 px-1 text-right font-bold text-[#00D2FF] whitespace-nowrap"
+                        title={formatRupiah(st.sellOutCurrent)}
+                      >
+                        {formatCompactIdr(st.sellOutCurrent)}
+                      </td>
+                      <td
+                        className={`py-1.5 px-1 text-right font-bold whitespace-nowrap ${
                           sellOutGap < 0
                             ? 'text-rose-400'
                             : sellOutGap > 0
@@ -2807,12 +2852,26 @@ const TargetsGapPanel: React.FC<{
                           ? `-${formatCompactIdr(Math.abs(sellOutGap))}`
                           : sellOutGap > 0
                           ? `+${formatCompactIdr(sellOutGap)}`
-                          : 'Rp 0'}
+                          : '0'}
                       </td>
-                      <td className="py-2 px-1.5 text-right font-bold text-[#FF6B00] whitespace-nowrap">
+                      <td
+                        className="py-1.5 px-1 text-right font-extrabold text-rose-400 whitespace-nowrap"
+                        title={formatRupiah(st.deficitValue)}
+                      >
+                        -{formatCompactIdr(st.deficitValue)}
+                      </td>
+                      <td
+                        className={`py-1.5 px-1 text-right font-bold whitespace-nowrap ${
+                          st.growthPercent < 0 ? 'text-rose-400' : 'text-emerald-400'
+                        }`}
+                      >
+                        {st.growthPercent > 0 ? '+' : ''}
+                        {st.growthPercent.toFixed(0)}%
+                      </td>
+                      <td className="py-1.5 px-1 text-right font-bold text-[#FF6B00] whitespace-nowrap">
                         {porsiIn.toFixed(1)}%
                       </td>
-                      <td className="py-2 px-1.5 text-right font-bold text-[#00D2FF] whitespace-nowrap">
+                      <td className="py-1.5 px-1 text-right font-bold text-[#00D2FF] whitespace-nowrap">
                         {porsiOut.toFixed(1)}%
                       </td>
                     </tr>
@@ -2823,7 +2882,7 @@ const TargetsGapPanel: React.FC<{
           </table>
         </div>
 
-        {storeGapStats.filtered.length > 80 && (
+        {storeGapStats.filtered.length > 120 && (
           <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1">
             <span>
               Menampilkan {visibleRows.length} dari {storeGapStats.filtered.length} toko
@@ -2834,7 +2893,7 @@ const TargetsGapPanel: React.FC<{
               className="px-2.5 py-1 rounded-md bg-[#192234] hover:bg-[#233049] text-[#00D2FF] font-bold border border-[#2A3952] cursor-pointer"
             >
               {showAllRows
-                ? 'Ringkas ke 80 Baris'
+                ? 'Ringkas ke 120 Baris'
                 : `Tampilkan Semua (${storeGapStats.filtered.length} Toko)`}
             </button>
           </div>
@@ -4819,6 +4878,33 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
   const [selectedQuarter, setSelectedQuarter] = useState<QuarterPeriodKey>('Q4');
   const [hallOfFameTab, setHallOfFameTab] = useState<'sales' | 'ba' | 'trainer'>('sales');
   const [quartalSearch, setQuartalSearch] = useState<string>('');
+  const [quartalRefreshTick, setQuartalRefreshTick] = useState<number>(0);
+  const [editingBaSellInName, setEditingBaSellInName] = useState<string | null>(null);
+  const [editingBaSellInDraft, setEditingBaSellInDraft] = useState<string>('');
+
+  useEffect(() => {
+    const onTargetsChanged = () => setQuartalRefreshTick((t) => t + 1);
+    window.addEventListener(TARGETS_UPDATED_EVENT, onTargetsChanged);
+    window.addEventListener('storage', onTargetsChanged);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, onTargetsChanged);
+      window.removeEventListener('storage', onTargetsChanged);
+    };
+  }, []);
+
+  const handleSaveBaSellInTarget = (baName: string) => {
+    const rawDigits = editingBaSellInDraft.replace(/[^\d]/g, '');
+    const parsedVal = Number(rawDigits);
+    if (!Number.isFinite(parsedVal) || rawDigits === '') {
+      setEditingBaSellInName(null);
+      return;
+    }
+    saveQuarterlyTargetOverride(snap.selectedYear, selectedQuarter, 'ba', baName, {
+      targetSellIn: Math.max(0, Math.round(parsedVal)),
+    });
+    setEditingBaSellInName(null);
+    setQuartalRefreshTick((t) => t + 1);
+  };
 
   useEffect(() => {
     if (filters.BULAN && filters.BULAN !== 'ALL') {
@@ -5014,7 +5100,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
       isKetSellOut,
       activeKetDisplayLabel,
     };
-  }, [activeLens, allRecords, filters, selectedQuarter, snap.selectedYear, deferredDayRange, quartalSearch]);
+  }, [activeLens, allRecords, filters, selectedQuarter, snap.selectedYear, deferredDayRange, quartalSearch, quartalRefreshTick]);
 
   const sidebarItems: Array<{
     id: SidebarLens;
@@ -7760,6 +7846,11 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                       </h4>
                       <p className="text-[11px] text-slate-400">
                         Urutan peringkat berdasarkan persentase pencapaian (%) tertinggi • Filter KET ({achieveQuartalData.activeKetDisplayLabel})
+                        {hallOfFameTab === 'ba' && (achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
+                          <span className="text-amber-300 font-semibold">
+                            {' '}· Klik nilai Target Sell In pada Nama BA &amp; Toko untuk edit langsung
+                          </span>
+                        )}
                       </p>
                     </div>
 
@@ -7793,7 +7884,10 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                           <button
                             key={tab.id}
                             type="button"
-                            onClick={() => setHallOfFameTab(tab.id)}
+                            onClick={() => {
+                              setEditingBaSellInName(null);
+                              setHallOfFameTab(tab.id);
+                            }}
                             className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
                               hallOfFameTab === tab.id
                                 ? 'bg-amber-400 text-slate-950 shadow-xs'
@@ -7807,7 +7901,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                     </div>
                   </div>
 
-                  <div className="bg-[#090E1A]/80 border border-white/10 rounded-xl overflow-x-auto max-h-[430px] overflow-y-auto">
+                  <div className="bg-[#090E1A]/80 border border-white/10 rounded-xl overflow-x-auto max-h-[540px] overflow-y-auto">
                     <table className="w-full text-xs text-left border-collapse">
                       <thead className="sticky top-0 z-10 bg-[#0F172A]">
                         <tr className="border-b border-white/10 text-slate-300 font-bold">
@@ -7822,7 +7916,14 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                           <th className="py-2.5 px-3">Area</th>
                           {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
                             <>
-                              <th className="py-2.5 px-3 text-right">Target Sell In</th>
+                              <th className="py-2.5 px-3 text-right">
+                                Target Sell In
+                                {hallOfFameTab === 'ba' && (
+                                  <span className="ml-1 text-[9px] font-semibold text-amber-300 normal-case">
+                                    (Edit)
+                                  </span>
+                                )}
+                              </th>
                               <th className="py-2.5 px-3 text-right">Realisasi Sell In</th>
                               <th className="py-2.5 px-3 text-center">% Sell In</th>
                             </>
@@ -7890,47 +7991,97 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
 
                         {hallOfFameTab === 'ba' &&
                           (achieveQuartalData.filteredBa.length > 0 ? (
-                            achieveQuartalData.filteredBa.map((b, idx) => (
-                              <tr key={`${b.baName}-${b.storeName}`} className="hover:bg-white/5 transition-colors">
-                                <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
-                                <td className="py-2 px-3 font-sans">
-                                  <span className="font-bold text-white block">{b.baName}</span>
-                                  <span className="text-[10px] text-slate-400">{b.storeName}</span>
-                                </td>
-                                <td className="py-2 px-3 font-sans text-slate-400">{b.coverArea}</td>
-                                {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
-                                  <>
-                                    <td className="py-2 px-3 text-right text-slate-300">
-                                      {formatRupiah(b.quarterTargetSellIn, true)}
-                                    </td>
-                                    <td className="py-2 px-3 text-right font-bold text-sky-300">
-                                      {formatRupiah(b.quarterActualSellIn, true)}
-                                    </td>
-                                    <td className="py-2 px-3 text-center font-bold text-emerald-300">
-                                      {formatPercent(b.quarterAchievementSellInPercent, false)}
-                                    </td>
-                                  </>
-                                )}
-                                {(achieveQuartalData.isKetSellOut || !achieveQuartalData.isKetSellIn) && (
-                                  <>
-                                    <td className="py-2 px-3 text-right text-slate-300">
-                                      {formatRupiah(b.quarterTargetSellOut, true)}
-                                    </td>
-                                    <td className="py-2 px-3 text-right font-bold text-emerald-300">
-                                      {formatRupiah(b.quarterActualSellOut, true)}
-                                    </td>
-                                    <td className="py-2 px-3 text-center font-bold text-emerald-300">
-                                      {formatPercent(b.quarterAchievementSellOutPercent, false)}
-                                    </td>
-                                  </>
-                                )}
-                                {!achieveQuartalData.isKetSellIn && !achieveQuartalData.isKetSellOut && (
-                                  <td className="py-2 px-3 text-center font-extrabold text-amber-300">
-                                    {formatPercent(b.quarterAchievementPercent, false)}
+                            achieveQuartalData.filteredBa.map((b, idx) => {
+                              const isEditingTarget = editingBaSellInName === b.baName;
+                              return (
+                                <tr key={`${b.baName}-${b.storeName}`} className="hover:bg-white/5 transition-colors">
+                                  <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
+                                  <td className="py-2 px-3 font-sans">
+                                    <span className="font-bold text-white block">{b.baName}</span>
+                                    <span className="text-[10px] text-slate-400">{b.storeName}</span>
                                   </td>
-                                )}
-                              </tr>
-                            ))
+                                  <td className="py-2 px-3 font-sans text-slate-400">{b.coverArea}</td>
+                                  {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
+                                    <>
+                                      <td className="py-2 px-3 text-right whitespace-nowrap">
+                                        {isEditingTarget ? (
+                                          <div className="inline-flex items-center justify-end gap-1">
+                                            <input
+                                              type="text"
+                                              inputMode="numeric"
+                                              autoFocus
+                                              value={editingBaSellInDraft}
+                                              onChange={(e) => setEditingBaSellInDraft(e.target.value)}
+                                              onKeyDown={(e) => {
+                                                if (e.key === 'Enter') handleSaveBaSellInTarget(b.baName);
+                                                if (e.key === 'Escape') setEditingBaSellInName(null);
+                                              }}
+                                              className="w-28 px-2 py-1 rounded bg-[#0B101C] border border-amber-400 text-right text-xs font-mono font-bold text-white outline-none"
+                                              placeholder="Nominal Rp"
+                                            />
+                                            <button
+                                              type="button"
+                                              onClick={() => handleSaveBaSellInTarget(b.baName)}
+                                              className="p-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer"
+                                              title="Simpan Target Sell In"
+                                            >
+                                              <Check className="w-3 h-3" />
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => setEditingBaSellInName(null)}
+                                              className="p-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 cursor-pointer"
+                                              title="Batal"
+                                            >
+                                              <X className="w-3 h-3" />
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setEditingBaSellInName(b.baName);
+                                              setEditingBaSellInDraft(String(Math.round(b.quarterTargetSellIn || 0)));
+                                            }}
+                                            title="Klik untuk edit Target Sell In BA & Toko ini"
+                                            className="inline-flex items-center gap-1.5 text-slate-200 hover:text-amber-300 border-b border-dashed border-slate-500 hover:border-amber-400 pb-0.5 cursor-pointer transition-colors group"
+                                          >
+                                            <span className={b.isCustomQuarterTarget ? 'text-amber-300 font-bold' : ''}>
+                                              {formatRupiah(b.quarterTargetSellIn, true)}
+                                            </span>
+                                            <Edit3 className="w-3 h-3 text-slate-400 group-hover:text-amber-300 shrink-0" />
+                                          </button>
+                                        )}
+                                      </td>
+                                      <td className="py-2 px-3 text-right font-bold text-sky-300">
+                                        {formatRupiah(b.quarterActualSellIn, true)}
+                                      </td>
+                                      <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                                        {formatPercent(b.quarterAchievementSellInPercent, false)}
+                                      </td>
+                                    </>
+                                  )}
+                                  {(achieveQuartalData.isKetSellOut || !achieveQuartalData.isKetSellIn) && (
+                                    <>
+                                      <td className="py-2 px-3 text-right text-slate-300">
+                                        {formatRupiah(b.quarterTargetSellOut, true)}
+                                      </td>
+                                      <td className="py-2 px-3 text-right font-bold text-emerald-300">
+                                        {formatRupiah(b.quarterActualSellOut, true)}
+                                      </td>
+                                      <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                                        {formatPercent(b.quarterAchievementSellOutPercent, false)}
+                                      </td>
+                                    </>
+                                  )}
+                                  {!achieveQuartalData.isKetSellIn && !achieveQuartalData.isKetSellOut && (
+                                    <td className="py-2 px-3 text-center font-extrabold text-amber-300">
+                                      {formatPercent(b.quarterAchievementPercent, false)}
+                                    </td>
+                                  )}
+                                </tr>
+                              );
+                            })
                           ) : (
                             <tr>
                               <td colSpan={10} className="py-8 text-center font-sans text-slate-400">
