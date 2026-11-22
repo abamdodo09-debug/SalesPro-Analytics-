@@ -7,7 +7,7 @@ import {
   TrainerTargetItem,
 } from '../types/dashboard';
 import { calculateSalesSalary } from '../utils/costCalculations';
-import { isFocusProduct } from '../utils/analytics';
+import { isFocusProduct, getTrainerForRecord } from '../utils/analytics';
 import {
   loadFocusOverrides,
   saveFocusOverrides,
@@ -24,7 +24,9 @@ export function notifyTargetsUpdated(detail?: { monthKey?: string; category?: st
 }
 
 export const STORAGE_KEY_AREA_TARGETS = 'salespro_custom_area_targets';
+export const STORAGE_KEY_AREA_SELLOUT_TARGETS = 'salespro_custom_area_sellout_targets_v1';
 export const STORAGE_KEY_SPV_TARGETS = 'salespro_custom_spv_targets';
+export const STORAGE_KEY_SPV_SELLOUT_TARGETS = 'salespro_custom_spv_sellout_targets_v1';
 export const STORAGE_KEY_SALES_TARGETS = 'salespro_custom_sales_targets';
 export const STORAGE_KEY_SALES_SELLOUT_TARGETS = 'salespro_custom_sales_sellout_targets_v1';
 export const STORAGE_KEY_BA_NON_LAVOJOY = 'salespro_custom_ba_non_lavojoy_targets';
@@ -33,8 +35,10 @@ export const STORAGE_KEY_TRAINER_TARGETS = 'salespro_custom_trainer_targets';
 export const STORAGE_KEY_MONTHLY_TARGETS = 'salespro_custom_monthly_targets_v2';
 export const STORAGE_KEY_CUSTOM_BA_PROFILES = 'salespro_custom_ba_profiles_v1';
 
-export const DEFAULT_AREA_TARGET = 300000000; // 300 Jt default per area
-export const DEFAULT_SPV_TARGET = 450000000;  // 450 Jt default per SPV
+export const DEFAULT_AREA_TARGET = 300000000; // 300 Jt default per area (Sell In)
+export const DEFAULT_AREA_SELLOUT_TARGET = 280000000; // 280 Jt default per area (Sell Out)
+export const DEFAULT_SPV_TARGET = 450000000;  // 450 Jt default per SPV (Sell In)
+export const DEFAULT_SPV_SELLOUT_TARGET = 420000000;  // 420 Jt default per SPV (Sell Out)
 export const DEFAULT_SALES_TARGET = 150000000; // 150 Jt default per sales (Sell In)
 export const DEFAULT_SALES_SELLOUT_TARGET = 140000000; // 140 Jt default per sales (Sell Out)
 export const DEFAULT_BA_NON_LAVOJOY_TARGET = 30000000; // 30 Jt default
@@ -231,7 +235,9 @@ export function saveCustomBaProfiles(profiles: Record<string, CustomBaProfile>):
 
 export interface MonthlyTargetBucket {
   area?: Record<string, number>;
+  areaSellOut?: Record<string, number>;
   spv?: Record<string, number>;
+  spvSellOut?: Record<string, number>;
   sales?: Record<string, number>;
   salesSellOut?: Record<string, number>;
   baNonLavojoy?: Record<string, number>;
@@ -308,6 +314,31 @@ export function saveAreaTargets(targets: Record<string, number>, monthKey?: stri
   notifyTargetsUpdated({ monthKey: norm, category: 'area' });
 }
 
+export function loadAreaSellOutTargets(monthKey?: string): Record<string, number> {
+  const base = readGlobalMap(STORAGE_KEY_AREA_SELLOUT_TARGETS);
+  const norm = normalizeMonthKey(monthKey);
+  if (norm !== 'ALL') {
+    const monthly = loadMonthlyTargets();
+    if (monthly[norm]?.areaSellOut) {
+      return { ...base, ...monthly[norm].areaSellOut };
+    }
+  }
+  return base;
+}
+
+export function saveAreaSellOutTargets(targets: Record<string, number>, monthKey?: string): void {
+  const norm = normalizeMonthKey(monthKey);
+  if (norm !== 'ALL') {
+    const monthly = loadMonthlyTargets();
+    if (!monthly[norm]) monthly[norm] = {};
+    monthly[norm].areaSellOut = targets;
+    saveMonthlyTargets(monthly);
+  } else {
+    writeGlobalMap(STORAGE_KEY_AREA_SELLOUT_TARGETS, targets);
+  }
+  notifyTargetsUpdated({ monthKey: norm, category: 'area_sellout' });
+}
+
 export function loadSpvTargets(monthKey?: string): Record<string, number> {
   const base = readGlobalMap(STORAGE_KEY_SPV_TARGETS);
   const norm = normalizeMonthKey(monthKey);
@@ -331,6 +362,31 @@ export function saveSpvTargets(targets: Record<string, number>, monthKey?: strin
     writeGlobalMap(STORAGE_KEY_SPV_TARGETS, targets);
   }
   notifyTargetsUpdated({ monthKey: norm, category: 'spv' });
+}
+
+export function loadSpvSellOutTargets(monthKey?: string): Record<string, number> {
+  const base = readGlobalMap(STORAGE_KEY_SPV_SELLOUT_TARGETS);
+  const norm = normalizeMonthKey(monthKey);
+  if (norm !== 'ALL') {
+    const monthly = loadMonthlyTargets();
+    if (monthly[norm]?.spvSellOut) {
+      return { ...base, ...monthly[norm].spvSellOut };
+    }
+  }
+  return base;
+}
+
+export function saveSpvSellOutTargets(targets: Record<string, number>, monthKey?: string): void {
+  const norm = normalizeMonthKey(monthKey);
+  if (norm !== 'ALL') {
+    const monthly = loadMonthlyTargets();
+    if (!monthly[norm]) monthly[norm] = {};
+    monthly[norm].spvSellOut = targets;
+    saveMonthlyTargets(monthly);
+  } else {
+    writeGlobalMap(STORAGE_KEY_SPV_SELLOUT_TARGETS, targets);
+  }
+  notifyTargetsUpdated({ monthKey: norm, category: 'spv_sellout' });
 }
 
 export function getExplicitSpvTargetOverride(spvName: string, monthKey?: string): number | undefined {
@@ -547,7 +603,9 @@ export function saveTrainerTargets(
 
 export type SingleTargetCategory =
   | 'area'
+  | 'areaSellOut'
   | 'spv'
+  | 'spvSellOut'
   | 'sales'
   | 'salesSellOut'
   | 'baNonLavojoy'
@@ -575,7 +633,9 @@ export function setSingleTargetOverride(
     }
     const keyMap: Record<Exclude<SingleTargetCategory, 'baFocus'>, string> = {
       area: STORAGE_KEY_AREA_TARGETS,
+      areaSellOut: STORAGE_KEY_AREA_SELLOUT_TARGETS,
       spv: STORAGE_KEY_SPV_TARGETS,
+      spvSellOut: STORAGE_KEY_SPV_SELLOUT_TARGETS,
       sales: STORAGE_KEY_SALES_TARGETS,
       salesSellOut: STORAGE_KEY_SALES_SELLOUT_TARGETS,
       baNonLavojoy: STORAGE_KEY_BA_NON_LAVOJOY,
@@ -619,6 +679,197 @@ export function setSingleTrainerTargetOverride(
   notifyTargetsUpdated({ monthKey: norm, category: 'trainer' });
 }
 
+function upsertCaseInsensitiveKey(map: Record<string, number>, targetKey: string, value: number): void {
+  const upperTarget = targetKey.trim().toUpperCase();
+  Object.keys(map).forEach((k) => {
+    if (k.trim().toUpperCase() === upperTarget && k !== targetKey) {
+      delete map[k];
+    }
+  });
+  map[targetKey] = value;
+}
+
+/**
+ * Sets a single BA's 1-month targets (Non-Lavojoy, Lavojoy, Produk Fokus Pcs)
+ * identically across the global baseline and all 12 months (Jan - Des 2026).
+ */
+export function applySingleBaTargetToAllMonths(
+  storeKey: string,
+  values: { targetNonLavojoy?: number; targetLavojoy?: number; targetFocusPcs?: number }
+): void {
+  const globalNon = readGlobalMap(STORAGE_KEY_BA_NON_LAVOJOY);
+  const globalLav = readGlobalMap(STORAGE_KEY_BA_LAVOJOY);
+  const ov = loadFocusOverrides();
+  const monthly = loadMonthlyTargets();
+
+  if (values.targetNonLavojoy !== undefined) {
+    upsertCaseInsensitiveKey(globalNon, storeKey, values.targetNonLavojoy);
+  }
+  if (values.targetLavojoy !== undefined) {
+    upsertCaseInsensitiveKey(globalLav, storeKey, values.targetLavojoy);
+  }
+  if (values.targetFocusPcs !== undefined) {
+    if (!ov[storeKey]) ov[storeKey] = { storeName: storeKey };
+    ov[storeKey].targetPcs = values.targetFocusPcs;
+  }
+
+  MONTH_OPTIONS_2026.forEach((m) => {
+    if (!monthly[m.key]) monthly[m.key] = {};
+    if (values.targetNonLavojoy !== undefined) {
+      if (!monthly[m.key].baNonLavojoy) monthly[m.key].baNonLavojoy = {};
+      upsertCaseInsensitiveKey(monthly[m.key].baNonLavojoy!, storeKey, values.targetNonLavojoy);
+    }
+    if (values.targetLavojoy !== undefined) {
+      if (!monthly[m.key].baLavojoy) monthly[m.key].baLavojoy = {};
+      upsertCaseInsensitiveKey(monthly[m.key].baLavojoy!, storeKey, values.targetLavojoy);
+    }
+    if (values.targetFocusPcs !== undefined) {
+      if (!monthly[m.key].baFocus) monthly[m.key].baFocus = {};
+      upsertCaseInsensitiveKey(monthly[m.key].baFocus!, storeKey, values.targetFocusPcs);
+    }
+  });
+
+  writeGlobalMap(STORAGE_KEY_BA_NON_LAVOJOY, globalNon);
+  writeGlobalMap(STORAGE_KEY_BA_LAVOJOY, globalLav);
+  if (values.targetFocusPcs !== undefined) {
+    saveFocusOverrides(ov);
+  }
+  saveMonthlyTargets(monthly);
+  notifyTargetsUpdated({ monthKey: 'ALL', category: 'ba_all_months' });
+}
+
+/**
+ * Copies ONLY BA targets (Non-Lavojoy, Lavojoy, Produk Fokus Pcs) from one source month
+ * into all 12 months (Jan - Des 2026) and the global baseline so every month has the exact same BA targets.
+ */
+export function copyBaTargetsToAllMonths(
+  sourceMonthKey: string,
+  records: TransactionRecord[] = []
+): { baCount: number; monthCount: number } {
+  const srcNorm = normalizeMonthKey(sourceMonthKey);
+  const srcMatrix = aggregateTargetMatrix(records, srcNorm, { singleMonthBaselineOnly: true });
+
+  const baNonMap: Record<string, number> = {};
+  const baLavMap: Record<string, number> = {};
+  const baFocusMap: Record<string, number> = {};
+
+  srcMatrix.bas.forEach((b) => {
+    baNonMap[b.storeName] = b.targetNonLavojoy;
+    baLavMap[b.storeName] = b.targetLavojoy;
+    baFocusMap[b.storeName] = b.targetFocusPcs;
+  });
+
+  const globalNon = readGlobalMap(STORAGE_KEY_BA_NON_LAVOJOY);
+  const globalLav = readGlobalMap(STORAGE_KEY_BA_LAVOJOY);
+  Object.entries(baNonMap).forEach(([k, v]) => upsertCaseInsensitiveKey(globalNon, k, v));
+  Object.entries(baLavMap).forEach(([k, v]) => upsertCaseInsensitiveKey(globalLav, k, v));
+  writeGlobalMap(STORAGE_KEY_BA_NON_LAVOJOY, globalNon);
+  writeGlobalMap(STORAGE_KEY_BA_LAVOJOY, globalLav);
+
+  const ov = loadFocusOverrides();
+  Object.entries(baFocusMap).forEach(([k, pcs]) => {
+    if (!ov[k]) ov[k] = { storeName: k };
+    ov[k].targetPcs = pcs;
+  });
+  saveFocusOverrides(ov);
+
+  const monthly = loadMonthlyTargets();
+  MONTH_OPTIONS_2026.forEach((m) => {
+    if (!monthly[m.key]) monthly[m.key] = {};
+    monthly[m.key].baNonLavojoy = { ...(monthly[m.key].baNonLavojoy || {}), ...baNonMap };
+    monthly[m.key].baLavojoy = { ...(monthly[m.key].baLavojoy || {}), ...baLavMap };
+    monthly[m.key].baFocus = { ...(monthly[m.key].baFocus || {}), ...baFocusMap };
+  });
+  saveMonthlyTargets(monthly);
+  notifyTargetsUpdated({ monthKey: 'ALL', category: 'ba_all_months' });
+
+  return {
+    baCount: srcMatrix.bas.length,
+    monthCount: MONTH_OPTIONS_2026.length,
+  };
+}
+
+/**
+ * Applies uniform 1-month BA targets across all listed BA stores either to the current month
+ * or identically to all 12 months (Jan - Des 2026) + global baseline.
+ */
+export function applyUniformBaTargets(
+  storeKeys: string[],
+  values: { targetNonLavojoy?: number; targetLavojoy?: number; targetFocusPcs?: number },
+  scope: 'current' | 'ALL_MONTHS',
+  currentMonthKey?: string
+): void {
+  if (scope === 'current') {
+    const norm = normalizeMonthKey(currentMonthKey);
+    if (values.targetNonLavojoy !== undefined) {
+      const nextMap: Record<string, number> = {};
+      storeKeys.forEach((k) => {
+        nextMap[k] = values.targetNonLavojoy!;
+      });
+      saveBaNonLavojoyTargets(nextMap, norm);
+    }
+    if (values.targetLavojoy !== undefined) {
+      const nextMap: Record<string, number> = {};
+      storeKeys.forEach((k) => {
+        nextMap[k] = values.targetLavojoy!;
+      });
+      saveBaLavojoyTargets(nextMap, norm);
+    }
+    if (values.targetFocusPcs !== undefined) {
+      const nextMap: Record<string, number> = {};
+      storeKeys.forEach((k) => {
+        nextMap[k] = values.targetFocusPcs!;
+      });
+      saveBaFocusTargets(nextMap, norm);
+    }
+    return;
+  }
+
+  const globalNon = readGlobalMap(STORAGE_KEY_BA_NON_LAVOJOY);
+  const globalLav = readGlobalMap(STORAGE_KEY_BA_LAVOJOY);
+  const ov = loadFocusOverrides();
+  const monthly = loadMonthlyTargets();
+
+  storeKeys.forEach((storeKey) => {
+    if (values.targetNonLavojoy !== undefined) {
+      upsertCaseInsensitiveKey(globalNon, storeKey, values.targetNonLavojoy);
+    }
+    if (values.targetLavojoy !== undefined) {
+      upsertCaseInsensitiveKey(globalLav, storeKey, values.targetLavojoy);
+    }
+    if (values.targetFocusPcs !== undefined) {
+      if (!ov[storeKey]) ov[storeKey] = { storeName: storeKey };
+      ov[storeKey].targetPcs = values.targetFocusPcs;
+    }
+  });
+
+  MONTH_OPTIONS_2026.forEach((m) => {
+    if (!monthly[m.key]) monthly[m.key] = {};
+    storeKeys.forEach((storeKey) => {
+      if (values.targetNonLavojoy !== undefined) {
+        if (!monthly[m.key].baNonLavojoy) monthly[m.key].baNonLavojoy = {};
+        upsertCaseInsensitiveKey(monthly[m.key].baNonLavojoy!, storeKey, values.targetNonLavojoy);
+      }
+      if (values.targetLavojoy !== undefined) {
+        if (!monthly[m.key].baLavojoy) monthly[m.key].baLavojoy = {};
+        upsertCaseInsensitiveKey(monthly[m.key].baLavojoy!, storeKey, values.targetLavojoy);
+      }
+      if (values.targetFocusPcs !== undefined) {
+        if (!monthly[m.key].baFocus) monthly[m.key].baFocus = {};
+        upsertCaseInsensitiveKey(monthly[m.key].baFocus!, storeKey, values.targetFocusPcs);
+      }
+    });
+  });
+
+  writeGlobalMap(STORAGE_KEY_BA_NON_LAVOJOY, globalNon);
+  writeGlobalMap(STORAGE_KEY_BA_LAVOJOY, globalLav);
+  if (values.targetFocusPcs !== undefined) {
+    saveFocusOverrides(ov);
+  }
+  saveMonthlyTargets(monthly);
+  notifyTargetsUpdated({ monthKey: 'ALL', category: 'ba_all_months' });
+}
+
 /**
  * Copies all effective targets from sourceMonthKey into each destination month in targetMonthKeys.
  */
@@ -628,13 +879,21 @@ export function copyMonthTargets(
   records: TransactionRecord[] = []
 ): number {
   const srcNorm = normalizeMonthKey(sourceMonthKey);
-  const srcMatrix = aggregateTargetMatrix(records, srcNorm);
+  const srcMatrix = aggregateTargetMatrix(records, srcNorm, { singleMonthBaselineOnly: true });
 
   const areaMap: Record<string, number> = {};
-  srcMatrix.areas.forEach((a) => { areaMap[a.coverArea] = a.targetOmzet; });
+  const areaSellOutMap: Record<string, number> = {};
+  srcMatrix.areas.forEach((a) => {
+    areaMap[a.coverArea] = a.targetOmzet;
+    areaSellOutMap[a.coverArea] = a.targetSellOut ?? DEFAULT_AREA_SELLOUT_TARGET;
+  });
 
   const spvMap: Record<string, number> = {};
-  srcMatrix.spvs.forEach((s) => { spvMap[s.spvName] = s.targetOmzet; });
+  const spvSellOutMap: Record<string, number> = {};
+  srcMatrix.spvs.forEach((s) => {
+    spvMap[s.spvName] = s.targetOmzet;
+    spvSellOutMap[s.spvName] = s.targetSellOut ?? DEFAULT_SPV_SELLOUT_TARGET;
+  });
 
   const salesInMap: Record<string, number> = {};
   const salesOutMap: Record<string, number> = {};
@@ -669,7 +928,9 @@ export function copyMonthTargets(
     const destNorm = normalizeMonthKey(dest);
     if (destNorm === 'ALL') {
       writeGlobalMap(STORAGE_KEY_AREA_TARGETS, areaMap);
+      writeGlobalMap(STORAGE_KEY_AREA_SELLOUT_TARGETS, areaSellOutMap);
       writeGlobalMap(STORAGE_KEY_SPV_TARGETS, spvMap);
+      writeGlobalMap(STORAGE_KEY_SPV_SELLOUT_TARGETS, spvSellOutMap);
       writeGlobalMap(STORAGE_KEY_SALES_TARGETS, salesInMap);
       writeGlobalMap(STORAGE_KEY_SALES_SELLOUT_TARGETS, salesOutMap);
       writeGlobalMap(STORAGE_KEY_BA_NON_LAVOJOY, baNonMap);
@@ -685,7 +946,9 @@ export function copyMonthTargets(
     } else if (destNorm !== srcNorm) {
       monthly[destNorm] = {
         area: { ...areaMap },
+        areaSellOut: { ...areaSellOutMap },
         spv: { ...spvMap },
+        spvSellOut: { ...spvSellOutMap },
         sales: { ...salesInMap },
         salesSellOut: { ...salesOutMap },
         baNonLavojoy: { ...baNonMap },
@@ -706,7 +969,9 @@ export function resetMonthTargets(monthKey?: string): void {
   const norm = normalizeMonthKey(monthKey);
   if (norm === 'ALL') {
     localStorage.removeItem(STORAGE_KEY_AREA_TARGETS);
+    localStorage.removeItem(STORAGE_KEY_AREA_SELLOUT_TARGETS);
     localStorage.removeItem(STORAGE_KEY_SPV_TARGETS);
+    localStorage.removeItem(STORAGE_KEY_SPV_SELLOUT_TARGETS);
     localStorage.removeItem(STORAGE_KEY_SALES_TARGETS);
     localStorage.removeItem(STORAGE_KEY_SALES_SELLOUT_TARGETS);
     localStorage.removeItem(STORAGE_KEY_BA_NON_LAVOJOY);
@@ -735,7 +1000,9 @@ export function getMonthCustomizationSummary(): Record<string, number> {
     }
     counts[m.key] =
       Object.keys(bucket.area || {}).length +
+      Object.keys(bucket.areaSellOut || {}).length +
       Object.keys(bucket.spv || {}).length +
+      Object.keys(bucket.spvSellOut || {}).length +
       Object.keys(bucket.sales || {}).length +
       Object.keys(bucket.salesSellOut || {}).length +
       Object.keys(bucket.baNonLavojoy || {}).length +
@@ -746,7 +1013,9 @@ export function getMonthCustomizationSummary(): Record<string, number> {
 
   counts['ALL'] =
     Object.keys(readGlobalMap(STORAGE_KEY_AREA_TARGETS)).length +
+    Object.keys(readGlobalMap(STORAGE_KEY_AREA_SELLOUT_TARGETS)).length +
     Object.keys(readGlobalMap(STORAGE_KEY_SPV_TARGETS)).length +
+    Object.keys(readGlobalMap(STORAGE_KEY_SPV_SELLOUT_TARGETS)).length +
     Object.keys(readGlobalMap(STORAGE_KEY_SALES_TARGETS)).length +
     Object.keys(readGlobalMap(STORAGE_KEY_SALES_SELLOUT_TARGETS)).length +
     Object.keys(readGlobalMap(STORAGE_KEY_BA_NON_LAVOJOY)).length +
@@ -754,6 +1023,37 @@ export function getMonthCustomizationSummary(): Record<string, number> {
     Object.keys(loadTrainerTargets('ALL')).length;
 
   return counts;
+}
+
+export function getConfiguredMonthKeys(): string[] {
+  const monthly = loadMonthlyTargets();
+  return MONTH_OPTIONS_2026
+    .map((m) => m.key)
+    .filter((key) => {
+      const bucket = monthly[key];
+      if (!bucket) return false;
+      return (
+        Object.keys(bucket.area || {}).length > 0 ||
+        Object.keys(bucket.areaSellOut || {}).length > 0 ||
+        Object.keys(bucket.spv || {}).length > 0 ||
+        Object.keys(bucket.spvSellOut || {}).length > 0 ||
+        Object.keys(bucket.sales || {}).length > 0 ||
+        Object.keys(bucket.salesSellOut || {}).length > 0 ||
+        Object.keys(bucket.baNonLavojoy || {}).length > 0 ||
+        Object.keys(bucket.baLavojoy || {}).length > 0 ||
+        Object.keys(bucket.baFocus || {}).length > 0 ||
+        Object.keys(bucket.trainer || {}).length > 0
+      );
+    });
+}
+
+function findMapValueCaseInsensitive<T>(map: Record<string, T> | undefined, key: string): T | undefined {
+  if (!map || !key) return undefined;
+  if (map[key] !== undefined) return map[key];
+  const upperKey = key.trim().toUpperCase();
+  if (map[upperKey] !== undefined) return map[upperKey];
+  const matchedKey = Object.keys(map).find((k) => k.trim().toUpperCase() === upperKey);
+  return matchedKey !== undefined ? map[matchedKey] : undefined;
 }
 
 export interface TargetMatrixData {
@@ -766,9 +1066,15 @@ export interface TargetMatrixData {
     totalAreaTarget: number;
     totalAreaActual: number;
     areaAchievementPct: number;
+    totalAreaTargetSellOut: number;
+    totalAreaActualSellOut: number;
+    areaSellOutAchievementPct: number;
     totalSpvTarget: number;
     totalSpvActual: number;
     spvAchievementPct: number;
+    totalSpvTargetSellOut: number;
+    totalSpvActualSellOut: number;
+    spvSellOutAchievementPct: number;
     totalSalesTarget: number;
     totalSalesActual: number;
     salesAchievementPct: number;
@@ -788,7 +1094,14 @@ export interface TargetMatrixData {
     totalTrainerTargetFocusPcs: number;
     totalTrainerActualFocusPcs: number;
     trainerFocusAchievementPct: number;
+    accumulatedMonthCount: number;
+    accumulatedMonthKeys: string[];
+    isMultiMonthAccumulated: boolean;
   };
+}
+
+export interface AggregateTargetMatrixOptions {
+  singleMonthBaselineOnly?: boolean;
 }
 
 /**
@@ -798,23 +1111,24 @@ export interface TargetMatrixData {
  * 3. Sales (Sell In & Sell Out Personil)
  * 4. BA (Non-Lavojoy, Lavojoy & Produk Fokus)
  * 5. Trainer (Sell Out & Produk Fokus)
- * Supports all 12 months (Januari - Desember 2026) with independent per-month targets.
+ * Supports all 12 months (Januari - Desember 2026) with independent per-month targets,
+ * and automatically totals all configured monthly targets when selectedMonth === 'ALL'.
  */
-export function aggregateTargetMatrix(records: TransactionRecord[], selectedMonth?: string): TargetMatrixData {
+export function aggregateTargetMatrix(
+  records: TransactionRecord[],
+  selectedMonth?: string,
+  options?: AggregateTargetMatrixOptions
+): TargetMatrixData {
   const normMonth = normalizeMonthKey(selectedMonth);
+  const configuredMonthKeys = getConfiguredMonthKeys();
+  const isMultiMonthAccumulated =
+    normMonth === 'ALL' && !options?.singleMonthBaselineOnly && configuredMonthKeys.length > 0;
+  const targetMonthsToResolve = isMultiMonthAccumulated ? configuredMonthKeys : [normMonth];
 
-  const customAreaTargets = loadAreaTargets(normMonth);
-  const customSpvTargets = loadSpvTargets(normMonth);
-  const customSalesTargets = loadSalesTargets(normMonth);
-  const customSalesSellOutTargets = loadSalesSellOutTargets(normMonth);
-  const customBaNonLavojoyTargets = loadBaNonLavojoyTargets(normMonth);
-  const customBaLavojoyTargets = loadBaLavojoyTargets(normMonth);
-  const customBaFocusTargets = loadBaFocusTargets(normMonth);
-  const customTrainerTargets = loadTrainerTargets(normMonth);
   const focusOverrides = loadFocusOverrides();
   const customBaProfiles = loadCustomBaProfiles();
-
-  const monthlyBucket = normMonth !== 'ALL' ? loadMonthlyTargets()[normMonth] : undefined;
+  const allMonthlyStore = loadMonthlyTargets();
+  const monthlyBucket = normMonth !== 'ALL' ? allMonthlyStore[normMonth] : undefined;
 
   // Maps for aggregating known directory + month-filtered actuals
   const areaMap: Record<
@@ -1032,69 +1346,57 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
     };
   }
 
-  // 1. Array Area Targets
-  const areas: AreaTargetItem[] = Object.values(areaMap).map((a) => {
-    const isCustom =
-      (monthlyBucket?.area?.[a.coverArea] !== undefined) ||
-      (normMonth === 'ALL' && customAreaTargets[a.coverArea] !== undefined) ||
-      customAreaTargets[a.coverArea] !== undefined;
-    const targetOmzet = customAreaTargets[a.coverArea] !== undefined ? customAreaTargets[a.coverArea] : DEFAULT_AREA_TARGET;
-    const actualSellIn = a.actualSellIn > 0 ? a.actualSellIn : a.actualSellOut;
-    const gapOmzet = actualSellIn - targetOmzet;
-    const achievementPct = targetOmzet > 0 ? (actualSellIn / targetOmzet) * 100 : 0;
-    const status: 'achieved' | 'on_track' | 'lagging' =
-      achievementPct >= 100 ? 'achieved' : achievementPct >= 80 ? 'on_track' : 'lagging';
+  // Precompute summed target values across targetMonthsToResolve (1 month if specific month or baseline, N months if ALL with configured months)
+  const monthCaches = targetMonthsToResolve.map((mKey) => ({
+    mKey,
+    bucket: mKey !== 'ALL' ? allMonthlyStore[mKey] : undefined,
+    areaTargets: loadAreaTargets(mKey),
+    areaSellOutTargets: loadAreaSellOutTargets(mKey),
+    spvTargets: loadSpvTargets(mKey),
+    spvSellOutTargets: loadSpvSellOutTargets(mKey),
+    salesTargets: loadSalesTargets(mKey),
+    salesSellOutTargets: loadSalesSellOutTargets(mKey),
+    baNonTargets: loadBaNonLavojoyTargets(mKey),
+    baLavTargets: loadBaLavojoyTargets(mKey),
+    baFocusTargets: loadBaFocusTargets(mKey),
+    trainerTargets: loadTrainerTargets(mKey),
+  }));
 
-    return {
-      coverArea: a.coverArea,
-      region: a.region,
-      targetOmzet,
-      actualSellIn,
-      actualSellOut: a.actualSellOut,
-      gapOmzet,
-      achievementPct,
-      status,
-      salesCount: a.salesSet.size,
-      spvCount: a.spvSet.size,
-      storeCount: a.storeSet.size,
-      isCustom,
-    };
-  }).sort((a, b) => b.actualSellIn - a.actualSellIn);
+  // Track sales targets per month so unedited Areas & SPVs auto-rollup from their Sales team accurately
+  const monthlySalesInBySales: Record<string, number>[] = monthCaches.map((mc) => {
+    const res: Record<string, number> = {};
+    Object.values(salesMap).forEach((sl) => {
+      const val = findMapValueCaseInsensitive(mc.salesTargets, sl.salesName);
+      res[sl.salesName] = val !== undefined ? val : DEFAULT_SALES_TARGET;
+    });
+    return res;
+  });
 
-  // 2. Array SPV Targets
-  const spvs: SpvTargetItem[] = Object.values(spvMap).map((s) => {
-    const isCustom =
-      (monthlyBucket?.spv?.[s.spvName] !== undefined) ||
-      customSpvTargets[s.spvName] !== undefined;
-    const targetOmzet = customSpvTargets[s.spvName] !== undefined ? customSpvTargets[s.spvName] : DEFAULT_SPV_TARGET;
-    const actualSellIn = s.actualSellIn > 0 ? s.actualSellIn : s.actualSellOut;
-    const gapOmzet = actualSellIn - targetOmzet;
-    const achievementPct = targetOmzet > 0 ? (actualSellIn / targetOmzet) * 100 : 0;
-    const status: 'achieved' | 'on_track' | 'lagging' =
-      achievementPct >= 100 ? 'achieved' : achievementPct >= 80 ? 'on_track' : 'lagging';
+  const monthlySalesOutBySales: Record<string, number>[] = monthCaches.map((mc) => {
+    const res: Record<string, number> = {};
+    Object.values(salesMap).forEach((sl) => {
+      const val = findMapValueCaseInsensitive(mc.salesSellOutTargets, sl.salesName);
+      res[sl.salesName] = val !== undefined ? val : DEFAULT_SALES_SELLOUT_TARGET;
+    });
+    return res;
+  });
 
-    return {
-      spvName: s.spvName,
-      regions: Array.from(s.regions),
-      coverAreas: Array.from(s.coverAreas),
-      targetOmzet,
-      actualSellIn,
-      actualSellOut: s.actualSellOut,
-      gapOmzet,
-      achievementPct,
-      status,
-      salesCount: s.salesSet.size,
-      storeCount: s.storeSet.size,
-      isCustom,
-    };
-  }).sort((a, b) => b.actualSellIn - a.actualSellIn);
-
-  // 3. Array Sales Targets (Sell In & Sell Out)
+  // 1. Array Sales Targets (Sell In & Sell Out)
   const sales: SalesTargetItem[] = Object.values(salesMap).map((sl) => {
-    const isCustom = customSalesTargets[sl.salesName] !== undefined;
-    const targetSellIn = isCustom ? customSalesTargets[sl.salesName] : DEFAULT_SALES_TARGET;
-    const isCustomSellOut = customSalesSellOutTargets[sl.salesName] !== undefined;
-    const targetSellOut = isCustomSellOut ? customSalesSellOutTargets[sl.salesName] : DEFAULT_SALES_SELLOUT_TARGET;
+    let targetSellIn = 0;
+    let targetSellOut = 0;
+    let isCustom = false;
+    let isCustomSellOut = false;
+
+    monthCaches.forEach((mc, idx) => {
+      const mIn = findMapValueCaseInsensitive(mc.salesTargets, sl.salesName);
+      if (mIn !== undefined) isCustom = true;
+      targetSellIn += monthlySalesInBySales[idx][sl.salesName];
+
+      const mOut = findMapValueCaseInsensitive(mc.salesSellOutTargets, sl.salesName);
+      if (mOut !== undefined) isCustomSellOut = true;
+      targetSellOut += monthlySalesOutBySales[idx][sl.salesName];
+    });
 
     const salaryData = calculateSalesSalary(
       sl.salesName,
@@ -1131,33 +1433,196 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
     };
   }).sort((a, b) => b.actualSellIn - a.actualSellIn);
 
+  // 2. Array Area Targets (respect explicit custom target if set, else auto-rollup from Area's Sales targets)
+  const areas: AreaTargetItem[] = Object.values(areaMap).map((a) => {
+    let targetOmzet = 0;
+    let targetSellOut = 0;
+    let isCustom = false;
+    let isCustomSellOut = false;
+    const areaUpper = a.coverArea.trim().toUpperCase();
+
+    monthCaches.forEach((mc, idx) => {
+      const customVal = findMapValueCaseInsensitive(mc.areaTargets, a.coverArea);
+      if (customVal !== undefined) {
+        isCustom = true;
+        targetOmzet += customVal;
+      } else {
+        const salesRollup = Object.values(salesMap)
+          .filter((sl) => sl.coverArea.trim().toUpperCase() === areaUpper)
+          .reduce((acc, sl) => acc + monthlySalesInBySales[idx][sl.salesName], 0);
+        targetOmzet += salesRollup > 0 ? salesRollup : DEFAULT_AREA_TARGET;
+      }
+      if (findMapValueCaseInsensitive(mc.bucket?.area, a.coverArea) !== undefined) {
+        isCustom = true;
+      }
+
+      const customOutVal = findMapValueCaseInsensitive(mc.areaSellOutTargets, a.coverArea);
+      if (customOutVal !== undefined) {
+        isCustomSellOut = true;
+        targetSellOut += customOutVal;
+      } else {
+        const salesOutRollup = Object.values(salesMap)
+          .filter((sl) => sl.coverArea.trim().toUpperCase() === areaUpper)
+          .reduce((acc, sl) => acc + monthlySalesOutBySales[idx][sl.salesName], 0);
+        targetSellOut += salesOutRollup > 0 ? salesOutRollup : DEFAULT_AREA_SELLOUT_TARGET;
+      }
+      if (findMapValueCaseInsensitive(mc.bucket?.areaSellOut, a.coverArea) !== undefined) {
+        isCustomSellOut = true;
+      }
+    });
+
+    if (monthlyBucket?.area && findMapValueCaseInsensitive(monthlyBucket.area, a.coverArea) !== undefined) {
+      isCustom = true;
+    }
+    if (monthlyBucket?.areaSellOut && findMapValueCaseInsensitive(monthlyBucket.areaSellOut, a.coverArea) !== undefined) {
+      isCustomSellOut = true;
+    }
+
+    const actualSellIn = a.actualSellIn > 0 ? a.actualSellIn : a.actualSellOut;
+    const gapOmzet = actualSellIn - targetOmzet;
+    const achievementPct = targetOmzet > 0 ? (actualSellIn / targetOmzet) * 100 : 0;
+    const gapSellOut = a.actualSellOut - targetSellOut;
+    const achievementSellOutPct = targetSellOut > 0 ? (a.actualSellOut / targetSellOut) * 100 : 0;
+    const status: 'achieved' | 'on_track' | 'lagging' =
+      achievementPct >= 100 ? 'achieved' : achievementPct >= 80 ? 'on_track' : 'lagging';
+
+    return {
+      coverArea: a.coverArea,
+      region: a.region,
+      targetOmzet,
+      actualSellIn,
+      actualSellOut: a.actualSellOut,
+      gapOmzet,
+      achievementPct,
+      targetSellOut,
+      gapSellOut,
+      achievementSellOutPct,
+      isCustomSellOut,
+      status,
+      salesCount: a.salesSet.size,
+      spvCount: a.spvSet.size,
+      storeCount: a.storeSet.size,
+      isCustom,
+    };
+  }).sort((a, b) => b.actualSellIn - a.actualSellIn);
+
+  // 3. Array SPV Targets (respect explicit custom target if set, else auto-rollup from SPV's Sales targets)
+  const spvs: SpvTargetItem[] = Object.values(spvMap).map((s) => {
+    let targetOmzet = 0;
+    let targetSellOut = 0;
+    let isCustom = false;
+    let isCustomSellOut = false;
+    const spvUpper = s.spvName.trim().toUpperCase();
+
+    monthCaches.forEach((mc, idx) => {
+      const customVal = findMapValueCaseInsensitive(mc.spvTargets, s.spvName);
+      if (customVal !== undefined) {
+        isCustom = true;
+        targetOmzet += customVal;
+      } else {
+        const salesRollup = Object.values(salesMap)
+          .filter((sl) => sl.spv.trim().toUpperCase() === spvUpper)
+          .reduce((acc, sl) => acc + monthlySalesInBySales[idx][sl.salesName], 0);
+        targetOmzet += salesRollup > 0 ? salesRollup : DEFAULT_SPV_TARGET;
+      }
+      if (findMapValueCaseInsensitive(mc.bucket?.spv, s.spvName) !== undefined) {
+        isCustom = true;
+      }
+
+      const customOutVal = findMapValueCaseInsensitive(mc.spvSellOutTargets, s.spvName);
+      if (customOutVal !== undefined) {
+        isCustomSellOut = true;
+        targetSellOut += customOutVal;
+      } else {
+        const salesOutRollup = Object.values(salesMap)
+          .filter((sl) => sl.spv.trim().toUpperCase() === spvUpper)
+          .reduce((acc, sl) => acc + monthlySalesOutBySales[idx][sl.salesName], 0);
+        targetSellOut += salesOutRollup > 0 ? salesOutRollup : DEFAULT_SPV_SELLOUT_TARGET;
+      }
+      if (findMapValueCaseInsensitive(mc.bucket?.spvSellOut, s.spvName) !== undefined) {
+        isCustomSellOut = true;
+      }
+    });
+
+    if (monthlyBucket?.spv && findMapValueCaseInsensitive(monthlyBucket.spv, s.spvName) !== undefined) {
+      isCustom = true;
+    }
+    if (monthlyBucket?.spvSellOut && findMapValueCaseInsensitive(monthlyBucket.spvSellOut, s.spvName) !== undefined) {
+      isCustomSellOut = true;
+    }
+
+    const actualSellIn = s.actualSellIn > 0 ? s.actualSellIn : s.actualSellOut;
+    const gapOmzet = actualSellIn - targetOmzet;
+    const achievementPct = targetOmzet > 0 ? (actualSellIn / targetOmzet) * 100 : 0;
+    const gapSellOut = s.actualSellOut - targetSellOut;
+    const achievementSellOutPct = targetSellOut > 0 ? (s.actualSellOut / targetSellOut) * 100 : 0;
+    const status: 'achieved' | 'on_track' | 'lagging' =
+      achievementPct >= 100 ? 'achieved' : achievementPct >= 80 ? 'on_track' : 'lagging';
+
+    return {
+      spvName: s.spvName,
+      regions: Array.from(s.regions),
+      coverAreas: Array.from(s.coverAreas),
+      targetOmzet,
+      actualSellIn,
+      actualSellOut: s.actualSellOut,
+      gapOmzet,
+      achievementPct,
+      targetSellOut,
+      gapSellOut,
+      achievementSellOutPct,
+      isCustomSellOut,
+      status,
+      salesCount: s.salesSet.size,
+      storeCount: s.storeSet.size,
+      isCustom,
+    };
+  }).sort((a, b) => b.actualSellIn - a.actualSellIn);
+
   // 4. Array BA Targets
   const bas: BaTargetItem[] = Object.values(baMap).map((b) => {
-    const customNonLav =
-      customBaNonLavojoyTargets[b.storeName] ??
-      customBaNonLavojoyTargets[b.storeName.toUpperCase()] ??
-      customBaNonLavojoyTargets[b.baName] ??
-      customBaNonLavojoyTargets[b.baName.toUpperCase()];
-    const customLav =
-      customBaLavojoyTargets[b.storeName] ??
-      customBaLavojoyTargets[b.storeName.toUpperCase()] ??
-      customBaLavojoyTargets[b.baName] ??
-      customBaLavojoyTargets[b.baName.toUpperCase()];
-
-    const isNonLavojoyCustom = customNonLav !== undefined;
-    const isLavojoyCustom = customLav !== undefined;
-    const targetNonLavojoy = isNonLavojoyCustom ? customNonLav : DEFAULT_BA_NON_LAVOJOY_TARGET;
-    const targetLavojoy = isLavojoyCustom ? customLav : DEFAULT_BA_LAVOJOY_TARGET;
-
     const ov = focusOverrides[b.storeName] || focusOverrides[b.baName] || {};
-    const monthFocus = customBaFocusTargets[b.storeName] ?? customBaFocusTargets[b.baName];
-    const targetFocusPcs =
-      monthFocus !== undefined && monthFocus > 0
-        ? monthFocus
-        : ov.targetPcs !== undefined && ov.targetPcs > 0
-        ? ov.targetPcs
-        : DEFAULT_FOCUS_TARGET_PCS;
-    const actualFocusPcs = ov.customActualPcs !== undefined && ov.customActualPcs >= 0 ? ov.customActualPcs : b.focusActualPcs;
+    let targetNonLavojoy = 0;
+    let targetLavojoy = 0;
+    let targetFocusPcs = 0;
+    let isNonLavojoyCustom = false;
+    let isLavojoyCustom = false;
+    let isFocusCustom = ov.targetPcs !== undefined;
+    let lastMonthTargetLavojoy = DEFAULT_BA_LAVOJOY_TARGET;
+
+    monthCaches.forEach((mc) => {
+      const customNonLav =
+        findMapValueCaseInsensitive(mc.baNonTargets, b.storeName) ??
+        findMapValueCaseInsensitive(mc.baNonTargets, b.baName);
+      const customLav =
+        findMapValueCaseInsensitive(mc.baLavTargets, b.storeName) ??
+        findMapValueCaseInsensitive(mc.baLavTargets, b.baName);
+
+      if (customNonLav !== undefined) isNonLavojoyCustom = true;
+      if (customLav !== undefined) isLavojoyCustom = true;
+
+      const mNonLav = customNonLav !== undefined ? customNonLav : DEFAULT_BA_NON_LAVOJOY_TARGET;
+      const mLav = customLav !== undefined ? customLav : DEFAULT_BA_LAVOJOY_TARGET;
+      lastMonthTargetLavojoy = mLav;
+
+      targetNonLavojoy += mNonLav;
+      targetLavojoy += mLav;
+
+      const monthFocus =
+        findMapValueCaseInsensitive(mc.baFocusTargets, b.storeName) ??
+        findMapValueCaseInsensitive(mc.baFocusTargets, b.baName);
+      if (monthFocus !== undefined && monthFocus > 0) {
+        isFocusCustom = true;
+        targetFocusPcs += monthFocus;
+      } else if (ov.targetPcs !== undefined && ov.targetPcs > 0) {
+        targetFocusPcs += ov.targetPcs;
+      } else {
+        targetFocusPcs += DEFAULT_FOCUS_TARGET_PCS;
+      }
+    });
+
+    const actualFocusPcs =
+      ov.customActualPcs !== undefined && ov.customActualPcs >= 0 ? ov.customActualPcs : b.focusActualPcs;
 
     const focusCalc = calculateFocusProductIncentivePenalty(
       targetFocusPcs,
@@ -1168,7 +1633,7 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
 
     // Jika Target Lavojoy diset 0, maka seluruh pencapaian Sell Out BA (Non-Lavojoy + Lavojoy)
     // dihitung sebagai pencapaian Sell Out utama BA tersebut.
-    const isLavojoyMergedToMain = targetLavojoy === 0;
+    const isLavojoyMergedToMain = targetLavojoy === 0 || (monthCaches.length === 1 && lastMonthTargetLavojoy === 0);
     const actualNonLavojoy = isLavojoyMergedToMain
       ? b.sellOutNonLavojoy + b.sellOutLavojoy
       : b.sellOutNonLavojoy;
@@ -1199,53 +1664,93 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
       focusStatus: focusCalc.status,
       focusIncentive: focusCalc.incentive,
       focusPenalty: focusCalc.penalty,
-      isCustom: Boolean(isNonLavojoyCustom || isLavojoyCustom || monthFocus !== undefined || ov.targetPcs !== undefined),
+      isCustom: Boolean(isNonLavojoyCustom || isLavojoyCustom || isFocusCustom),
     };
   }).sort((a, b) => (b.actualNonLavojoy + b.actualLavojoy) - (a.actualNonLavojoy + a.actualLavojoy));
 
-  // 5. Array Trainer Targets (Sell Out & Produk Fokus)
+  // 5. Array Trainer Targets (Sell Out & Produk Fokus) — partitioned 1-to-1 per BA so actuals are never double-counted
   const activeTrainerConfigs = loadTrainerConfigs();
-  const trainers: TrainerTargetItem[] = activeTrainerConfigs.map((t) => {
-    const customConfig = customTrainerTargets[t.id] || customTrainerTargets[t.trainerName] || {};
-    const targetSellOut =
-      customConfig.targetSellOut !== undefined && customConfig.targetSellOut > 0
-        ? customConfig.targetSellOut
-        : t.targetSellOut || DEFAULT_TRAINER_SELL_OUT_TARGET;
-    const targetProdukFokusPcs =
-      customConfig.targetProdukFokusPcs !== undefined && customConfig.targetProdukFokusPcs > 0
-        ? customConfig.targetProdukFokusPcs
-        : t.targetProdukFokusPcs || DEFAULT_TRAINER_FOCUS_TARGET_PCS;
+  const customExtraTrainers = activeTrainerConfigs.filter((t) => {
+    const upper = t.trainerName.trim().toUpperCase();
+    return upper !== 'ARA' && upper !== 'RATIH';
+  });
 
-    // Filter relevant BA and transactions for this trainer's area
-    const matchingBas = Object.values(baMap).filter((b) => {
-      if (t.areaCovered && t.areaCovered.toUpperCase().includes(b.coverArea.toUpperCase())) return true;
-      if (t.region && t.region.toUpperCase().includes(b.region.toUpperCase())) return true;
-      return false;
+  const baByTrainerName: Record<string, typeof baMap[string][]> = {};
+  activeTrainerConfigs.forEach((t) => {
+    baByTrainerName[t.trainerName.trim().toUpperCase()] = [];
+  });
+
+  Object.values(baMap).forEach((b) => {
+    const areaUp = (b.coverArea || '').toUpperCase();
+    const regUp = (b.region || '').toUpperCase();
+
+    const matchedExtra = customExtraTrainers.find((ct) => {
+      const coveredUp = (ct.areaCovered || '').toUpperCase();
+      const ctRegUp = (ct.region || '').toUpperCase();
+      return (areaUp && coveredUp.includes(areaUp)) || (regUp && ctRegUp && ctRegUp === regUp);
     });
 
-    const autoBaSupervisedCount =
-      matchingBas.length > 0
-        ? matchingBas.length
-        : Math.max(1, Math.floor(Object.keys(baMap).length / Math.max(1, activeTrainerConfigs.length)));
-    const customBaSupervised =
-      customConfig.baSupervisedCount !== undefined
-        ? customConfig.baSupervisedCount
-        : t.baSupervisedCount;
+    let assignedTrainer = matchedExtra
+      ? matchedExtra.trainerName.trim().toUpperCase()
+      : getTrainerForRecord({
+          SALES: b.salesName,
+          NAMA_STORE: b.storeName,
+          COVER_AREA: b.coverArea,
+          REGION: b.region,
+        } as TransactionRecord).trim().toUpperCase();
+
+    if (!baByTrainerName[assignedTrainer]) {
+      assignedTrainer = activeTrainerConfigs[0]?.trainerName.trim().toUpperCase() || assignedTrainer;
+    }
+    if (!baByTrainerName[assignedTrainer]) baByTrainerName[assignedTrainer] = [];
+    baByTrainerName[assignedTrainer].push(b);
+  });
+
+  const trainers: TrainerTargetItem[] = activeTrainerConfigs.map((t) => {
+    const tNameUp = t.trainerName.trim().toUpperCase();
+    const matchingBas = baByTrainerName[tNameUp] || [];
+
+    let targetSellOut = 0;
+    let targetProdukFokusPcs = 0;
+    let isCustom = t.baSupervisedCount !== undefined;
+    let latestBaSupervised: number | undefined = t.baSupervisedCount;
+    let latestNotes = t.notes;
+
+    monthCaches.forEach((mc) => {
+      const customConfig = mc.trainerTargets[t.id] || findMapValueCaseInsensitive(mc.trainerTargets, t.trainerName) || {};
+      const mSo =
+        customConfig.targetSellOut !== undefined && customConfig.targetSellOut > 0
+          ? customConfig.targetSellOut
+          : t.targetSellOut || DEFAULT_TRAINER_SELL_OUT_TARGET;
+      const mFocus =
+        customConfig.targetProdukFokusPcs !== undefined && customConfig.targetProdukFokusPcs > 0
+          ? customConfig.targetProdukFokusPcs
+          : t.targetProdukFokusPcs || DEFAULT_TRAINER_FOCUS_TARGET_PCS;
+
+      targetSellOut += mSo;
+      targetProdukFokusPcs += mFocus;
+
+      if (customConfig.baSupervisedCount !== undefined) {
+        latestBaSupervised = customConfig.baSupervisedCount;
+        isCustom = true;
+      }
+      if (customConfig.notes) {
+        latestNotes = customConfig.notes;
+      }
+      if (customConfig.targetSellOut !== undefined || customConfig.targetProdukFokusPcs !== undefined) {
+        isCustom = true;
+      }
+    });
+
+    const autoBaSupervisedCount = matchingBas.length;
     const baSupervisedCount =
-      customBaSupervised !== undefined && customBaSupervised >= 0
-        ? customBaSupervised
+      latestBaSupervised !== undefined && latestBaSupervised >= 0
+        ? latestBaSupervised
         : autoBaSupervisedCount;
     const storeSupervisedCount = baSupervisedCount;
 
-    let actualSellOut = matchingBas.reduce((acc, b) => acc + b.sellOutNonLavojoy + b.sellOutLavojoy, 0);
-    let actualProdukFokusPcs = matchingBas.reduce((acc, b) => acc + b.focusActualPcs, 0);
-
-    if (actualSellOut === 0) {
-      const totalAllSellOut = Object.values(baMap).reduce((acc, b) => acc + b.sellOutNonLavojoy + b.sellOutLavojoy, 0);
-      actualSellOut = Math.round(totalAllSellOut / Math.max(1, activeTrainerConfigs.length));
-      const totalAllFocus = Object.values(baMap).reduce((acc, b) => acc + b.focusActualPcs, 0);
-      actualProdukFokusPcs = Math.round(totalAllFocus / Math.max(1, activeTrainerConfigs.length));
-    }
+    const actualSellOut = matchingBas.reduce((acc, b) => acc + b.sellOutNonLavojoy + b.sellOutLavojoy, 0);
+    const actualProdukFokusPcs = matchingBas.reduce((acc, b) => acc + b.focusActualPcs, 0);
 
     const achievementSellOutPct = targetSellOut > 0 ? (actualSellOut / targetSellOut) * 100 : 0;
     const achievementProdukFokusPct = targetProdukFokusPcs > 0 ? (actualProdukFokusPcs / targetProdukFokusPcs) * 100 : 0;
@@ -1256,13 +1761,6 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
         : achievementSellOutPct >= 80 || achievementProdukFokusPct >= 80
         ? 'on_track'
         : 'lagging';
-
-    const isCustom = Boolean(
-      customConfig.targetSellOut !== undefined ||
-      customConfig.targetProdukFokusPcs !== undefined ||
-      customConfig.baSupervisedCount !== undefined ||
-      t.baSupervisedCount !== undefined
-    );
 
     return {
       id: t.id,
@@ -1279,7 +1777,7 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
       baSupervisedCount,
       storeSupervisedCount,
       monthPeriod: normMonth,
-      notes: customConfig.notes || t.notes,
+      notes: latestNotes,
       isCustom,
     };
   });
@@ -1289,9 +1787,17 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
   const totalAreaActual = areas.reduce((acc, a) => acc + a.actualSellIn, 0);
   const areaAchievementPct = totalAreaTarget > 0 ? (totalAreaActual / totalAreaTarget) * 100 : 0;
 
+  const totalAreaTargetSellOut = areas.reduce((acc, a) => acc + (a.targetSellOut ?? DEFAULT_AREA_SELLOUT_TARGET), 0);
+  const totalAreaActualSellOut = areas.reduce((acc, a) => acc + a.actualSellOut, 0);
+  const areaSellOutAchievementPct = totalAreaTargetSellOut > 0 ? (totalAreaActualSellOut / totalAreaTargetSellOut) * 100 : 0;
+
   const totalSpvTarget = spvs.reduce((acc, s) => acc + s.targetOmzet, 0);
   const totalSpvActual = spvs.reduce((acc, s) => acc + s.actualSellIn, 0);
   const spvAchievementPct = totalSpvTarget > 0 ? (totalSpvActual / totalSpvTarget) * 100 : 0;
+
+  const totalSpvTargetSellOut = spvs.reduce((acc, s) => acc + (s.targetSellOut ?? DEFAULT_SPV_SELLOUT_TARGET), 0);
+  const totalSpvActualSellOut = spvs.reduce((acc, s) => acc + s.actualSellOut, 0);
+  const spvSellOutAchievementPct = totalSpvTargetSellOut > 0 ? (totalSpvActualSellOut / totalSpvTargetSellOut) * 100 : 0;
 
   const totalSalesTarget = sales.reduce((acc, s) => acc + s.targetSellIn, 0);
   const totalSalesActual = sales.reduce((acc, s) => acc + s.actualSellIn, 0);
@@ -1328,9 +1834,15 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
       totalAreaTarget,
       totalAreaActual,
       areaAchievementPct,
+      totalAreaTargetSellOut,
+      totalAreaActualSellOut,
+      areaSellOutAchievementPct,
       totalSpvTarget,
       totalSpvActual,
       spvAchievementPct,
+      totalSpvTargetSellOut,
+      totalSpvActualSellOut,
+      spvSellOutAchievementPct,
       totalSalesTarget,
       totalSalesActual,
       salesAchievementPct,
@@ -1350,6 +1862,9 @@ export function aggregateTargetMatrix(records: TransactionRecord[], selectedMont
       totalTrainerTargetFocusPcs,
       totalTrainerActualFocusPcs,
       trainerFocusAchievementPct,
+      accumulatedMonthCount: targetMonthsToResolve.length,
+      accumulatedMonthKeys: isMultiMonthAccumulated ? configuredMonthKeys : [],
+      isMultiMonthAccumulated,
     },
   };
 }

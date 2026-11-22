@@ -16,6 +16,7 @@ import {
   SpvTargetItem,
   BaTargetItem,
   TrainerTargetItem,
+  MissGlamMarketShareItem,
 } from '../types/dashboard';
 import {
   calculateSummary,
@@ -64,8 +65,10 @@ import {
   loadMgStoreOptions,
   aggregateMonthlyMgRecap,
   aggregatePerStoreMgRecap,
+  analyzeMgStoreMarketShare,
   MonthlyMgMarketShareRecapRow,
   PerStoreMgMarketShareRecapRow,
+  MgMarketShareAnalyticsResult,
 } from './missGlamMarketShareService';
 import { loadSalesVisits } from './salesVisitService';
 import { loadTrainerVisits } from './trainerVisitService';
@@ -269,6 +272,9 @@ export interface MarketShareLensData {
   mgAvgSharePct: number;
   mgMonthlyRecap: MonthlyMgMarketShareRecapRow[];
   mgPerStoreRecap: PerStoreMgMarketShareRecapRow[];
+  mgItems: MissGlamMarketShareItem[];
+  mgStoreOptions: string[];
+  mgStoreAnalytics: MgMarketShareAnalyticsResult;
 }
 
 export interface PromoBaLensData {
@@ -411,10 +417,17 @@ export function buildExecutiveCoreSnapshot(
 
   let targetTotal = 0;
   if (filters.KET === 'SELL OUT') {
-    targetTotal =
-      filters.NAMA_STORE !== 'ALL'
-        ? matrix.summary.totalBaTarget || matrix.summary.totalSalesTargetSellOut
-        : matrix.summary.totalSalesTargetSellOut || matrix.summary.totalBaTarget;
+    if (filters.NAMA_STORE !== 'ALL') {
+      targetTotal = matrix.summary.totalBaTarget || matrix.summary.totalSalesTargetSellOut;
+    } else if (filters.SALES !== 'ALL') {
+      targetTotal = matrix.summary.totalSalesTargetSellOut || matrix.summary.totalBaTarget;
+    } else if (filters.REGION !== 'ALL') {
+      targetTotal = matrix.summary.totalAreaTargetSellOut || matrix.summary.totalSalesTargetSellOut;
+    } else if (filters.SPV !== 'ALL') {
+      targetTotal = matrix.summary.totalSpvTargetSellOut || matrix.summary.totalSalesTargetSellOut;
+    } else {
+      targetTotal = matrix.summary.totalSalesTargetSellOut || matrix.summary.totalBaTarget;
+    }
   } else if (filters.SALES !== 'ALL') {
     targetTotal = matrix.summary.totalSalesTarget;
   } else if (filters.REGION !== 'ALL') {
@@ -1045,6 +1058,7 @@ export function buildMarketShareLensData(): MarketShareLensData {
   const mgStoreOptions = loadMgStoreOptions();
   const mgMonthlyRecap = aggregateMonthlyMgRecap(mgItems);
   const mgPerStoreRecap = aggregatePerStoreMgRecap(mgItems, mgStoreOptions, 'ALL');
+  const mgStoreAnalytics = analyzeMgStoreMarketShare(mgItems, mgStoreOptions);
   let mgTotalActual = 0;
   let mgTotalStoreOmset = 0;
   for (let i = 0; i < mgItems.length; i++) {
@@ -1061,6 +1075,9 @@ export function buildMarketShareLensData(): MarketShareLensData {
     mgAvgSharePct,
     mgMonthlyRecap,
     mgPerStoreRecap,
+    mgItems,
+    mgStoreOptions,
+    mgStoreAnalytics,
   };
 }
 

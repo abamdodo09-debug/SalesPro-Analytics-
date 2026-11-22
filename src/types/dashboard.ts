@@ -154,6 +154,10 @@ export interface AreaTargetItem {
   actualSellOut: number;
   gapOmzet: number;
   achievementPct: number;
+  targetSellOut?: number;
+  gapSellOut?: number;
+  achievementSellOutPct?: number;
+  isCustomSellOut?: boolean;
   status: 'achieved' | 'on_track' | 'lagging';
   salesCount: number;
   spvCount: number;
@@ -170,6 +174,10 @@ export interface SpvTargetItem {
   actualSellOut: number;
   gapOmzet: number;
   achievementPct: number;
+  targetSellOut?: number;
+  gapSellOut?: number;
+  achievementSellOutPct?: number;
+  isCustomSellOut?: boolean;
   status: 'achieved' | 'on_track' | 'lagging';
   salesCount: number;
   storeCount: number;
