@@ -98,55 +98,125 @@ export function saveFocusOverrides(overrides: Record<string, BaFocusProductOverr
   }
 }
 
+const normalizeBaFocusKey = (name?: string): string =>
+  (name || '').trim().toUpperCase().replace(/\s+/g, ' ');
+
+const isGenericFocusBaPlaceholder = (normKey: string): boolean =>
+  !normKey ||
+  normKey === '-' ||
+  normKey === 'NON BA' ||
+  normKey === 'NON-BA' ||
+  normKey === 'NONBA' ||
+  normKey === '- (NON-BA)' ||
+  normKey === 'TANPA BA' ||
+  normKey === '- (TANPA BA)' ||
+  normKey === 'STANDBY' ||
+  normKey === 'BA STANDBY' ||
+  normKey === 'BA COUNTER' ||
+  normKey === 'KOSONG' ||
+  normKey === 'VACANT' ||
+  normKey === 'ALL' ||
+  normKey === 'N/A' ||
+  normKey === 'NULL' ||
+  normKey === 'UNDEFINED';
+
+const addUniqueFocusToken = (set: Set<string>, rawValue?: string): void => {
+  const clean = (rawValue || '').trim();
+  if (!clean || clean === '-') return;
+  for (const part of clean.split(',')) {
+    const p = part.trim();
+    if (!p || p === '-') continue;
+    const upper = p.toUpperCase();
+    if (!Array.from(set).some((x) => x.trim().toUpperCase() === upper)) {
+      set.add(p);
+    }
+  }
+};
+
+const lookupFocusOverride = (
+  overrides: Record<string, BaFocusProductOverride>,
+  baName: string,
+  mergedStoreName: string,
+  storeNames: string[]
+): BaFocusProductOverride | undefined => {
+  const findCaseInsensitive = (key: string): BaFocusProductOverride | undefined => {
+    if (!key) return undefined;
+    if (overrides[key]) return overrides[key];
+    const up = key.trim().toUpperCase();
+    const matched = Object.keys(overrides).find((k) => k.trim().toUpperCase() === up);
+    return matched ? overrides[matched] : undefined;
+  };
+  return (
+    findCaseInsensitive(baName) ||
+    findCaseInsensitive(mergedStoreName) ||
+    storeNames.map(findCaseInsensitive).find(Boolean)
+  );
+};
+
 /**
- * Agregasi Performa Produk Fokus per BA dari Transaksi Sell Out
+ * Agregasi Performa Produk Fokus per BA dari Transaksi Sell Out (digabung berdasarkan Nama BA)
  */
 export function aggregateBaFocusProductData(
   records: TransactionRecord[],
   overrides: Record<string, BaFocusProductOverride> = {},
   defaultTarget: number = DEFAULT_FOCUS_TARGET_PCS
 ): BaFocusProductItem[] {
-  // Map per BA / Store
+  // Map per BA (gabungkan nama toko berbeda jika Nama BA sama)
   const baMap: Record<
     string,
     {
       baName: string;
       baNumber: string;
       storeName: string;
+      storesSet: Set<string>;
       coverArea: string;
+      areasSet: Set<string>;
       region: string;
+      regionsSet: Set<string>;
       salesName: string;
+      salesSet: Set<string>;
       spv: string;
+      spvsSet: Set<string>;
       focusSkusSold: Record<string, { sku: string; brand: string; qty: number; value: number }>;
       rawFocusQty: number;
     }
   > = {};
 
   for (const r of records) {
-    const hasBa = r.BA && r.BA !== '-' && r.BA.trim().length > 0;
-    if (!hasBa) continue;
+    const baKey = normalizeBaFocusKey(r.BA);
+    if (isGenericFocusBaPlaceholder(baKey)) continue;
 
-    const storeKey = r.NAMA_STORE || r.BA;
-    if (!baMap[storeKey]) {
-      baMap[storeKey] = {
-        baName: r.BA,
+    const rawStore = (r.NAMA_STORE || '').trim() || r.BA.trim();
+    if (!baMap[baKey]) {
+      baMap[baKey] = {
+        baName: r.BA.trim(),
         baNumber: r.BA_Number || 'BA-' + Math.floor(Math.random() * 900 + 100),
-        storeName: storeKey,
+        storeName: rawStore,
+        storesSet: new Set<string>(),
         coverArea: r.COVER_AREA || '-',
+        areasSet: new Set<string>(),
         region: r.REGION || '-',
+        regionsSet: new Set<string>(),
         salesName: r.SALES || '-',
+        salesSet: new Set<string>(),
         spv: r.SPV || '-',
+        spvsSet: new Set<string>(),
         focusSkusSold: {},
         rawFocusQty: 0,
       };
     }
 
-    if (r.SALES && r.SALES !== '-' && baMap[storeKey].salesName === '-') {
-      baMap[storeKey].salesName = r.SALES;
-    }
-    if (r.SPV && r.SPV !== '-' && baMap[storeKey].spv === '-') {
-      baMap[storeKey].spv = r.SPV;
-    }
+    const acc = baMap[baKey];
+    addUniqueFocusToken(acc.storesSet, rawStore);
+    addUniqueFocusToken(acc.areasSet, r.COVER_AREA);
+    addUniqueFocusToken(acc.regionsSet, r.REGION);
+    addUniqueFocusToken(acc.salesSet, r.SALES);
+    addUniqueFocusToken(acc.spvsSet, r.SPV);
+    if (acc.storesSet.size > 0) acc.storeName = Array.from(acc.storesSet).join(', ');
+    if (acc.areasSet.size > 0) acc.coverArea = Array.from(acc.areasSet).join(', ');
+    if (acc.regionsSet.size > 0) acc.region = Array.from(acc.regionsSet).join(', ');
+    if (acc.salesSet.size > 0) acc.salesName = Array.from(acc.salesSet).join(', ');
+    if (acc.spvsSet.size > 0) acc.spv = Array.from(acc.spvsSet).join(', ');
 
     // Cek apakah produk masuk kategori FOCUS
     const isFocus = isFocusProduct(r.PRODUK_FOCUS);
@@ -155,19 +225,19 @@ export function aggregateBaFocusProductData(
     if (isFocus && isSellOut) {
       const qty = Math.max(0, r.QTY || 0);
       const val = Math.max(0, r.VALUE || 0);
-      baMap[storeKey].rawFocusQty += qty;
+      acc.rawFocusQty += qty;
 
       const skuKey = r.SKU || r.SPU || 'SKU-UNKNOWN';
-      if (!baMap[storeKey].focusSkusSold[skuKey]) {
-        baMap[storeKey].focusSkusSold[skuKey] = {
+      if (!acc.focusSkusSold[skuKey]) {
+        acc.focusSkusSold[skuKey] = {
           sku: skuKey,
           brand: r.BRAND || 'Multi-Brand',
           qty: 0,
           value: 0,
         };
       }
-      baMap[storeKey].focusSkusSold[skuKey].qty += qty;
-      baMap[storeKey].focusSkusSold[skuKey].value += val;
+      acc.focusSkusSold[skuKey].qty += qty;
+      acc.focusSkusSold[skuKey].value += val;
     }
   }
 
@@ -181,14 +251,20 @@ export function aggregateBaFocusProductData(
     ];
 
     sampleStores.forEach((st) => {
-      baMap[st.name] = {
+      const key = normalizeBaFocusKey(st.ba);
+      baMap[key] = {
         baName: st.ba,
         baNumber: st.no,
         storeName: st.name,
+        storesSet: new Set([st.name]),
         coverArea: st.area,
+        areasSet: new Set([st.area]),
         region: st.region,
+        regionsSet: new Set([st.region]),
         salesName: st.sales,
+        salesSet: new Set([st.sales]),
         spv: st.spv,
+        spvsSet: new Set([st.spv]),
         focusSkusSold: {
           'Y.O.U SUNBRELLA ACNE SHIELD LIGHT SUNSCREEN': {
             sku: 'Y.O.U SUNBRELLA ACNE SHIELD LIGHT SUNSCREEN',
@@ -211,8 +287,9 @@ export function aggregateBaFocusProductData(
   // Map to BaFocusProductItem with overrides & rule calculation
   return Object.values(baMap)
     .map((ba) => {
-      const overrideKey = ba.storeName;
-      const ov = overrides[overrideKey] || overrides[ba.baName] || {};
+      const storeNames = Array.from(ba.storesSet);
+      const mergedStoreName = storeNames.join(', ') || ba.storeName;
+      const ov = lookupFocusOverride(overrides, ba.baName, mergedStoreName, storeNames) || {};
 
       const targetPcs = ov.targetPcs !== undefined && ov.targetPcs > 0 ? ov.targetPcs : defaultTarget;
       const actualPcs = ov.customActualPcs !== undefined && ov.customActualPcs >= 0 ? ov.customActualPcs : ba.rawFocusQty;
@@ -229,7 +306,8 @@ export function aggregateBaFocusProductData(
       return {
         baName: ba.baName,
         baNumber: ba.baNumber,
-        storeName: ba.storeName,
+        storeName: mergedStoreName,
+        storeNames,
         coverArea: ba.coverArea,
         region: ba.region,
         salesName: ba.salesName,

@@ -204,6 +204,7 @@ export interface SalesTargetItem {
 
 export interface BaTargetItem {
   storeName: string;
+  storeNames?: string[];
   baName: string;
   baNumber: string;
   coverArea: string;
@@ -341,6 +342,7 @@ export interface BaFocusProductItem {
   baName: string;
   baNumber: string;
   storeName: string;
+  storeNames?: string[];
   coverArea: string;
   region: string;
   salesName: string;

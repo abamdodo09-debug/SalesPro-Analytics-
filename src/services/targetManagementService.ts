@@ -507,18 +507,15 @@ export function saveBaLavojoyTargets(targets: Record<string, number>, monthKey?:
   notifyTargetsUpdated({ monthKey: norm, category: 'ba_lav' });
 }
 
-export function getExplicitBaTotalTargetOverride(storeName: string, monthKey?: string): number | undefined {
-  const upperStore = storeName.trim().toUpperCase();
+export function getExplicitBaTotalTargetOverride(storeName: string, monthKey?: string, baName?: string): number | undefined {
   const nonTargets = loadBaNonLavojoyTargets(monthKey);
   const lavTargets = loadBaLavojoyTargets(monthKey);
 
-  const nonKey = Object.keys(nonTargets).find((k) => k.trim().toUpperCase() === upperStore);
-  const lavKey = Object.keys(lavTargets).find((k) => k.trim().toUpperCase() === upperStore);
+  const nonVal = lookupBaMapValue(nonTargets, baName || '', storeName, storeName ? storeName.split(',').map((s) => s.trim()).filter(Boolean) : []);
+  const lavVal = lookupBaMapValue(lavTargets, baName || '', storeName, storeName ? storeName.split(',').map((s) => s.trim()).filter(Boolean) : []);
 
-  if (nonKey === undefined && lavKey === undefined) return undefined;
-  const nonVal = nonKey !== undefined ? nonTargets[nonKey] : DEFAULT_BA_NON_LAVOJOY_TARGET;
-  const lavVal = lavKey !== undefined ? lavTargets[lavKey] : DEFAULT_BA_LAVOJOY_TARGET;
-  return nonVal + lavVal;
+  if (nonVal === undefined && lavVal === undefined) return undefined;
+  return (nonVal !== undefined ? nonVal : DEFAULT_BA_NON_LAVOJOY_TARGET) + (lavVal !== undefined ? lavVal : DEFAULT_BA_LAVOJOY_TARGET);
 }
 
 export function loadBaFocusTargets(monthKey?: string): Record<string, number> {
@@ -626,8 +623,11 @@ export function setSingleTargetOverride(
   if (norm === 'ALL') {
     if (category === 'baFocus') {
       const current = loadFocusOverrides();
-      if (!current[entityKey]) current[entityKey] = { storeName: entityKey };
-      current[entityKey].targetPcs = value;
+      const upperTarget = entityKey.trim().toUpperCase();
+      const matchedKey = Object.keys(current).find((k) => k.trim().toUpperCase() === upperTarget);
+      const targetKey = matchedKey || entityKey;
+      if (!current[targetKey]) current[targetKey] = { storeName: targetKey };
+      current[targetKey].targetPcs = value;
       saveFocusOverrides(current);
       return;
     }
@@ -754,9 +754,10 @@ export function copyBaTargetsToAllMonths(
   const baFocusMap: Record<string, number> = {};
 
   srcMatrix.bas.forEach((b) => {
-    baNonMap[b.storeName] = b.targetNonLavojoy;
-    baLavMap[b.storeName] = b.targetLavojoy;
-    baFocusMap[b.storeName] = b.targetFocusPcs;
+    const baKey = b.baName || b.storeName;
+    baNonMap[baKey] = b.targetNonLavojoy;
+    baLavMap[baKey] = b.targetLavojoy;
+    baFocusMap[baKey] = b.targetFocusPcs;
   });
 
   const globalNon = readGlobalMap(STORAGE_KEY_BA_NON_LAVOJOY);
@@ -906,9 +907,10 @@ export function copyMonthTargets(
   const baLavMap: Record<string, number> = {};
   const baFocusMap: Record<string, number> = {};
   srcMatrix.bas.forEach((b) => {
-    baNonMap[b.storeName] = b.targetNonLavojoy;
-    baLavMap[b.storeName] = b.targetLavojoy;
-    baFocusMap[b.storeName] = b.targetFocusPcs;
+    const baKey = b.baName || b.storeName;
+    baNonMap[baKey] = b.targetNonLavojoy;
+    baLavMap[baKey] = b.targetLavojoy;
+    baFocusMap[baKey] = b.targetFocusPcs;
   });
 
   const trainerMap: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; baSupervisedCount?: number; notes?: string }> = {};
@@ -1056,6 +1058,67 @@ function findMapValueCaseInsensitive<T>(map: Record<string, T> | undefined, key:
   return matchedKey !== undefined ? map[matchedKey] : undefined;
 }
 
+function normalizeBaGroupKey(name?: string): string {
+  return (name || '').trim().toUpperCase().replace(/\s+/g, ' ');
+}
+
+function isGenericBaPlaceholder(normKey: string): boolean {
+  return (
+    !normKey ||
+    normKey === '-' ||
+    normKey === 'NON BA' ||
+    normKey === 'NON-BA' ||
+    normKey === 'NONBA' ||
+    normKey === '- (NON-BA)' ||
+    normKey === 'TANPA BA' ||
+    normKey === '- (TANPA BA)' ||
+    normKey === 'STANDBY' ||
+    normKey === 'BA STANDBY' ||
+    normKey === 'BA COUNTER' ||
+    normKey === 'KOSONG' ||
+    normKey === 'VACANT' ||
+    normKey === 'ALL' ||
+    normKey === 'N/A' ||
+    normKey === 'NULL' ||
+    normKey === 'UNDEFINED'
+  );
+}
+
+function addUniqueTokenToSet(set: Set<string>, rawValue?: string): void {
+  const clean = (rawValue || '').trim();
+  if (!clean || clean === '-' || clean.toUpperCase() === 'UNKNOWN') return;
+  for (const part of clean.split(',')) {
+    const p = part.trim();
+    if (!p || p === '-' || p.toUpperCase() === 'UNKNOWN') continue;
+    const upper = p.toUpperCase();
+    const exists = Array.from(set).some((x) => x.trim().toUpperCase() === upper);
+    if (!exists) set.add(p);
+  }
+}
+
+function lookupBaMapValue<T>(
+  map: Record<string, T> | undefined,
+  baName: string,
+  mergedStoreName: string,
+  storeNames: string[]
+): T | undefined {
+  if (!map) return undefined;
+  const cleanBa = normalizeBaGroupKey(baName);
+  if (cleanBa && !isGenericBaPlaceholder(cleanBa)) {
+    const byBa = findMapValueCaseInsensitive(map, baName) ?? findMapValueCaseInsensitive(map, cleanBa);
+    if (byBa !== undefined) return byBa;
+  }
+  if (mergedStoreName) {
+    const byMerged = findMapValueCaseInsensitive(map, mergedStoreName);
+    if (byMerged !== undefined) return byMerged;
+  }
+  for (const s of storeNames) {
+    const byStore = findMapValueCaseInsensitive(map, s);
+    if (byStore !== undefined) return byStore;
+  }
+  return undefined;
+}
+
 export interface TargetMatrixData {
   areas: AreaTargetItem[];
   spvs: SpvTargetItem[];
@@ -1174,17 +1237,41 @@ export function aggregateTargetMatrix(
     string,
     {
       storeName: string;
+      storesSet: Set<string>;
       baName: string;
       baNumber: string;
       coverArea: string;
+      areasSet: Set<string>;
       region: string;
+      regionsSet: Set<string>;
       salesName: string;
+      salesSet: Set<string>;
       spv: string;
+      spvsSet: Set<string>;
       sellOutNonLavojoy: number;
       sellOutLavojoy: number;
       focusActualPcs: number;
     }
   > = {};
+
+  // Helper index for customBaProfiles by store name (including renamed stores) & BA name
+  const customProfileByStoreUpper = new Map<string, CustomBaProfile>();
+  const customProfileByBaUpper = new Map<string, CustomBaProfile>();
+  Object.values(customBaProfiles).forEach((p) => {
+    if (p.originalStoreName) {
+      customProfileByStoreUpper.set(p.originalStoreName.trim().toUpperCase(), p);
+    }
+    if (p.storeName) {
+      p.storeName.split(',').forEach((part) => {
+        const s = part.trim().toUpperCase();
+        if (s) customProfileByStoreUpper.set(s, p);
+      });
+    }
+    const baUp = normalizeBaGroupKey(p.baName);
+    if (!isGenericBaPlaceholder(baUp)) {
+      customProfileByBaUpper.set(baUp, p);
+    }
+  });
 
   // First ensure directory entries exist from all records, then accumulate actuals ONLY for records matching selectedMonth
   for (const r of records) {
@@ -1193,17 +1280,27 @@ export function aggregateTargetMatrix(
     const salesKey = r.SALES || 'UNKNOWN';
     const rawStoreKey = r.NAMA_STORE || 'UNKNOWN';
 
-    // Check if store has been renamed/updated via customBaProfiles
-    const renamedMatch = Object.values(customBaProfiles).find(
-      (p) => p.originalStoreName && p.originalStoreName.toUpperCase() === rawStoreKey.toUpperCase()
-    );
-    const storeKey = renamedMatch ? renamedMatch.storeName : rawStoreKey;
-    const resolvedBaName = renamedMatch
-      ? renamedMatch.baName
-      : (customBaProfiles[storeKey]?.baName || r.BA);
-    const resolvedSalesName = renamedMatch
-      ? renamedMatch.salesName
+    // Check if store or BA has been renamed/updated via customBaProfiles
+    const storeProfileMatch = customProfileByStoreUpper.get(rawStoreKey.trim().toUpperCase());
+    const baProfileMatch = !storeProfileMatch
+      ? customProfileByBaUpper.get(normalizeBaGroupKey(r.BA))
+      : undefined;
+
+    const storeKey =
+      storeProfileMatch && storeProfileMatch.originalStoreName && storeProfileMatch.originalStoreName.toUpperCase() === rawStoreKey.toUpperCase()
+        ? storeProfileMatch.storeName
+        : rawStoreKey;
+    const resolvedBaName = storeProfileMatch
+      ? storeProfileMatch.baName
+      : baProfileMatch
+      ? baProfileMatch.baName
+      : (customBaProfiles[storeKey]?.baName || r.BA || '');
+    const resolvedSalesName = storeProfileMatch
+      ? storeProfileMatch.salesName
       : (customBaProfiles[storeKey]?.salesName || salesKey);
+    const resolvedArea = (storeProfileMatch?.coverArea && storeProfileMatch.coverArea !== '-' ? storeProfileMatch.coverArea : '') || areaKey;
+    const resolvedRegion = (storeProfileMatch?.region && storeProfileMatch.region !== '-' ? storeProfileMatch.region : '') || r.REGION || '-';
+    const resolvedSpv = (storeProfileMatch?.spv && storeProfileMatch.spv !== '-' ? storeProfileMatch.spv : '') || spvKey;
 
     if (!areaMap[areaKey]) {
       areaMap[areaKey] = {
@@ -1249,21 +1346,45 @@ export function aggregateTargetMatrix(
     }
     if (storeKey) salesMap[salesKey].coveredStores.add(storeKey);
 
-    if (resolvedBaName && resolvedBaName !== '-' && resolvedBaName.trim() !== '') {
-      if (!baMap[storeKey]) {
-        baMap[storeKey] = {
+    // Group BA entries strictly by normalized BA Name so the same BA across different stores gets 1 combined entry & 1 target
+    const baGroupKey = normalizeBaGroupKey(resolvedBaName);
+    const hasValidBa = !isGenericBaPlaceholder(baGroupKey);
+
+    if (hasValidBa) {
+      if (!baMap[baGroupKey]) {
+        baMap[baGroupKey] = {
           storeName: storeKey,
-          baName: resolvedBaName,
-          baNumber: customBaProfiles[storeKey]?.baNumber || r.BA_Number || 'BA-' + storeKey.slice(0, 3).toUpperCase(),
-          coverArea: customBaProfiles[storeKey]?.coverArea || areaKey,
-          region: customBaProfiles[storeKey]?.region || r.REGION || '-',
+          storesSet: new Set<string>(),
+          baName: resolvedBaName.trim(),
+          baNumber:
+            storeProfileMatch?.baNumber ||
+            baProfileMatch?.baNumber ||
+            r.BA_Number ||
+            'BA-' + storeKey.slice(0, 3).toUpperCase(),
+          coverArea: resolvedArea,
+          areasSet: new Set<string>(),
+          region: resolvedRegion,
+          regionsSet: new Set<string>(),
           salesName: resolvedSalesName,
-          spv: customBaProfiles[storeKey]?.spv || spvKey,
+          salesSet: new Set<string>(),
+          spv: resolvedSpv,
+          spvsSet: new Set<string>(),
           sellOutNonLavojoy: 0,
           sellOutLavojoy: 0,
           focusActualPcs: 0,
         };
       }
+      const baAcc = baMap[baGroupKey];
+      addUniqueTokenToSet(baAcc.storesSet, storeKey);
+      addUniqueTokenToSet(baAcc.areasSet, resolvedArea);
+      addUniqueTokenToSet(baAcc.regionsSet, resolvedRegion);
+      addUniqueTokenToSet(baAcc.salesSet, resolvedSalesName);
+      addUniqueTokenToSet(baAcc.spvsSet, resolvedSpv);
+      if (baAcc.storesSet.size > 0) baAcc.storeName = Array.from(baAcc.storesSet).join(', ');
+      if (baAcc.areasSet.size > 0) baAcc.coverArea = Array.from(baAcc.areasSet).join(', ');
+      if (baAcc.regionsSet.size > 0) baAcc.region = Array.from(baAcc.regionsSet).join(', ');
+      if (baAcc.salesSet.size > 0) baAcc.salesName = Array.from(baAcc.salesSet).join(', ');
+      if (baAcc.spvsSet.size > 0) baAcc.spv = Array.from(baAcc.spvsSet).join(', ');
     }
 
     // Only accumulate financial/qty actuals when the record falls in the selected month
@@ -1286,46 +1407,71 @@ export function aggregateTargetMatrix(
     if (isSellIn) salesMap[salesKey].actualSellIn += val;
     if (isSellOut) salesMap[salesKey].actualSellOut += val;
 
-    if (baMap[storeKey]) {
+    if (hasValidBa && baMap[baGroupKey]) {
       if (isSellOut) {
         if (isLavojoy) {
-          baMap[storeKey].sellOutLavojoy += val;
+          baMap[baGroupKey].sellOutLavojoy += val;
         } else {
-          baMap[storeKey].sellOutNonLavojoy += val;
+          baMap[baGroupKey].sellOutNonLavojoy += val;
         }
       }
       if (isFocus && (isSellOut || isSellIn)) {
-        baMap[storeKey].focusActualPcs += qty;
+        baMap[baGroupKey].focusActualPcs += qty;
       }
     }
   }
 
-  // Merge any newly added custom BA stores from customBaProfiles
+  // Merge any newly added or edited custom BA profiles by BA Name (never duplicating existing BA)
   Object.values(customBaProfiles).forEach((profile) => {
-    if (!baMap[profile.storeName]) {
-      baMap[profile.storeName] = {
-        storeName: profile.storeName,
-        baName: profile.baName,
+    const pBaKey = normalizeBaGroupKey(profile.baName);
+    if (isGenericBaPlaceholder(pBaKey)) return;
+
+    if (!baMap[pBaKey]) {
+      const storesSet = new Set<string>();
+      const areasSet = new Set<string>();
+      const regionsSet = new Set<string>();
+      const salesSet = new Set<string>();
+      const spvsSet = new Set<string>();
+      addUniqueTokenToSet(storesSet, profile.storeName);
+      addUniqueTokenToSet(areasSet, profile.coverArea || 'PEKANBARU');
+      addUniqueTokenToSet(regionsSet, profile.region || 'PEKAN BARU');
+      addUniqueTokenToSet(salesSet, profile.salesName || 'ILHAMSYAH');
+      addUniqueTokenToSet(spvsSet, profile.spv || 'WIDODO');
+
+      baMap[pBaKey] = {
+        storeName: Array.from(storesSet).join(', ') || profile.storeName,
+        storesSet,
+        baName: profile.baName.trim(),
         baNumber: profile.baNumber || 'BA-NEW',
-        coverArea: profile.coverArea || 'PEKANBARU',
-        region: profile.region || 'PEKAN BARU',
-        salesName: profile.salesName || 'ILHAMSYAH',
-        spv: profile.spv || 'WIDODO',
+        coverArea: Array.from(areasSet).join(', ') || 'PEKANBARU',
+        areasSet,
+        region: Array.from(regionsSet).join(', ') || 'PEKAN BARU',
+        regionsSet,
+        salesName: Array.from(salesSet).join(', ') || 'ILHAMSYAH',
+        salesSet,
+        spv: Array.from(spvsSet).join(', ') || 'WIDODO',
+        spvsSet,
         sellOutNonLavojoy: 0,
         sellOutLavojoy: 0,
         focusActualPcs: 0,
       };
     } else {
-      baMap[profile.storeName].baName = profile.baName;
-      baMap[profile.storeName].salesName = profile.salesName;
-      if (profile.coverArea) baMap[profile.storeName].coverArea = profile.coverArea;
+      const existing = baMap[pBaKey];
+      existing.baName = profile.baName.trim() || existing.baName;
+      addUniqueTokenToSet(existing.storesSet, profile.storeName);
+      if (profile.coverArea) addUniqueTokenToSet(existing.areasSet, profile.coverArea);
+      if (profile.salesName) addUniqueTokenToSet(existing.salesSet, profile.salesName);
+      if (existing.storesSet.size > 0) existing.storeName = Array.from(existing.storesSet).join(', ');
+      if (existing.areasSet.size > 0) existing.coverArea = Array.from(existing.areasSet).join(', ');
+      if (existing.salesSet.size > 0) existing.salesName = Array.from(existing.salesSet).join(', ');
     }
   });
 
-  // Populate coveredBaList for sales productivity evaluation
+  // Populate coveredBaList for sales productivity evaluation (1 entry per BA)
   Object.values(baMap).forEach((b) => {
-    if (salesMap[b.salesName]) {
-      salesMap[b.salesName].coveredBaList.push({
+    const primarySales = Array.from(b.salesSet)[0] || b.salesName;
+    if (salesMap[primarySales]) {
+      salesMap[primarySales].coveredBaList.push({
         storeName: b.storeName,
         baName: b.baName,
         sellOut: b.sellOutNonLavojoy + b.sellOutLavojoy,
@@ -1579,9 +1725,11 @@ export function aggregateTargetMatrix(
     };
   }).sort((a, b) => b.actualSellIn - a.actualSellIn);
 
-  // 4. Array BA Targets
+  // 4. Array BA Targets (1 target per BA name; stores with the same BA are merged)
   const bas: BaTargetItem[] = Object.values(baMap).map((b) => {
-    const ov = focusOverrides[b.storeName] || focusOverrides[b.baName] || {};
+    const storeNames = Array.from(b.storesSet);
+    const mergedStoreName = storeNames.join(', ') || b.storeName;
+    const ov = lookupBaMapValue(focusOverrides, b.baName, mergedStoreName, storeNames) || {};
     let targetNonLavojoy = 0;
     let targetLavojoy = 0;
     let targetFocusPcs = 0;
@@ -1591,12 +1739,8 @@ export function aggregateTargetMatrix(
     let lastMonthTargetLavojoy = DEFAULT_BA_LAVOJOY_TARGET;
 
     monthCaches.forEach((mc) => {
-      const customNonLav =
-        findMapValueCaseInsensitive(mc.baNonTargets, b.storeName) ??
-        findMapValueCaseInsensitive(mc.baNonTargets, b.baName);
-      const customLav =
-        findMapValueCaseInsensitive(mc.baLavTargets, b.storeName) ??
-        findMapValueCaseInsensitive(mc.baLavTargets, b.baName);
+      const customNonLav = lookupBaMapValue(mc.baNonTargets, b.baName, mergedStoreName, storeNames);
+      const customLav = lookupBaMapValue(mc.baLavTargets, b.baName, mergedStoreName, storeNames);
 
       if (customNonLav !== undefined) isNonLavojoyCustom = true;
       if (customLav !== undefined) isLavojoyCustom = true;
@@ -1608,9 +1752,7 @@ export function aggregateTargetMatrix(
       targetNonLavojoy += mNonLav;
       targetLavojoy += mLav;
 
-      const monthFocus =
-        findMapValueCaseInsensitive(mc.baFocusTargets, b.storeName) ??
-        findMapValueCaseInsensitive(mc.baFocusTargets, b.baName);
+      const monthFocus = lookupBaMapValue(mc.baFocusTargets, b.baName, mergedStoreName, storeNames);
       if (monthFocus !== undefined && monthFocus > 0) {
         isFocusCustom = true;
         targetFocusPcs += monthFocus;
@@ -1645,7 +1787,8 @@ export function aggregateTargetMatrix(
       targetLavojoy > 0 ? (actualLavojoy / targetLavojoy) * 100 : 0;
 
     return {
-      storeName: b.storeName,
+      storeName: mergedStoreName,
+      storeNames,
       baName: b.baName,
       baNumber: b.baNumber,
       coverArea: b.coverArea,

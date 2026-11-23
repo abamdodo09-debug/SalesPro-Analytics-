@@ -322,10 +322,19 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     const updatedBaName = baNameInput.trim().toUpperCase() || editingBa.baName;
     const updatedSalesName = baSalesNameInput.trim().toUpperCase() || editingBa.salesName;
 
-    // Persist profile changes (BA Name, Store Name, Sales)
+    // Persist profile changes (BA Name, Store Name(s), Sales) without creating duplicate rows for merged stores
     const profiles = loadCustomBaProfiles();
-    profiles[targetStoreKey] = {
-      originalStoreName: editingBa.storeName !== targetStoreKey ? editingBa.storeName : profiles[editingBa.storeName]?.originalStoreName,
+    const storeParts = targetStoreKey.split(',').map((s) => s.trim()).filter(Boolean);
+    const isSingleStoreEdit = storeParts.length <= 1 && (!editingBa.storeNames || editingBa.storeNames.length <= 1);
+    const profileKey = isSingleStoreEdit ? targetStoreKey : updatedBaName;
+    if (editingBa.baName && editingBa.baName.toUpperCase() !== updatedBaName && profiles[editingBa.baName]) {
+      delete profiles[editingBa.baName];
+    }
+    profiles[profileKey] = {
+      originalStoreName:
+        isSingleStoreEdit && editingBa.storeName !== targetStoreKey
+          ? editingBa.storeName
+          : profiles[editingBa.storeName]?.originalStoreName,
       storeName: targetStoreKey,
       baName: updatedBaName,
       baNumber: editingBa.baNumber,
@@ -336,17 +345,17 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     };
     saveCustomBaProfiles(profiles);
 
-    // Save BA targets either for all 12 months identically or for the active month
+    // Save BA targets strictly by BA Name (1 BA = 1 target across all covered stores)
     if (baApplyAllMonths) {
-      applySingleBaTargetToAllMonths(targetStoreKey, {
+      applySingleBaTargetToAllMonths(updatedBaName, {
         targetNonLavojoy: baNonLavojoyInput,
         targetLavojoy: baLavojoyInput,
         targetFocusPcs: baFocusInput,
       });
     } else {
-      setSingleTargetOverride('baNonLavojoy', targetStoreKey, baNonLavojoyInput, selectedMonth);
-      setSingleTargetOverride('baLavojoy', targetStoreKey, baLavojoyInput, selectedMonth);
-      setSingleTargetOverride('baFocus', targetStoreKey, baFocusInput, selectedMonth);
+      setSingleTargetOverride('baNonLavojoy', updatedBaName, baNonLavojoyInput, selectedMonth);
+      setSingleTargetOverride('baLavojoy', updatedBaName, baLavojoyInput, selectedMonth);
+      setSingleTargetOverride('baFocus', updatedBaName, baFocusInput, selectedMonth);
     }
 
     setEditingBa(null);
@@ -354,8 +363,8 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     if (onTargetUpdated) onTargetUpdated();
     showNotification(
       baApplyAllMonths
-        ? `Target Toko/BA "${targetStoreKey}" disamakan untuk SEMUA BULAN (Jan–Des 2026)!`
-        : `Target & Data Toko/BA "${targetStoreKey}" (${activeMonthLabel}) berhasil diperbarui!`
+        ? `Target BA "${updatedBaName}" (${targetStoreKey}) disamakan untuk SEMUA BULAN (Jan–Des 2026)!`
+        : `Target & Data BA "${updatedBaName}" (${activeMonthLabel}) berhasil diperbarui!`
     );
   };
 
@@ -379,16 +388,17 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     };
     saveCustomBaProfiles(profiles);
 
+    const baTargetKey = baName || storeName;
     if (newBaApplyAllMonths) {
-      applySingleBaTargetToAllMonths(storeName, {
+      applySingleBaTargetToAllMonths(baTargetKey, {
         targetNonLavojoy: newBaNonLavojoyTarget,
         targetLavojoy: newBaLavojoyTarget,
         targetFocusPcs: newBaFocusTarget,
       });
     } else {
-      setSingleTargetOverride('baNonLavojoy', storeName, newBaNonLavojoyTarget, selectedMonth);
-      setSingleTargetOverride('baLavojoy', storeName, newBaLavojoyTarget, selectedMonth);
-      setSingleTargetOverride('baFocus', storeName, newBaFocusTarget, selectedMonth);
+      setSingleTargetOverride('baNonLavojoy', baTargetKey, newBaNonLavojoyTarget, selectedMonth);
+      setSingleTargetOverride('baLavojoy', baTargetKey, newBaLavojoyTarget, selectedMonth);
+      setSingleTargetOverride('baFocus', baTargetKey, newBaFocusTarget, selectedMonth);
     }
 
     setIsAddBaOpen(false);
@@ -399,8 +409,8 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     if (onTargetUpdated) onTargetUpdated();
     showNotification(
       newBaApplyAllMonths
-        ? `Toko & BA baru "${storeName}" (${baName}) ditambahkan dengan target sama untuk semua bulan (Jan–Des 2026)!`
-        : `Toko & BA baru "${storeName}" (${baName}) ditambahkan ke periode ${activeMonthLabel}!`
+        ? `Toko & BA baru "${baName}" (${storeName}) ditambahkan dengan target sama untuk semua bulan (Jan–Des 2026)!`
+        : `Toko & BA baru "${baName}" (${storeName}) ditambahkan ke periode ${activeMonthLabel}!`
     );
   };
 
@@ -412,14 +422,14 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
       setRefreshKey((k) => k + 1);
       if (onTargetUpdated) onTargetUpdated();
       showNotification(
-        `Target BA dari ${getMonthDisplayLabel(baAllMonthsSourceMonth)} (${baCount} gerai) berhasil disamakan ke seluruh ${monthCount} bulan (Jan–Des 2026)!`
+        `Target BA dari ${getMonthDisplayLabel(baAllMonthsSourceMonth)} (${baCount} BA) berhasil disamakan ke seluruh ${monthCount} bulan (Jan–Des 2026)!`
       );
       return;
     }
 
-    const storeKeys = matrixData.bas.map((b) => b.storeName);
+    const baKeys = matrixData.bas.map((b) => b.baName || b.storeName);
     applyUniformBaTargets(
-      storeKeys,
+      baKeys,
       {
         targetNonLavojoy: baAllMonthsNonLav,
         targetLavojoy: baAllMonthsLav,
@@ -434,7 +444,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     showNotification(
       baAllMonthsScope === 'ALL_MONTHS'
         ? `Target BA 1 bulan (Non-Lav ${formatRupiah(baAllMonthsNonLav)}, Lav ${formatRupiah(baAllMonthsLav)}, Fokus ${baAllMonthsFocus} pcs) diterapkan SAMA ke semua 12 bulan (Jan–Des 2026)!`
-        : `Target BA seragam diterapkan ke ${storeKeys.length} gerai untuk periode ${activeMonthLabel}!`
+        : `Target BA seragam diterapkan ke ${baKeys.length} BA untuk periode ${activeMonthLabel}!`
     );
   };
 
@@ -590,50 +600,50 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     } else if (batchTargetType === 'ba_non') {
       if (batchBaApplyAllMonths) {
         applyUniformBaTargets(
-          matrixData.bas.map((b) => b.storeName),
+          matrixData.bas.map((b) => b.baName || b.storeName),
           { targetNonLavojoy: batchTargetValue },
           'ALL_MONTHS'
         );
-        showNotification(`Target Non-Lavojoy ${formatRupiah(batchTargetValue)} diterapkan SAMA ke semua 12 bulan (Jan–Des 2026) untuk ${matrixData.bas.length} Toko BA!`);
+        showNotification(`Target Non-Lavojoy ${formatRupiah(batchTargetValue)} diterapkan SAMA ke semua 12 bulan (Jan–Des 2026) untuk ${matrixData.bas.length} BA!`);
       } else {
         const current: Record<string, number> = {};
         matrixData.bas.forEach((b) => {
-          current[b.storeName] = batchTargetValue;
+          current[b.baName || b.storeName] = batchTargetValue;
         });
         saveBaNonLavojoyTargets(current, selectedMonth);
-        showNotification(`Target Non-Lavojoy serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.bas.length} Toko BA!`);
+        showNotification(`Target Non-Lavojoy serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.bas.length} BA!`);
       }
     } else if (batchTargetType === 'ba_lav') {
       if (batchBaApplyAllMonths) {
         applyUniformBaTargets(
-          matrixData.bas.map((b) => b.storeName),
+          matrixData.bas.map((b) => b.baName || b.storeName),
           { targetLavojoy: batchTargetValue },
           'ALL_MONTHS'
         );
-        showNotification(`Target Lavojoy ${formatRupiah(batchTargetValue)} diterapkan SAMA ke semua 12 bulan (Jan–Des 2026) untuk ${matrixData.bas.length} Toko BA!`);
+        showNotification(`Target Lavojoy ${formatRupiah(batchTargetValue)} diterapkan SAMA ke semua 12 bulan (Jan–Des 2026) untuk ${matrixData.bas.length} BA!`);
       } else {
         const current: Record<string, number> = {};
         matrixData.bas.forEach((b) => {
-          current[b.storeName] = batchTargetValue;
+          current[b.baName || b.storeName] = batchTargetValue;
         });
         saveBaLavojoyTargets(current, selectedMonth);
-        showNotification(`Target Lavojoy serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.bas.length} Toko BA!`);
+        showNotification(`Target Lavojoy serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.bas.length} BA!`);
       }
     } else if (batchTargetType === 'ba_focus') {
       if (batchBaApplyAllMonths) {
         applyUniformBaTargets(
-          matrixData.bas.map((b) => b.storeName),
+          matrixData.bas.map((b) => b.baName || b.storeName),
           { targetFocusPcs: batchTargetValue },
           'ALL_MONTHS'
         );
-        showNotification(`Target Produk Fokus ${batchTargetValue} pcs diterapkan SAMA ke semua 12 bulan (Jan–Des 2026) untuk seluruh BA!`);
+        showNotification(`Target Produk Fokus ${batchTargetValue} pcs diterapkan SAMA ke semua 12 bulan (Jan–Des 2026) untuk ${matrixData.bas.length} BA!`);
       } else {
         const current: Record<string, number> = {};
         matrixData.bas.forEach((b) => {
-          current[b.storeName] = batchTargetValue;
+          current[b.baName || b.storeName] = batchTargetValue;
         });
         saveBaFocusTargets(current, selectedMonth);
-        showNotification(`Target Produk Fokus serentak ${batchTargetValue} pcs (${activeMonthLabel}) diterapkan ke seluruh BA!`);
+        showNotification(`Target Produk Fokus serentak ${batchTargetValue} pcs (${activeMonthLabel}) diterapkan ke ${matrixData.bas.length} BA!`);
       }
     } else if (batchTargetType === 'trainer_so') {
       const current = loadTrainerTargets(selectedMonth);
@@ -894,10 +904,17 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
   }, [matrixData.sales, effectiveSearch, statusFilter, filters]);
 
   const filteredBas = useMemo(() => {
+    const matchesJoinedToken = (joined: string, target: string, extra?: string[]): boolean => {
+      const targetUpper = target.trim().toUpperCase();
+      if (joined.trim().toUpperCase() === targetUpper) return true;
+      if (extra && extra.some((item) => item.trim().toUpperCase() === targetUpper)) return true;
+      return joined.split(',').some((part) => part.trim().toUpperCase() === targetUpper);
+    };
+
     return matrixData.bas.filter((b) => {
-      if (filters.SALES && filters.SALES !== 'ALL' && b.salesName.toUpperCase() !== filters.SALES.toUpperCase()) return false;
-      if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL' && b.storeName.toUpperCase() !== filters.NAMA_STORE.toUpperCase()) return false;
-      if (filters.REGION && filters.REGION !== 'ALL' && b.coverArea.toUpperCase() !== filters.REGION.toUpperCase()) return false;
+      if (filters.SALES && filters.SALES !== 'ALL' && !matchesJoinedToken(b.salesName, filters.SALES)) return false;
+      if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL' && !matchesJoinedToken(b.storeName, filters.NAMA_STORE, b.storeNames)) return false;
+      if (filters.REGION && filters.REGION !== 'ALL' && !matchesJoinedToken(b.coverArea, filters.REGION) && !matchesJoinedToken(b.region, filters.REGION)) return false;
 
       const matchQ =
         !effectiveSearch ||
@@ -2091,12 +2108,12 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 Daftar Target Beauty Advisor (Non-Lavojoy, Lavojoy &amp; Produk Fokus Pcs)
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Target per toko ber-BA: Target Non-Lavojoy (30 Jt), Target Lavojoy 4% (5 Jt), dan Target Produk Fokus (120 pcs).
+                Target berbasis <strong>Nama BA</strong> (toko berbeda dengan Nama BA sama digabung otomatis agar target BA hanya 1): Non-Lavojoy (30 Jt), Lavojoy 4% (5 Jt), &amp; Produk Fokus (120 pcs).
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2.5">
               <div className="text-xs font-mono text-slate-600">
-                Total Gerai BA: <strong className="text-teal-700 font-bold">{matrixData.bas.length}</strong>
+                Total BA: <strong className="text-teal-700 font-bold">{matrixData.bas.length}</strong>
               </div>
               <button
                 type="button"
@@ -2145,7 +2162,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
               <thead>
                 <tr className="border-b border-slate-200 text-slate-600 font-bold bg-slate-50">
                   <th className="py-3 px-3">No</th>
-                  <th className="py-3 px-3">Nama BA &amp; Toko</th>
+                  <th className="py-3 px-3">Nama BA &amp; Gabungan Toko</th>
                   <th className="py-3 px-3">Area / Sales</th>
                   {/* Non-Lavojoy */}
                   <th className="py-3 px-3 text-right bg-teal-50/60 font-bold">Target Non-Lavojoy</th>
@@ -2172,11 +2189,18 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                   </tr>
                 ) : (
                   filteredBas.map((item, idx) => (
-                    <tr key={item.storeName} className="hover:bg-teal-50/20 transition-colors">
+                    <tr key={`${item.baName}__${item.storeName}`} className="hover:bg-teal-50/20 transition-colors">
                       <td className="py-3 px-3 font-mono text-slate-400">{idx + 1}</td>
-                      <td className="py-3 px-3">
-                        <div className="font-extrabold text-slate-900">{item.baName}</div>
-                        <div className="text-[10px] text-slate-500 font-medium">{item.storeName}</div>
+                      <td className="py-3 px-3 max-w-[260px]">
+                        <div className="font-extrabold text-slate-900 flex items-center gap-1.5 flex-wrap">
+                          <span>{item.baName}</span>
+                          {item.storeNames && item.storeNames.length > 1 && (
+                            <span className="text-[9.5px] font-bold text-teal-700 bg-teal-50 border border-teal-200 px-1.5 py-0.2 rounded">
+                              {item.storeNames.length} Toko
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-slate-500 font-medium leading-snug">{item.storeName}</div>
                       </td>
                       <td className="py-3 px-3 text-slate-600">
                         <div>{item.coverArea}</div>

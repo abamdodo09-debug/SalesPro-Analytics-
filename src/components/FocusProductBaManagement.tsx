@@ -119,34 +119,46 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
   const uniqueAreas = useMemo(() => {
     const areas = new Set<string>();
     baFocusList.forEach((b) => {
-      if (b.coverArea && b.coverArea !== '-') areas.add(b.coverArea);
+      if (b.coverArea && b.coverArea !== '-') {
+        b.coverArea.split(',').forEach((part) => {
+          const p = part.trim();
+          if (p && p !== '-') areas.add(p);
+        });
+      }
     });
     return Array.from(areas).sort();
   }, [baFocusList]);
 
   // Filtered List
   const filteredList = useMemo(() => {
+    const matchesToken = (joined: string, target: string, extra?: string[]): boolean => {
+      const up = target.trim().toUpperCase();
+      if ((joined || '').trim().toUpperCase() === up) return true;
+      if (extra && extra.some((item) => item.trim().toUpperCase() === up)) return true;
+      return (joined || '').split(',').some((part) => part.trim().toUpperCase() === up);
+    };
+
     const effectiveSearch = (searchQuery || filters.searchQuery || '').trim().toLowerCase();
     return baFocusList.filter((b) => {
       // Global Sales
-      if (filters.SALES && filters.SALES !== 'ALL' && b.salesName.toUpperCase() !== filters.SALES.toUpperCase()) {
+      if (filters.SALES && filters.SALES !== 'ALL' && !matchesToken(b.salesName, filters.SALES)) {
         return false;
       }
 
       // Global SPV
-      if (filters.SPV && filters.SPV !== 'ALL' && b.spv.toUpperCase() !== filters.SPV.toUpperCase()) {
+      if (filters.SPV && filters.SPV !== 'ALL' && !matchesToken(b.spv, filters.SPV)) {
         return false;
       }
 
       // Global Store Name
-      if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL' && b.storeName.toUpperCase() !== filters.NAMA_STORE.toUpperCase()) {
+      if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL' && !matchesToken(b.storeName, filters.NAMA_STORE, b.storeNames)) {
         return false;
       }
 
       // Global Region
       if (filters.REGION && filters.REGION !== 'ALL') {
         const reg = filters.REGION.toUpperCase();
-        if ((b.region || '').toUpperCase() !== reg && (b.coverArea || '').toUpperCase() !== reg) {
+        if (!matchesToken(b.region || '', reg) && !matchesToken(b.coverArea || '', reg)) {
           return false;
         }
       }
@@ -155,7 +167,7 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
       if (statusFilter !== 'all' && b.status !== statusFilter) return false;
 
       // Area Filter
-      if (selectedArea !== 'all' && b.coverArea !== selectedArea) return false;
+      if (selectedArea !== 'all' && !matchesToken(b.coverArea || '', selectedArea)) return false;
 
       // Free Search
       if (effectiveSearch) {
@@ -218,7 +230,7 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
     setEditingItem(item);
     setEditTargetPcs(item.targetPcs);
     setEditActualPcs(item.actualPcs);
-    const ov = overrides[item.storeName] || overrides[item.baName] || {};
+    const ov = overrides[item.baName] || overrides[item.storeName] || {};
     setEditOverrideIncentive(ov.customIncentive !== undefined ? String(ov.customIncentive) : '');
     setEditOverridePenalty(ov.customPenalty !== undefined ? String(ov.customPenalty) : '');
     setEditNote(ov.note || '');
@@ -229,11 +241,13 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
     e.preventDefault();
     if (!editingItem) return;
 
+    const baTargetKey = editingItem.baName || editingItem.storeName;
     const newOverrides = { ...overrides };
     const customInc = editOverrideIncentive.trim() !== '' ? Number(editOverrideIncentive) : undefined;
     const customPen = editOverridePenalty.trim() !== '' ? Number(editOverridePenalty) : undefined;
 
-    newOverrides[editingItem.storeName] = {
+    newOverrides[baTargetKey] = {
+      storeName: editingItem.storeName,
       targetPcs: editTargetPcs,
       customActualPcs: editActualPcs,
       customIncentive: customInc,
@@ -243,7 +257,7 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
 
     setOverrides(newOverrides);
     saveFocusOverrides(newOverrides);
-    setSingleTargetOverride('baFocus', editingItem.storeName, editTargetPcs, filters.BULAN);
+    setSingleTargetOverride('baFocus', baTargetKey, editTargetPcs, filters.BULAN);
     setEditingItem(null);
     showNotification(`Target & capaian produk fokus untuk "${editingItem.baName}" berhasil diperbarui!`);
 
@@ -251,12 +265,17 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
   };
 
   // Reset Single BA Override
-  const handleResetSingleOverride = (storeName: string) => {
+  const handleResetSingleOverride = (item: BaFocusProductItem) => {
+    const baTargetKey = item.baName || item.storeName;
     const newOverrides = { ...overrides };
-    delete newOverrides[storeName];
+    delete newOverrides[baTargetKey];
+    delete newOverrides[item.storeName];
+    (item.storeNames || []).forEach((s) => {
+      delete newOverrides[s];
+    });
     setOverrides(newOverrides);
     saveFocusOverrides(newOverrides);
-    setSingleTargetOverride('baFocus', storeName, DEFAULT_FOCUS_TARGET_PCS, filters.BULAN);
+    setSingleTargetOverride('baFocus', baTargetKey, DEFAULT_FOCUS_TARGET_PCS, filters.BULAN);
     setEditingItem(null);
     showNotification('Data dikembalikan ke hitungan kalkulasi otomatis.');
     if (onRefreshCost) onRefreshCost();
@@ -271,10 +290,11 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
     const newOverrides = { ...overrides };
     const monthlyFocusMap = loadBaFocusTargets(filters.BULAN);
     baFocusList.forEach((b) => {
-      if (newOverrides[b.storeName]) {
-        newOverrides[b.storeName].targetPcs = batchTargetInput;
+      const baTargetKey = b.baName || b.storeName;
+      if (newOverrides[baTargetKey]) {
+        newOverrides[baTargetKey].targetPcs = batchTargetInput;
       }
-      monthlyFocusMap[b.storeName] = batchTargetInput;
+      monthlyFocusMap[baTargetKey] = batchTargetInput;
     });
 
     setOverrides(newOverrides);
@@ -631,10 +651,11 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
                 </tr>
               ) : (
                 filteredList.map((item, idx) => {
-                  const isExpanded = expandedStore === item.storeName;
+                  const rowKey = `${item.baName}__${item.storeName}`;
+                  const isExpanded = expandedStore === rowKey;
 
                   return (
-                    <React.Fragment key={item.storeName}>
+                    <React.Fragment key={rowKey}>
                       <tr className="hover:bg-slate-50/70 transition-colors">
                         <td className="py-3 px-3.5 text-center font-mono text-slate-400 text-[11px]">
                           {idx + 1}
@@ -780,7 +801,7 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
                             </button>
                             {item.focusSkusSold && item.focusSkusSold.length > 0 && (
                               <button
-                                onClick={() => setExpandedStore(isExpanded ? null : item.storeName)}
+                                onClick={() => setExpandedStore(isExpanded ? null : rowKey)}
                                 className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors cursor-pointer"
                                 title="Lihat rincian SKU fokus terjual"
                               >
@@ -1009,7 +1030,7 @@ export const FocusProductBaManagement: React.FC<FocusProductBaManagementProps> =
                 {editingItem.isCustomOverride && (
                   <button
                     type="button"
-                    onClick={() => handleResetSingleOverride(editingItem.storeName)}
+                    onClick={() => handleResetSingleOverride(editingItem)}
                     className="px-3 py-2 rounded-xl bg-rose-50 text-rose-700 hover:bg-rose-100 font-bold transition-colors cursor-pointer"
                   >
                     Reset ke Sistem

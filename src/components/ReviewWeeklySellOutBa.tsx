@@ -311,9 +311,9 @@ export const ReviewWeeklySellOutBa: React.FC<ReviewWeeklySellOutBaProps> = ({
 
     // Apply per-month BA target overrides from Pusat Kelola Target
     list = list.map((s) => {
-      let syncedTarget = getExplicitBaTotalTargetOverride(s.storeName, selectedMonth);
+      let syncedTarget = getExplicitBaTotalTargetOverride(s.storeName, selectedMonth, s.baName);
       if (syncedTarget === undefined && s.sourceStoreName) {
-        syncedTarget = getExplicitBaTotalTargetOverride(s.sourceStoreName, selectedMonth);
+        syncedTarget = getExplicitBaTotalTargetOverride(s.sourceStoreName, selectedMonth, s.baName);
       }
       if (syncedTarget !== undefined && syncedTarget >= 0) {
         return { ...s, targetMonthly: syncedTarget };
