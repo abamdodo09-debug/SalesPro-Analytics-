@@ -245,6 +245,49 @@ export interface TrainerTargetItem {
   isCustom: boolean;
 }
 
+export type StoreSellInFormulaMode = 'global' | 'per_sales';
+
+export interface StoreSellInTargetItem {
+  storeName: string;
+  baName: string;
+  coverArea: string;
+  region: string;
+  salesName: string;
+  spv: string;
+  prior3MonthsTotalSellIn: number;
+  prior3MonthsAvgSellIn: number;
+  priorMonthLabels: string[];
+  salesPrior3MonthsAvgSellIn: number;
+  salesTargetSellInBasis: number;
+  contributionPct: number;
+  globalContributionPct: number;
+  autoTargetSellIn: number;
+  targetSellIn: number;
+  actualSellIn: number;
+  gapSellIn: number;
+  achievementPct: number;
+  status: 'achieved' | 'on_track' | 'lagging';
+  isCustom: boolean;
+}
+
+export interface StoreSellInMatrixResult {
+  stores: StoreSellInTargetItem[];
+  formulaMode: StoreSellInFormulaMode;
+  poolTarget: number;
+  isPoolCustom: boolean;
+  defaultSalesPoolTarget: number;
+  priorPeriodDescription: string;
+  priorMonthLabels: string[];
+  totalPrior3MonthsAvg: number;
+  totalAutoTargetSellIn: number;
+  totalEffectiveTargetSellIn: number;
+  totalActualSellIn: number;
+  achievementPct: number;
+  customOverrideCount: number;
+  accumulatedMonthCount: number;
+  isMultiMonthAccumulated: boolean;
+}
+
 export interface SalesCoveredBaItem {
   storeName: string;
   baName: string;
@@ -986,8 +1029,13 @@ export interface QuarterlyMonthDetail {
   kpiScore?: number;
   focusActualPcs?: number;
   focusTargetPcs?: number;
+  targetNonLavojoy?: number;
+  targetLavojoy?: number;
+  actualNonLavojoy?: number;
+  actualLavojoy?: number;
   nihilDays?: number;
   offDays?: number;
+  assignedStores?: string[];
 }
 
 export interface SalesQuarterlySummaryItem {
@@ -1023,9 +1071,13 @@ export interface BaQuarterlySummaryItem {
   quarterTarget: number;
   quarterTargetSellIn: number;
   quarterTargetSellOut: number;
+  quarterTargetNonLavojoy?: number;
+  quarterTargetLavojoy?: number;
   quarterActual: number;
   quarterActualSellIn: number;
   quarterActualSellOut: number;
+  quarterActualNonLavojoy?: number;
+  quarterActualLavojoy?: number;
   quarterAchievementPercent: number;
   quarterAchievementSellInPercent: number;
   quarterAchievementSellOutPercent: number;

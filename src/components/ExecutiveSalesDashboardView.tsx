@@ -39,6 +39,7 @@ import {
   loadSalesSellOutTargets,
   loadTrainerConfigs,
   loadTrainerTargets,
+  syncQuarterBaSellInToStores,
 } from '../services/targetManagementService';
 import { MonthlyOnlinePromoRecapRow } from '../services/onlinePromoService';
 import { aggregatePerStoreMgRecap } from '../services/missGlamMarketShareService';
@@ -4892,20 +4893,6 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     };
   }, []);
 
-  const handleSaveBaSellInTarget = (baName: string) => {
-    const rawDigits = editingBaSellInDraft.replace(/[^\d]/g, '');
-    const parsedVal = Number(rawDigits);
-    if (!Number.isFinite(parsedVal) || rawDigits === '') {
-      setEditingBaSellInName(null);
-      return;
-    }
-    saveQuarterlyTargetOverride(snap.selectedYear, selectedQuarter, 'ba', baName, {
-      targetSellIn: Math.max(0, Math.round(parsedVal)),
-    });
-    setEditingBaSellInName(null);
-    setQuartalRefreshTick((t) => t + 1);
-  };
-
   useEffect(() => {
     if (filters.BULAN && filters.BULAN !== 'ALL') {
       const b = filters.BULAN.trim().toUpperCase();
@@ -5111,6 +5098,34 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
       activeKetDisplayLabel,
     };
   }, [activeLens, allRecords, filters, selectedQuarter, snap.selectedYear, deferredDayRange, quartalSearch, quartalRefreshTick]);
+
+  const handleSaveBaSellInTarget = (baName: string) => {
+    const rawDigits = editingBaSellInDraft.replace(/[^\d]/g, '');
+    const parsedVal = Number(rawDigits);
+    if (!Number.isFinite(parsedVal) || rawDigits === '') {
+      setEditingBaSellInName(null);
+      return;
+    }
+    const cleanTarget = Math.max(0, Math.round(parsedVal));
+    const baItem = achieveQuartalData?.filteredBa.find(
+      (b) => b.baName.toLowerCase() === baName.toLowerCase()
+    );
+    const syncedToStores = syncQuarterBaSellInToStores({
+      year: snap.selectedYear,
+      quarter: selectedQuarter,
+      baName,
+      storeName: baItem?.storeName || '',
+      quarterTargetSellIn: cleanTarget,
+      monthlyBreakdown: baItem?.monthlyBreakdown,
+    });
+    if (!syncedToStores) {
+      saveQuarterlyTargetOverride(snap.selectedYear, selectedQuarter, 'ba', baName, {
+        targetSellIn: cleanTarget,
+      });
+    }
+    setEditingBaSellInName(null);
+    setQuartalRefreshTick((t) => t + 1);
+  };
 
   const sidebarItems: Array<{
     id: SidebarLens;
@@ -7590,8 +7605,8 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                         <span>Edit</span>
                       </button>
                     </div>
-                    <span className="text-base xl:text-lg font-black text-[#FF6B00] mt-1 block whitespace-nowrap">{snap.targetMatrix.bas.length} BA</span>
-                    <span className="text-[11px] text-slate-400 whitespace-nowrap">{snap.targetMatrix.trainers.length} Trainer Aktif</span>
+                    <span className="text-base xl:text-lg font-black text-[#FF6B00] mt-1 block whitespace-nowrap">{snap.registeredSheetBaCount} BA</span>
+                    <span className="text-[11px] text-slate-400 whitespace-nowrap">{snap.registeredSheetTrainerCount} Trainer Aktif (Google Sheet)</span>
                   </div>
                   <div className="pt-2 border-t border-[#1F293B] flex flex-wrap items-center gap-1.5 font-sans">
                     <button
@@ -8074,10 +8089,16 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                                   {(achieveQuartalData.isKetSellOut || !achieveQuartalData.isKetSellIn) && (
                                     <>
                                       <td className="py-2 px-3 text-right text-slate-300">
-                                        {formatRupiah(b.quarterTargetSellOut, true)}
+                                        <span className="block">{formatRupiah(b.quarterTargetSellOut, true)}</span>
+                                        <span className="text-[9.5px] text-slate-400 font-sans block">
+                                          NL: {formatRupiah(b.quarterTargetNonLavojoy ?? 0, true)} • Lav: {formatRupiah(b.quarterTargetLavojoy ?? 0, true)}
+                                        </span>
                                       </td>
                                       <td className="py-2 px-3 text-right font-bold text-emerald-300">
-                                        {formatRupiah(b.quarterActualSellOut, true)}
+                                        <span className="block">{formatRupiah(b.quarterActualSellOut, true)}</span>
+                                        <span className="text-[9.5px] text-slate-400 font-sans font-normal block">
+                                          NL: {formatRupiah(b.quarterActualNonLavojoy ?? 0, true)} • Lav: {formatRupiah(b.quarterActualLavojoy ?? 0, true)} • Fokus: {b.focusActualPcs}/{b.focusTargetPcs} pcs
+                                        </span>
                                       </td>
                                       <td className="py-2 px-3 text-center font-bold text-emerald-300">
                                         {formatPercent(b.quarterAchievementSellOutPercent, false)}

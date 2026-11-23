@@ -19,7 +19,7 @@ import {
   clearQuarterlyActualSellInOverride,
   QuarterlyTargetRole,
 } from '../services/quarterlySummaryService';
-import { TARGETS_UPDATED_EVENT } from '../services/targetManagementService';
+import { TARGETS_UPDATED_EVENT, syncQuarterBaSellInToStores } from '../services/targetManagementService';
 import { SALES_MASTER_6_CONFIG } from '../services/kpiSalesData';
 import { formatRupiah, formatPercent } from '../utils/analytics';
 import {
@@ -445,6 +445,38 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
   };
 
   const handleSaveBulkTargets = () => {
+    if (targetModalRole === 'ba') {
+      const baListMap = new Map<string, BaQuarterlySummaryItem>(
+        (modalSummaryData?.baList || []).map((b) => [b.baName.toLowerCase(), b])
+      );
+      const fallbackEntries: Array<{ entityName: string; targetSellIn?: number; targetSellOut?: number }> = [];
+
+      Object.entries(targetDrafts).forEach(([entityName, vals]) => {
+        const sellInVal = Math.max(0, Math.round(Number(vals.sellIn) || 0));
+        const sellOutVal = Math.max(0, Math.round(Number(vals.sellOut) || 0));
+        const baItem = baListMap.get(entityName.toLowerCase());
+        const synced = syncQuarterBaSellInToStores({
+          year: targetModalYear,
+          quarter: targetModalQuarter,
+          baName: entityName,
+          storeName: baItem?.storeName || '',
+          quarterTargetSellIn: sellInVal,
+          monthlyBreakdown: baItem?.monthlyBreakdown,
+        });
+        fallbackEntries.push({
+          entityName,
+          ...(synced ? {} : { targetSellIn: sellInVal }),
+          targetSellOut: sellOutVal,
+        });
+      });
+
+      if (fallbackEntries.length > 0) {
+        saveBulkQuarterlyTargetOverrides(targetModalYear, targetModalQuarter, 'ba', fallbackEntries);
+      }
+      setIsTargetModalOpen(false);
+      return;
+    }
+
     const entries = Object.entries(targetDrafts).map(([entityName, vals]) => ({
       entityName,
       targetSellIn: Number(vals.sellIn) || 0,
@@ -496,14 +528,43 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
 
   const handleSaveSingleTarget = () => {
     if (!editTargetItem) return;
+    const sellInVal = Math.max(0, Math.round(Number(editTargetItem.targetSellIn) || 0));
+    const sellOutVal = Math.max(0, Math.round(Number(editTargetItem.targetSellOut) || 0));
+
+    if (editTargetItem.role === 'ba') {
+      const baItem = baList.find(
+        (b) => b.baName.toLowerCase() === editTargetItem.entityName.toLowerCase()
+      );
+      const synced = syncQuarterBaSellInToStores({
+        year: selectedYear,
+        quarter: selectedQuarter,
+        baName: editTargetItem.entityName,
+        storeName: baItem?.storeName || '',
+        quarterTargetSellIn: sellInVal,
+        monthlyBreakdown: baItem?.monthlyBreakdown,
+      });
+      saveQuarterlyTargetOverride(
+        selectedYear,
+        selectedQuarter,
+        'ba',
+        editTargetItem.entityName,
+        {
+          ...(synced ? {} : { targetSellIn: sellInVal }),
+          targetSellOut: sellOutVal,
+        }
+      );
+      setEditTargetItem(null);
+      return;
+    }
+
     saveQuarterlyTargetOverride(
       selectedYear,
       selectedQuarter,
       editTargetItem.role,
       editTargetItem.entityName,
       {
-        targetSellIn: Number(editTargetItem.targetSellIn) || 0,
-        targetSellOut: Number(editTargetItem.targetSellOut) || 0,
+        targetSellIn: sellInVal,
+        targetSellOut: sellOutVal,
       }
     );
     setEditTargetItem(null);
@@ -1208,10 +1269,16 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                       {(isKetSellOut || !isKetSellIn) && (
                         <>
                           <td className="py-2 px-3 text-right font-mono text-slate-300">
-                            {formatRupiah(b.quarterTargetSellOut, true)}
+                            <span className="block">{formatRupiah(b.quarterTargetSellOut, true)}</span>
+                            <span className="text-[9.5px] text-slate-400 font-sans block">
+                              NL: {formatRupiah(b.quarterTargetNonLavojoy ?? 0, true)} • Lav: {formatRupiah(b.quarterTargetLavojoy ?? 0, true)}
+                            </span>
                           </td>
                           <td className="py-2 px-3 text-right font-mono font-bold text-emerald-300">
-                            {formatRupiah(b.quarterActualSellOut, true)}
+                            <span className="block">{formatRupiah(b.quarterActualSellOut, true)}</span>
+                            <span className="text-[9.5px] text-slate-400 font-sans font-normal block">
+                              NL: {formatRupiah(b.quarterActualNonLavojoy ?? 0, true)} • Lav: {formatRupiah(b.quarterActualLavojoy ?? 0, true)} • Fokus: {b.focusActualPcs}/{b.focusTargetPcs} pcs
+                            </span>
                           </td>
                           <td className="py-2 px-3 text-center font-bold text-emerald-300">
                             {formatPercent(b.quarterAchievementSellOutPercent, false)}
@@ -1813,7 +1880,7 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                 Daftar Rangkuman Kuartal Beauty Advisor (BA) — {overall.quarterLabel}
               </h3>
               <p className="text-xs text-slate-500">
-                Target Kuartal Sell In &amp; Sell Out bisa diedit per kuartal • Realisasi mengikuti {activeKetDisplayLabel}
+                Target &amp; Pencapaian Sell Out BA mengikuti Daftar Target BA (Non-Lavojoy, Lavojoy &amp; Produk Fokus Pcs) • Realisasi Sell In berdasarkan Nama Toko
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
@@ -1896,6 +1963,9 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                             {formatRupiah(b.quarterTarget, true)}
                           </span>
                           <span className="text-[10px] text-slate-400 block">
+                            NL: {formatRupiah(b.quarterTargetNonLavojoy ?? 0, true)} • Lav: {formatRupiah(b.quarterTargetLavojoy ?? 0, true)}
+                          </span>
+                          <span className="text-[10px] text-slate-400 block">
                             In: {formatRupiah(b.quarterTargetSellIn, true)} • Out: {formatRupiah(b.quarterTargetSellOut, true)}
                           </span>
                         </div>
@@ -1923,6 +1993,9 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                         <div>
                           <span className="block">{formatRupiah(b.quarterActual, true)}</span>
                           <span className="text-[10px] font-normal text-slate-500 block">
+                            NL: {formatRupiah(b.quarterActualNonLavojoy ?? 0, true)} • Lav: {formatRupiah(b.quarterActualLavojoy ?? 0, true)}
+                          </span>
+                          <span className="text-[10px] font-normal text-slate-400 block">
                             In: {formatRupiah(b.quarterActualSellIn, true)} • Out: {formatRupiah(b.quarterActualSellOut, true)}
                           </span>
                           {b.isCustomActualSellIn && (
@@ -2330,10 +2403,20 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                         {(isKetSellOut || !isKetSellIn) && (
                           <>
                             <td className="py-2.5 px-3 text-right font-mono text-slate-600">
-                              {formatRupiah(m.targetSellOut ?? 0, true)}
+                              <span className="block">{formatRupiah(m.targetSellOut ?? 0, true)}</span>
+                              {modalPerson.type === 'ba' && m.targetNonLavojoy !== undefined && (
+                                <span className="text-[9.5px] text-slate-400 font-sans block">
+                                  NL: {formatRupiah(m.targetNonLavojoy, true)} • Lav: {formatRupiah(m.targetLavojoy ?? 0, true)}
+                                </span>
+                              )}
                             </td>
                             <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-800">
-                              {formatRupiah(m.actualSellOut ?? 0, true)}
+                              <span className="block">{formatRupiah(m.actualSellOut ?? 0, true)}</span>
+                              {modalPerson.type === 'ba' && m.actualNonLavojoy !== undefined && (
+                                <span className="text-[9.5px] text-slate-500 font-sans font-normal block">
+                                  NL: {formatRupiah(m.actualNonLavojoy, true)} • Lav: {formatRupiah(m.actualLavojoy ?? 0, true)}
+                                </span>
+                              )}
                             </td>
                           </>
                         )}

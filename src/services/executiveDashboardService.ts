@@ -27,6 +27,7 @@ import {
   calculateProductStatusAnalysis,
   filterRecords,
   getRecordDayOfMonth,
+  getTrainerForRecord,
   isFocusProduct,
   isNewProduct,
   CategoryDetailData,
@@ -48,6 +49,7 @@ import {
   calculateStoreBaContribution,
   calculateMonthlyStoreBaSellInContribution,
 } from './storeBaContributionService';
+import { isPlaceholderBaName } from './masterStoreService';
 import {
   calculateProfitArea,
   combineMonthlyProfitAreaSummaries,
@@ -250,6 +252,9 @@ export interface ExecutiveCoreSnapshot {
   salesVisitsCount: number;
   trainerVisitsCount: number;
 
+  registeredSheetBaCount: number;
+  registeredSheetTrainerCount: number;
+
   targetMatrix: {
     areas: AreaTargetItem[];
     spvs: SpvTargetItem[];
@@ -427,6 +432,47 @@ export function buildExecutiveCoreSnapshot(
   // 1. Core Summary & Target Matrix
   const summary = calculateSummary(effectiveFilteredRecords);
   const matrix = aggregateTargetMatrix(effectiveFilteredRecords, filters.BULAN);
+
+  // Hitung Total BA Terdaftar & Trainer Aktif langsung dari transaksi Google Sheet yang terhubung
+  // (mengikuti filter aktif seperti Bulan/Tahun/Area/Sales/Toko tanpa terpengaruh filter KET SELL IN/OUT atau profil lokal non-sheet)
+  const sheetScopedRecords =
+    filters.KET && filters.KET !== 'ALL'
+      ? normDay.active
+        ? filterRecordsByDayRange(filterRecords(allRecords, { ...filters, KET: 'ALL' }), dayRange)
+        : filterRecords(allRecords, { ...filters, KET: 'ALL' })
+      : effectiveFilteredRecords;
+  const sheetBaSet = new Set<string>();
+  const sheetTrainerSet = new Set<string>();
+  for (let i = 0; i < sheetScopedRecords.length; i++) {
+    const r = sheetScopedRecords[i];
+    const val = Number(r.VALUE) || 0;
+    const qty = Number(r.QTY) || 0;
+    if (val === 0 && qty === 0) continue;
+
+    const rawBa = (r.BA || '').trim().replace(/\s+/g, ' ');
+    const baUpper = rawBa.toUpperCase();
+    if (
+      rawBa &&
+      baUpper !== '-' &&
+      baUpper !== 'UNKNOWN' &&
+      baUpper !== 'NONE' &&
+      baUpper !== 'N/A' &&
+      baUpper !== 'NULL' &&
+      baUpper !== 'TIDAK ADA' &&
+      baUpper !== 'TIDAK ADA BA' &&
+      baUpper !== 'TIDAK DIKETAHUI' &&
+      !isPlaceholderBaName(rawBa, r.NAMA_STORE)
+    ) {
+      sheetBaSet.add(baUpper);
+    }
+
+    const trName = getTrainerForRecord(r).trim().replace(/\s+/g, ' ').toUpperCase();
+    if (trName && trName !== '-' && trName !== 'UNKNOWN' && trName !== 'N/A' && trName !== 'NONE') {
+      sheetTrainerSet.add(trName);
+    }
+  }
+  const registeredSheetBaCount = sheetBaSet.size;
+  const registeredSheetTrainerCount = sheetTrainerSet.size;
 
   let targetTotal = 0;
   if (filters.KET === 'SELL OUT') {
@@ -1049,6 +1095,9 @@ export function buildExecutiveCoreSnapshot(
 
     salesVisitsCount,
     trainerVisitsCount,
+
+    registeredSheetBaCount,
+    registeredSheetTrainerCount,
 
     targetMatrix: {
       areas: matrix.areas,

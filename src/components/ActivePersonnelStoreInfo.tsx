@@ -25,6 +25,8 @@ import {
 } from 'lucide-react';
 import { TransactionRecord, DashboardFilters } from '../types/dashboard';
 import { formatRupiah, formatNumber, getTrainerForRecord } from '../utils/analytics';
+import { resolveRecordMonthAndYear } from '../services/sellInSellOutService';
+import { isPlaceholderBaName } from '../services/masterStoreService';
 import * as XLSX from 'xlsx';
 
 export interface MonthKeaktifanOverride {
@@ -70,15 +72,15 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
 }) => {
   // Filter Bulan (Januari - Desember 2026 atau ALL)
   const [selectedMonth, setSelectedMonth] = useState<string>(() => {
-    return filters.BULAN && filters.BULAN !== 'ALL' ? filters.BULAN.toUpperCase() : 'FEBRUARI';
+    return filters.BULAN && filters.BULAN !== 'ALL' ? filters.BULAN.toUpperCase() : 'ALL';
   });
 
   // Filter Keterangan: ALL (Semua/Konsolidasi), SELL IN, SELL OUT
   const [selectedKet, setSelectedKet] = useState<'ALL' | 'SELL IN' | 'SELL OUT'>(() => {
     if (filters.KET && filters.KET !== 'ALL') {
       const k = filters.KET.toUpperCase();
-      if (k.includes('SELL IN') || k === 'SI') return 'SELL IN';
-      if (k.includes('SELL OUT') || k === 'SO') return 'SELL OUT';
+      if (k.includes('SELL IN') || k.includes('SELL-IN') || k === 'SI') return 'SELL IN';
+      if (k.includes('SELL OUT') || k.includes('SELL-OUT') || k === 'SO') return 'SELL OUT';
     }
     return 'ALL';
   });
@@ -152,17 +154,21 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
 
   // Sync selectedMonth with global filters
   useEffect(() => {
-    if (filters.BULAN && filters.BULAN !== 'ALL') {
+    if (!filters.BULAN || filters.BULAN === 'ALL') {
+      setSelectedMonth('ALL');
+    } else {
       setSelectedMonth(filters.BULAN.toUpperCase());
     }
   }, [filters.BULAN]);
 
   // Sync selectedKet with global filters
   useEffect(() => {
-    if (filters.KET && filters.KET !== 'ALL') {
+    if (!filters.KET || filters.KET === 'ALL') {
+      setSelectedKet('ALL');
+    } else {
       const k = filters.KET.toUpperCase();
-      if (k.includes('SELL IN') || k === 'SI') setSelectedKet('SELL IN');
-      else if (k.includes('SELL OUT') || k === 'SO') setSelectedKet('SELL OUT');
+      if (k.includes('SELL IN') || k.includes('SELL-IN') || k === 'SI') setSelectedKet('SELL IN');
+      else if (k.includes('SELL OUT') || k.includes('SELL-OUT') || k === 'SO') setSelectedKet('SELL OUT');
     }
   }, [filters.KET]);
 
@@ -195,22 +201,49 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
     { key: 'DESEMBER', label: 'Desember', short: 'Des' },
   ];
 
-  // Records filtered by selected KET (SELL IN / SELL OUT / ALL)
+  // Records filtered by TAHUN + selected KET (SELL IN / SELL OUT / ALL)
   const ketFilteredRecords = useMemo(() => {
-    if (selectedKet === 'ALL') return records;
+    const fYear = filters.TAHUN && filters.TAHUN !== 'ALL' ? Number(filters.TAHUN) : 0;
     return records.filter((r) => {
-      const k = (r.KET || '').toUpperCase();
+      if (fYear > 0) {
+        const { year: recYear } = resolveRecordMonthAndYear(r);
+        if (recYear > 0 && recYear !== fYear) return false;
+      }
+      if (selectedKet === 'ALL') return true;
+      const k = (r.KET || '').toUpperCase().trim();
       if (selectedKet === 'SELL IN') {
-        return k.includes('SELL IN') || k === 'SI';
+        return k.includes('SELL IN') || k.includes('SELL-IN') || k === 'SI' || k.includes('TAKING ORDER');
       }
       if (selectedKet === 'SELL OUT') {
-        return k.includes('SELL OUT') || k === 'SO';
+        if (k.includes('RETURN') || k.includes('RETUR')) return false;
+        return !k || k.includes('SELL OUT') || k.includes('SELL-OUT') || k === 'SO';
       }
       return true;
     });
-  }, [records, selectedKet]);
+  }, [records, selectedKet, filters.TAHUN]);
 
-  // Helper to extract active entities from a list of records
+  const normalizeEntityKey = (raw?: string): string =>
+    (raw || '').trim().replace(/\s+/g, ' ').toUpperCase();
+
+  const isInvalidGenericEntity = (normKey: string): boolean =>
+    !normKey ||
+    normKey === '-' ||
+    normKey === 'UNKNOWN' ||
+    normKey === 'N/A' ||
+    normKey === 'NULL' ||
+    normKey === 'UNDEFINED' ||
+    normKey === 'NONE' ||
+    normKey === 'TIDAK DIKETAHUI' ||
+    normKey === 'TIDAK ADA';
+
+  const isValidBaTransactionName = (rawBa?: string, rawStore?: string): boolean => {
+    const norm = normalizeEntityKey(rawBa);
+    if (isInvalidGenericEntity(norm)) return false;
+    if (norm === 'TIDAK ADA BA' || norm === 'NO BA') return false;
+    return !isPlaceholderBaName(rawBa, rawStore);
+  };
+
+  // Helper to extract active entities strictly from Google Sheet transaction records
   const extractActiveData = (recList: TransactionRecord[], monthKey: string) => {
     const storeMap = new Map<
       string,
@@ -221,6 +254,7 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
         region: string;
         salesName: string;
         baName: string;
+        baSet: Set<string>;
         hasBa: boolean;
         totalValue: number;
         totalQty: number;
@@ -271,54 +305,76 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
       }
     >();
 
-    recList.forEach((r, idx) => {
-      const sName = (r.NAMA_STORE || '').trim();
-      const bName = (r.BA || '').trim();
-      const slName = (r.SALES || '').trim();
-      const trName = getTrainerForRecord(r);
-      const val = r.VALUE || 0;
-      const qty = r.QTY || 0;
+    let validTxCount = 0;
+    let totalValueSum = 0;
+    let totalQtySum = 0;
+
+    recList.forEach((r) => {
+      const val = Number(r.VALUE) || 0;
+      const qty = Number(r.QTY) || 0;
+      // Hanya hitung baris Google Sheet yang benar-benar memiliki transaksi (qty atau value != 0)
+      if (val === 0 && qty === 0) return;
+
+      validTxCount += 1;
+      totalValueSum += val;
+      totalQtySum += qty;
+
+      const sName = (r.NAMA_STORE || '').trim().replace(/\s+/g, ' ');
+      const sKey = normalizeEntityKey(sName);
+      const bName = (r.BA || '').trim().replace(/\s+/g, ' ');
+      const bKey = normalizeEntityKey(bName);
+      const slName = (r.SALES || '').trim().replace(/\s+/g, ' ');
+      const slKey = normalizeEntityKey(slName);
+      const trName = getTrainerForRecord(r).trim().replace(/\s+/g, ' ');
+      const trKey = normalizeEntityKey(trName);
       const area = (r.COVER_AREA || '-').trim();
       const region = (r.REGION || 'PEKAN BARU').trim();
 
-      // Toko
-      if (sName && sName !== '-' && sName.toUpperCase() !== 'UNKNOWN') {
-        if (!storeMap.has(sName)) {
-          const hasBa = Boolean(
-            bName &&
-            bName !== '-' &&
-            !bName.toUpperCase().includes('NON') &&
-            bName.toUpperCase() !== 'TANPA BA'
-          );
-          storeMap.set(sName, {
-            id: `store-${sName}`,
+      const validStore = !isInvalidGenericEntity(sKey);
+      const validBa = isValidBaTransactionName(bName, sName);
+      const validSales = !isInvalidGenericEntity(slKey);
+      const validTrainer = !isInvalidGenericEntity(trKey);
+
+      // Toko Aktif (berdasarkan transaksi Google Sheet)
+      if (validStore) {
+        if (!storeMap.has(sKey)) {
+          storeMap.set(sKey, {
+            id: `store-${sKey}`,
             storeName: sName,
             coverArea: area,
             region,
-            salesName: slName || '-',
-            baName: hasBa ? bName : '-',
-            hasBa,
+            salesName: validSales ? slName : '-',
+            baName: validBa ? bName : '-',
+            baSet: new Set(validBa ? [bName] : []),
+            hasBa: validBa,
             totalValue: 0,
             totalQty: 0,
             txCount: 0,
           });
         }
-        const st = storeMap.get(sName)!;
+        const st = storeMap.get(sKey)!;
+        if (validBa) {
+          st.hasBa = true;
+          const alreadyHasBa = Array.from(st.baSet).some((x) => normalizeEntityKey(x) === bKey);
+          if (!alreadyHasBa) st.baSet.add(bName);
+          st.baName = Array.from(st.baSet).join(', ');
+        }
+        if (validSales && (st.salesName === '-' || !st.salesName)) {
+          st.salesName = slName;
+        }
+        if ((st.coverArea === '-' || !st.coverArea) && area && area !== '-') {
+          st.coverArea = area;
+        }
         st.totalValue += val;
         st.totalQty += qty;
         st.txCount += 1;
       }
 
-      // BA
-      if (
-        bName &&
-        bName !== '-' &&
-        !bName.toUpperCase().includes('NON') &&
-        bName.toUpperCase() !== 'TANPA BA'
-      ) {
-        if (!baMap.has(bName)) {
-          baMap.set(bName, {
-            id: `ba-${bName}`,
+      // BA Aktif (berdasarkan transaksi Google Sheet)
+      if (validBa) {
+        if (!baMap.has(bKey)) {
+          baMap.set(bKey, {
+            id: `ba-${bKey}`,
             baName: bName,
             stores: new Set(),
             sales: new Set(),
@@ -328,20 +384,20 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
             txCount: 0,
           });
         }
-        const b = baMap.get(bName)!;
-        if (sName) b.stores.add(sName);
-        if (slName) b.sales.add(slName);
-        if (area) b.areas.add(area);
+        const b = baMap.get(bKey)!;
+        if (validStore) b.stores.add(sName);
+        if (validSales) b.sales.add(slName);
+        if (area && area !== '-') b.areas.add(area);
         b.totalValue += val;
         b.totalQty += qty;
         b.txCount += 1;
       }
 
-      // Sales
-      if (slName && slName !== '-' && slName.toUpperCase() !== 'UNKNOWN') {
-        if (!salesMap.has(slName)) {
-          salesMap.set(slName, {
-            id: `sales-${slName}`,
+      // Sales Aktif
+      if (validSales) {
+        if (!salesMap.has(slKey)) {
+          salesMap.set(slKey, {
+            id: `sales-${slKey}`,
             salesName: slName,
             coverArea: area,
             region,
@@ -352,25 +408,19 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
             txCount: 0,
           });
         }
-        const sl = salesMap.get(slName)!;
-        if (sName) sl.stores.add(sName);
-        if (
-          bName &&
-          bName !== '-' &&
-          !bName.toUpperCase().includes('NON')
-        ) {
-          sl.bas.add(bName);
-        }
+        const sl = salesMap.get(slKey)!;
+        if (validStore) sl.stores.add(sName);
+        if (validBa) sl.bas.add(bKey);
         sl.totalValue += val;
         sl.totalQty += qty;
         sl.txCount += 1;
       }
 
-      // Trainer
-      if (trName && trName !== '-' && trName.toUpperCase() !== 'UNKNOWN') {
-        if (!trainerMap.has(trName)) {
-          trainerMap.set(trName, {
-            id: `trainer-${trName}`,
+      // Trainer Aktif
+      if (validTrainer) {
+        if (!trainerMap.has(trKey)) {
+          trainerMap.set(trKey, {
+            id: `trainer-${trKey}`,
             trainerName: trName,
             areas: new Set(),
             stores: new Set(),
@@ -380,64 +430,37 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
             txCount: 0,
           });
         }
-        const tr = trainerMap.get(trName)!;
-        if (area) tr.areas.add(area);
-        if (sName) tr.stores.add(sName);
-        if (
-          bName &&
-          bName !== '-' &&
-          !bName.toUpperCase().includes('NON')
-        ) {
-          tr.bas.add(bName);
-        }
+        const tr = trainerMap.get(trKey)!;
+        if (area && area !== '-') tr.areas.add(area);
+        if (validStore) tr.stores.add(sKey);
+        if (validBa) tr.bas.add(bKey);
         tr.totalValue += val;
         tr.totalQty += qty;
         tr.txCount += 1;
       }
     });
 
-    // Default trainer fallback if none detected
-    if (trainerMap.size === 0) {
-      trainerMap.set('ARA', {
-        id: 'trainer-ARA',
-        trainerName: 'ARA',
-        areas: new Set(['PEKANBARU', 'DUMAI', 'SIAK', 'KAMPAR']),
-        stores: new Set(),
-        bas: new Set(),
-        totalValue: Math.round(recList.reduce((acc, r) => acc + (r.VALUE || 0), 0) * 0.52),
-        totalQty: Math.round(recList.reduce((acc, r) => acc + (r.QTY || 0), 0) * 0.52),
-        txCount: Math.round(recList.length * 0.52),
-      });
-      trainerMap.set('RATIH', {
-        id: 'trainer-RATIH',
-        trainerName: 'RATIH',
-        areas: new Set(['DURI', 'DUMAI', 'BAGAN', 'LUAR KOTA']),
-        stores: new Set(),
-        bas: new Set(),
-        totalValue: Math.round(recList.reduce((acc, r) => acc + (r.VALUE || 0), 0) * 0.48),
-        totalQty: Math.round(recList.reduce((acc, r) => acc + (r.QTY || 0), 0) * 0.48),
-        txCount: Math.round(recList.length * 0.48),
-      });
-    }
-
-    // Merge custom entities for this month
+    // Merge custom entities for this month (jika user menambahkan entitas manual)
     const monthCustom = customEntities.filter((c) => c.monthKey === monthKey || monthKey === 'ALL');
     monthCustom.forEach((c) => {
+      const cKey = normalizeEntityKey(c.name);
+      if (!cKey) return;
       if (c.type === 'toko') {
-        storeMap.set(c.name, {
+        storeMap.set(cKey, {
           id: c.id,
           storeName: c.name,
           coverArea: c.area || '-',
           region: c.region || 'PEKAN BARU',
           salesName: c.salesName || '-',
           baName: c.baName || '-',
+          baSet: new Set(c.baName && c.baName !== '-' ? [c.baName] : []),
           hasBa: Boolean(c.hasBa),
           totalValue: c.totalValue || 0,
           totalQty: c.totalQty || 0,
           txCount: c.txCount || 1,
         });
       } else if (c.type === 'ba') {
-        baMap.set(c.name, {
+        baMap.set(cKey, {
           id: c.id,
           baName: c.name,
           stores: new Set(c.stores || []),
@@ -448,7 +471,7 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
           txCount: c.txCount || 1,
         });
       } else if (c.type === 'sales') {
-        salesMap.set(c.name, {
+        salesMap.set(cKey, {
           id: c.id,
           salesName: c.name,
           coverArea: c.area || '-',
@@ -460,7 +483,7 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
           txCount: c.txCount || 1,
         });
       } else if (c.type === 'trainer') {
-        trainerMap.set(c.name, {
+        trainerMap.set(cKey, {
           id: c.id,
           trainerName: c.name,
           areas: new Set(c.area ? [c.area] : []),
@@ -478,26 +501,27 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
       baList: Array.from(baMap.values()).sort((a, b) => b.totalValue - a.totalValue),
       salesList: Array.from(salesMap.values()).sort((a, b) => b.totalValue - a.totalValue),
       trainerList: Array.from(trainerMap.values()).sort((a, b) => b.totalValue - a.totalValue),
-      totalValue: recList.reduce((acc, r) => acc + (r.VALUE || 0), 0),
-      totalQty: recList.reduce((acc, r) => acc + (r.QTY || 0), 0),
-      txCount: recList.length,
+      totalValue: totalValueSum,
+      totalQty: totalQtySum,
+      txCount: validTxCount,
     };
   };
 
-  // 12-Month Matrix computation with editable overrides support
+  // 12-Month Matrix computation strictly from Google Sheet transactions + optional manual override
   const monthlyMatrix = useMemo(() => {
     return monthsList.map((m) => {
-      const monthRecs = ketFilteredRecords.filter(
-        (r) => (r.BULAN || '').toUpperCase().trim() === m.key
-      );
+      const monthRecs = ketFilteredRecords.filter((r) => {
+        const resolvedMonth =
+          resolveRecordMonthAndYear(r).month || (r.BULAN || '').toUpperCase().trim();
+        return resolvedMonth === m.key;
+      });
       const data = extractActiveData(monthRecs, m.key);
 
-      // Baseline calculated values
-      const calcToko = data.storeList.length > 0 ? data.storeList.length : (monthRecs.length > 0 ? Math.round(monthRecs.length / 2) : 24);
-      const calcBa = data.baList.length > 0 ? data.baList.length : (monthRecs.length > 0 ? 12 : 17);
-      const calcSales = data.salesList.length > 0 ? data.salesList.length : 6;
-      const calcTrainer = data.trainerList.length > 0 ? data.trainerList.length : 2;
-      const calcTx = data.txCount > 0 ? data.txCount : (monthRecs.length || 45);
+      const calcToko = data.storeList.length;
+      const calcBa = data.baList.length;
+      const calcSales = data.salesList.length;
+      const calcTrainer = data.trainerList.length;
+      const calcTx = data.txCount;
       const calcVal = data.totalValue;
 
       // Apply overrides if exists
@@ -531,7 +555,11 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
   // Selected Month's active records
   const selectedRecords = useMemo(() => {
     if (selectedMonth === 'ALL') return ketFilteredRecords;
-    return ketFilteredRecords.filter((r) => (r.BULAN || '').toUpperCase().trim() === selectedMonth);
+    return ketFilteredRecords.filter((r) => {
+      const resolvedMonth =
+        resolveRecordMonthAndYear(r).month || (r.BULAN || '').toUpperCase().trim();
+      return resolvedMonth === selectedMonth;
+    });
   }, [ketFilteredRecords, selectedMonth]);
 
   // Active extracted data for selected month
@@ -878,12 +906,23 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
 
           <div className="flex flex-wrap items-center gap-2.5">
             <button
-              onClick={() => handleOpenEditMonth(selectedMonth === 'ALL' ? 'FEBRUARI' : selectedMonth)}
+              onClick={() =>
+                handleOpenEditMonth(
+                  selectedMonth === 'ALL'
+                    ? monthlyMatrix.find((m) => m.txCount > 0)?.key || 'JANUARI'
+                    : selectedMonth
+                )
+              }
               className="flex items-center gap-2 px-3.5 py-2 text-xs font-bold rounded-xl bg-teal-500 hover:bg-teal-400 text-slate-950 shadow-md transition-all cursor-pointer"
               title="Edit rekapitulasi data keaktifan untuk bulan terpilih"
             >
               <Edit2 className="w-3.5 h-3.5" />
-              <span>Edit Rekap Bulan {selectedMonth}</span>
+              <span>
+                Edit Rekap Bulan{' '}
+                {selectedMonth === 'ALL'
+                  ? monthlyMatrix.find((m) => m.txCount > 0)?.key || 'JANUARI'
+                  : selectedMonth}
+              </span>
             </button>
 
             <button
@@ -1024,7 +1063,13 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
           </div>
 
           <button
-            onClick={() => handleOpenEditMonth(selectedMonth === 'ALL' ? 'FEBRUARI' : selectedMonth)}
+            onClick={() =>
+              handleOpenEditMonth(
+                selectedMonth === 'ALL'
+                  ? monthlyMatrix.find((m) => m.txCount > 0)?.key || 'JANUARI'
+                  : selectedMonth
+              )
+            }
             className="text-[11px] text-teal-300 hover:text-white underline font-bold flex items-center gap-1 cursor-pointer"
           >
             <Edit2 className="w-3 h-3" />
@@ -1584,10 +1629,10 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
                         {Array.from(tr.areas).join(', ') || 'Seluruh Area Riau'}
                       </td>
                       <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-800">
-                        {tr.stores.size > 0 ? tr.stores.size : activeData.storeList.length} Toko
+                        {tr.stores.size} Toko
                       </td>
                       <td className="py-2.5 px-3 text-center font-mono font-bold text-pink-700">
-                        {tr.bas.size > 0 ? tr.bas.size : activeData.baList.length} BA
+                        {tr.bas.size} BA
                       </td>
                       <td className="py-2.5 px-3 text-right font-mono text-slate-700">
                         {formatNumber(tr.totalQty)} pcs

@@ -1065,6 +1065,7 @@ export default function App() {
         {activeTab === 'pengaturan_master' && (
           <MasterStoreBaSettings
             records={records}
+            filters={filters}
             onDataUpdated={() => {
               showToast('Data Master Toko, BA & Sales berhasil disimpan!');
             }}

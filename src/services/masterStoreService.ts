@@ -1,5 +1,6 @@
 import { TransactionRecord } from '../types/dashboard';
 import { SALES_MASTER_6_CONFIG, VALID_KPI_SALES_NAMES } from './kpiSalesData';
+import { MONTH_OPTIONS_2026, recordMatchesMonth } from './targetManagementService';
 
 export const MASTER_STORE_STORAGE_KEY = 'salespro_master_store_config_v2';
 export const KA_MG_SALES_OVERRIDE_KEY = 'salespro_ka_mg_sales_override_v2';
@@ -7,6 +8,7 @@ export const KA_MG_SALES_OVERRIDE_KEY = 'salespro_ka_mg_sales_override_v2';
 export interface MasterStoreItem {
   id: string;
   storeName: string;
+  monthlyStoreNames?: Record<string, string>; // Key: '2026-01' .. '2026-12'
   hasBa: boolean;
   baName: string;
   baNumber?: string;
@@ -28,6 +30,256 @@ export interface KaMgSalesOverride {
   dazzleMeMgSalesValue?: number; // PENJUALAN DAZZLE ME MG
   notes?: string;
   updatedAt?: string;
+}
+
+const GENERIC_BA_PREFIXES = new Set([
+  'BA TOKO',
+  'BA GUARDIAN',
+  'BA MISS',
+  'BA WATSON',
+  'BA SWALAYAN',
+  'BA APOTEK',
+  'BA WARUNG',
+  'BA KIOS',
+  'BA MART',
+  'BA GROSIR',
+  'BA KOSMETIK',
+  'BA COSMETIC',
+  'BA COUNTER',
+  'BA STANDBY',
+]);
+
+/**
+ * Mengecek apakah nama BA hanyalah placeholder / Non-BA / hasil generate otomatis dari nama toko
+ */
+export function isPlaceholderBaName(baName?: string, storeName?: string): boolean {
+  const clean = (baName || '').trim().replace(/\s+/g, ' ').toUpperCase();
+  if (
+    !clean ||
+    clean === '-' ||
+    clean === '- (NON-BA)' ||
+    clean === 'NON BA' ||
+    clean === 'NON-BA' ||
+    clean === 'STANDBY' ||
+    clean === 'BA STANDBY' ||
+    clean === 'ALL' ||
+    clean === 'EMPTY' ||
+    clean === 'KOSONG' ||
+    clean === 'VACANT' ||
+    clean === 'NO BA' ||
+    clean === 'TANPA BA' ||
+    GENERIC_BA_PREFIXES.has(clean)
+  ) {
+    return true;
+  }
+
+  // Deteksi placeholder otomatis "BA <KATA_PERTAMA_TOKO>" agar toko tanpa data transaksi sheet tidak tergabung salah
+  if (clean.startsWith('BA ') && storeName) {
+    const firstStoreToken = splitMasterStoreNames(storeName)[0] || storeName;
+    const firstWord = firstStoreToken.trim().split(/\s+/)[0]?.toUpperCase();
+    if (firstWord && clean === `BA ${firstWord}`) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function normalizeBaGroupKey(baName?: string): string {
+  return (baName || '').trim().replace(/\s+/g, ' ').toUpperCase();
+}
+
+/**
+ * Memecah gabungan nama toko (dipisahkan koma) menjadi array toko unik tanpa menghilangkan urutan
+ */
+export function splitMasterStoreNames(rawStoreName?: string): string[] {
+  if (!rawStoreName) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  rawStoreName
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .forEach((part) => {
+      const upper = part.toUpperCase();
+      if (!seen.has(upper)) {
+        seen.add(upper);
+        result.push(part);
+      }
+    });
+
+  return result;
+}
+
+/**
+ * Menggabungkan dua string daftar toko (comma-separated) menjadi daftar toko unik
+ */
+export function joinUniqueStoreNames(...storeStrings: Array<string | undefined>): string {
+  const seen = new Set<string>();
+  const list: string[] = [];
+
+  storeStrings.forEach((raw) => {
+    splitMasterStoreNames(raw).forEach((tok) => {
+      const upper = tok.toUpperCase();
+      if (!seen.has(upper)) {
+        seen.add(upper);
+        list.push(tok);
+      }
+    });
+  });
+
+  return list.join(', ');
+}
+
+/**
+ * Menggabungkan toko-toko berbeda yang memiliki Nama BA sama (untuk BA valid)
+ */
+export function mergeMasterStoresByBa(items: MasterStoreItem[]): MasterStoreItem[] {
+  const groupMap = new Map<string, MasterStoreItem>();
+
+  items.forEach((item) => {
+    const cleanStore = joinUniqueStoreNames(item.storeName);
+    if (!cleanStore) return;
+
+    const hasValidRealBa = item.hasBa && !isPlaceholderBaName(item.baName, cleanStore);
+    const groupKey = hasValidRealBa
+      ? `BA::${normalizeBaGroupKey(item.baName)}`
+      : `STORE::${cleanStore.toUpperCase()}`;
+
+    const existing = groupMap.get(groupKey);
+    if (!existing) {
+      const cleanMonthly: Record<string, string> = {};
+      if (item.monthlyStoreNames) {
+        Object.entries(item.monthlyStoreNames).forEach(([mk, val]) => {
+          const joined = joinUniqueStoreNames(val);
+          if (joined) cleanMonthly[mk] = joined;
+        });
+      }
+
+      groupMap.set(groupKey, {
+        ...item,
+        storeName: cleanStore,
+        baName: item.hasBa ? item.baName.trim() : '- (Non-BA)',
+        monthlyStoreNames: Object.keys(cleanMonthly).length > 0 ? cleanMonthly : undefined,
+      });
+      return;
+    }
+
+    // Gabungkan nama toko yang berbeda untuk BA yang sama
+    existing.storeName = joinUniqueStoreNames(existing.storeName, cleanStore);
+
+    // Gabungkan override nama toko per bulan jika keduanya punya
+    if (item.monthlyStoreNames) {
+      const nextMonthly: Record<string, string> = { ...(existing.monthlyStoreNames || {}) };
+      Object.entries(item.monthlyStoreNames).forEach(([mk, val]) => {
+        const mergedMonthStore = joinUniqueStoreNames(nextMonthly[mk], val);
+        if (mergedMonthStore) {
+          nextMonthly[mk] = mergedMonthStore;
+        }
+      });
+      existing.monthlyStoreNames = Object.keys(nextMonthly).length > 0 ? nextMonthly : undefined;
+    }
+
+    if (!existing.baNumber && item.baNumber) existing.baNumber = item.baNumber;
+    if ((!existing.salesName || existing.salesName === '-') && item.salesName) existing.salesName = item.salesName;
+    if ((!existing.trainerName || existing.trainerName === '-') && item.trainerName) existing.trainerName = item.trainerName;
+    if ((!existing.coverArea || existing.coverArea === '-') && item.coverArea) existing.coverArea = item.coverArea;
+    if ((!existing.region || existing.region === '-') && item.region) existing.region = item.region;
+    if ((!existing.spvName || existing.spvName === '-') && item.spvName) existing.spvName = item.spvName;
+    if (item.isCustom) existing.isCustom = true;
+    if (item.notes && item.notes.trim()) {
+      if (!existing.notes || !existing.notes.trim()) {
+        existing.notes = item.notes.trim();
+      } else if (!existing.notes.includes(item.notes.trim())) {
+        existing.notes = `${existing.notes}; ${item.notes.trim()}`;
+      }
+    }
+    if (item.channel === 'KA') existing.channel = 'KA';
+  });
+
+  return Array.from(groupMap.values()).sort((a, b) => a.storeName.localeCompare(b.storeName));
+}
+
+/**
+ * Membangun peta `${monthKey}__${baUpper}` -> Nama Toko dari transaksi Google Sheet per bulan
+ */
+export function buildSheetMonthlyBaStoreMap(
+  transactions: TransactionRecord[] = []
+): Map<string, string> {
+  const bucketMap = new Map<string, Set<string>>();
+
+  if (transactions.length === 0) return new Map();
+
+  MONTH_OPTIONS_2026.forEach((m) => {
+    transactions.forEach((r) => {
+      if (!recordMatchesMonth(r, m.key)) return;
+      const store = (r.NAMA_STORE || '').trim();
+      const rawBa = (r.BA || '').trim();
+      if (!store || isPlaceholderBaName(rawBa, store)) return;
+
+      const key = `${m.key}__${normalizeBaGroupKey(rawBa)}`;
+      if (!bucketMap.has(key)) {
+        bucketMap.set(key, new Set<string>());
+      }
+      const set = bucketMap.get(key)!;
+      // Hindari duplikasi case-insensitive
+      const existsCaseInsensitive = Array.from(set).some(
+        (s) => s.toUpperCase() === store.toUpperCase()
+      );
+      if (!existsCaseInsensitive) {
+        set.add(store);
+      }
+    });
+  });
+
+  const result = new Map<string, string>();
+  bucketMap.forEach((storeSet, key) => {
+    result.set(key, Array.from(storeSet).join(', '));
+  });
+  return result;
+}
+
+/**
+ * Menentukan nama toko yang ditampilkan & sumbernya untuk bulan tertentu
+ */
+export function resolveMasterStoreNameForMonth(
+  item: MasterStoreItem,
+  monthKey: string,
+  sheetBaMonthMap?: Map<string, string>
+): {
+  storeName: string;
+  source: 'manual_month' | 'sheet_month' | 'master';
+} {
+  if (!monthKey || monthKey === 'ALL') {
+    return {
+      storeName: item.storeName,
+      source: 'master',
+    };
+  }
+
+  const manualMonthStore = item.monthlyStoreNames?.[monthKey]?.trim();
+  if (manualMonthStore) {
+    return {
+      storeName: manualMonthStore,
+      source: 'manual_month',
+    };
+  }
+
+  if (item.hasBa && !isPlaceholderBaName(item.baName, item.storeName) && sheetBaMonthMap) {
+    const sheetStore = sheetBaMonthMap.get(`${monthKey}__${normalizeBaGroupKey(item.baName)}`);
+    if (sheetStore && sheetStore.trim()) {
+      return {
+        storeName: sheetStore,
+        source: 'sheet_month',
+      };
+    }
+  }
+
+  return {
+    storeName: item.storeName,
+    source: 'master',
+  };
 }
 
 /**
@@ -98,14 +350,7 @@ export function extractInitialMasterStoresFromTransactions(
 
     const key = sName.toUpperCase();
     const rawBa = (r.BA || '').trim();
-    const isBaValid =
-      Boolean(rawBa) &&
-      rawBa !== '-' &&
-      rawBa.toUpperCase() !== 'NON BA' &&
-      rawBa.toUpperCase() !== 'STANDBY' &&
-      rawBa.toUpperCase() !== 'BA STANDBY' &&
-      rawBa.toUpperCase() !== 'ALL' &&
-      rawBa.toUpperCase() !== 'EMPTY';
+    const isBaValid = !isPlaceholderBaName(rawBa, sName);
 
     if (!storeMap.has(key)) {
       const official = findOfficialSalesAndTrainerForStore(sName);
@@ -161,11 +406,12 @@ export function extractInitialMasterStoresFromTransactions(
     }
   });
 
-  return Array.from(storeMap.values()).sort((a, b) => a.storeName.localeCompare(b.storeName));
+  // Gabungkan otomatis toko yang memiliki Nama BA sama
+  return mergeMasterStoresByBa(Array.from(storeMap.values()));
 }
 
 /**
- * Memuat master list toko (dengan dukungan localStorage persistensi)
+ * Memuat master list toko (dengan dukungan localStorage persistensi & penggabungan BA sama)
  */
 export function loadMasterStoreList(transactions: TransactionRecord[] = []): MasterStoreItem[] {
   try {
@@ -173,11 +419,24 @@ export function loadMasterStoreList(transactions: TransactionRecord[] = []): Mas
     if (raw) {
       const parsed: MasterStoreItem[] = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        // Jika ada toko baru di transactions yang belum terdaftar di localStorage, tambahkan otomatis
-        if (transactions.length > 0) {
-          const existingSet = new Set(parsed.map((p) => p.storeName.toUpperCase().trim()));
-          const missingStores: MasterStoreItem[] = [];
+        // Kumpulkan semua nama toko (termasuk toko yang sudah digabung dengan koma)
+        const existingSet = new Set<string>();
+        parsed.forEach((p) => {
+          splitMasterStoreNames(p.storeName).forEach((tok) => {
+            existingSet.add(tok.toUpperCase());
+          });
+          if (p.monthlyStoreNames) {
+            Object.values(p.monthlyStoreNames).forEach((mStore) => {
+              splitMasterStoreNames(mStore).forEach((tok) => {
+                existingSet.add(tok.toUpperCase());
+              });
+            });
+          }
+        });
 
+        const missingStores: MasterStoreItem[] = [];
+
+        if (transactions.length > 0) {
           transactions.forEach((r) => {
             const sName = (r.NAMA_STORE || '').trim();
             if (!sName) return;
@@ -186,11 +445,7 @@ export function loadMasterStoreList(transactions: TransactionRecord[] = []): Mas
               existingSet.add(key);
               const official = findOfficialSalesAndTrainerForStore(sName);
               const rawBa = (r.BA || '').trim();
-              const isBaValid =
-                Boolean(rawBa) &&
-                rawBa !== '-' &&
-                rawBa.toUpperCase() !== 'NON BA' &&
-                rawBa.toUpperCase() !== 'STANDBY';
+              const isBaValid = !isPlaceholderBaName(rawBa, sName);
 
               missingStores.push({
                 id: `store-new-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
@@ -207,14 +462,15 @@ export function loadMasterStoreList(transactions: TransactionRecord[] = []): Mas
               });
             }
           });
-
-          if (missingStores.length > 0) {
-            const merged = [...parsed, ...missingStores];
-            saveMasterStoreList(merged);
-            return merged;
-          }
         }
-        return parsed;
+
+        const combined = [...parsed, ...missingStores];
+        const mergedByBa = mergeMasterStoresByBa(combined);
+
+        if (missingStores.length > 0 || mergedByBa.length !== parsed.length) {
+          saveMasterStoreList(mergedByBa);
+        }
+        return mergedByBa;
       }
     }
   } catch (e) {
@@ -230,11 +486,12 @@ export function loadMasterStoreList(transactions: TransactionRecord[] = []): Mas
 }
 
 /**
- * Menyimpan master list toko ke localStorage
+ * Menyimpan master list toko ke localStorage (otomatis menjaga penggabungan BA sama)
  */
 export function saveMasterStoreList(stores: MasterStoreItem[]): void {
   try {
-    localStorage.setItem(MASTER_STORE_STORAGE_KEY, JSON.stringify(stores));
+    const normalized = mergeMasterStoresByBa(stores);
+    localStorage.setItem(MASTER_STORE_STORAGE_KEY, JSON.stringify(normalized));
   } catch (e) {
     console.warn('Gagal menyimpan master store ke localStorage', e);
   }

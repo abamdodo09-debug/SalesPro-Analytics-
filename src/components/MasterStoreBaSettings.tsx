@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Store,
   Users,
@@ -10,50 +10,65 @@ import {
   RotateCcw,
   Download,
   Search,
-  Filter,
   CheckCircle2,
   X,
   Save,
-  Sparkles,
-  Sliders,
-  Check,
-  AlertTriangle,
   ArrowRight,
   ShieldCheck,
-  Layers,
-  MapPin,
   CheckSquare,
   Square,
-  ArrowUpDown,
+  Calendar,
+  Check,
 } from 'lucide-react';
-import { TransactionRecord } from '../types/dashboard';
+import { TransactionRecord, FilterState } from '../types/dashboard';
 import {
   MasterStoreItem,
   loadMasterStoreList,
   saveMasterStoreList,
   resetMasterStoreListToSheet,
-  detectStoreChannel,
+  mergeMasterStoresByBa,
+  splitMasterStoreNames,
+  joinUniqueStoreNames,
+  buildSheetMonthlyBaStoreMap,
+  resolveMasterStoreNameForMonth,
+  normalizeBaGroupKey,
+  isPlaceholderBaName,
 } from '../services/masterStoreService';
+import {
+  MONTH_OPTIONS_2026,
+  normalizeMonthKey,
+  notifyTargetsUpdated,
+} from '../services/targetManagementService';
 import { VALID_KPI_SALES_NAMES, SALES_MASTER_6_CONFIG } from '../services/kpiSalesData';
 import { OFFICIAL_SPV_WIDODO } from '../services/spvSellInSellOutService';
 import * as XLSX from 'xlsx';
 
 interface MasterStoreBaSettingsProps {
   records: TransactionRecord[];
+  filters?: FilterState;
   onDataUpdated?: () => void;
 }
 
 export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
   records,
+  filters,
   onDataUpdated,
 }) => {
   const [stores, setStores] = useState<MasterStoreItem[]>(() => loadMasterStoreList(records));
+  const [selectedMonth, setSelectedMonth] = useState<string>(() =>
+    filters?.BULAN && filters.BULAN !== 'ALL' ? normalizeMonthKey(filters.BULAN) : 'ALL'
+  );
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'ba' | 'non_ba'>('all');
   const [channelFilter, setChannelFilter] = useState<'all' | 'KA' | 'MG'>('all');
   const [salesFilter, setSalesFilter] = useState<string>('all');
   const [trainerFilter, setTrainerFilter] = useState<string>('all');
   const [activeSubTab, setActiveSubTab] = useState<'table' | 'sales_matrix' | 'trainer_matrix' | 'spv_view'>('table');
+
+  // Inline Edit Nama Toko Per Bulan State
+  const [inlineEditStoreId, setInlineEditStoreId] = useState<string | null>(null);
+  const [inlineEditMonth, setInlineEditMonth] = useState<string>('ALL');
+  const [inlineEditValue, setInlineEditValue] = useState<string>('');
 
   // Selected Store IDs for Batch Operations
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -82,6 +97,37 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3500);
   };
+
+  // Sinkronisasi otomatis ketika data transaksi Google Sheet selesai dimuat / diperbarui
+  useEffect(() => {
+    setStores(loadMasterStoreList(records));
+  }, [records]);
+
+  // Sinkronisasi filter bulan global jika diubah dari header
+  useEffect(() => {
+    if (filters?.BULAN) {
+      const norm = filters.BULAN === 'ALL' ? 'ALL' : normalizeMonthKey(filters.BULAN);
+      setSelectedMonth(norm);
+    }
+  }, [filters?.BULAN]);
+
+  // Helper simpan & gabungkan toko berdasar BA sama
+  const commitStores = (nextStores: MasterStoreItem[]) => {
+    const merged = mergeMasterStoresByBa(nextStores);
+    setStores(merged);
+    saveMasterStoreList(merged);
+    notifyTargetsUpdated({ category: 'master_store' });
+    if (onDataUpdated) onDataUpdated();
+    return merged;
+  };
+
+  // Peta toko per bulan per BA dari transaksi Google Sheet
+  const sheetBaMonthMap = useMemo(() => buildSheetMonthlyBaStoreMap(records), [records]);
+
+  const activeMonthMeta = useMemo(
+    () => MONTH_OPTIONS_2026.find((m) => m.key === selectedMonth) || null,
+    [selectedMonth]
+  );
 
   // Distinct Trainers
   const distinctTrainers = useMemo(() => {
@@ -119,8 +165,12 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
 
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
+        const resolvedMonthStore = resolveMasterStoreNameForMonth(s, selectedMonth, sheetBaMonthMap).storeName;
+        const monthlyText = s.monthlyStoreNames ? Object.values(s.monthlyStoreNames).join(' ') : '';
         const match =
           s.storeName.toLowerCase().includes(q) ||
+          resolvedMonthStore.toLowerCase().includes(q) ||
+          monthlyText.toLowerCase().includes(q) ||
           s.baName.toLowerCase().includes(q) ||
           s.salesName.toLowerCase().includes(q) ||
           s.trainerName.toLowerCase().includes(q) ||
@@ -132,7 +182,7 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
 
       return true;
     });
-  }, [stores, statusFilter, channelFilter, salesFilter, trainerFilter, searchQuery]);
+  }, [stores, statusFilter, channelFilter, salesFilter, trainerFilter, searchQuery, selectedMonth, sheetBaMonthMap]);
 
   // Summary counts
   const totalStores = stores.length;
@@ -156,37 +206,89 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
       }
       return s;
     });
-    setStores(updated);
-    saveMasterStoreList(updated);
-    if (onDataUpdated) onDataUpdated();
+    commitStores(updated);
     showToast('Status toko & BA berhasil diperbarui!');
   };
 
   // Quick Inline Change Sales
   const handleQuickChangeSales = (storeId: string, newSales: string) => {
     const updated = stores.map((s) => (s.id === storeId ? { ...s, salesName: newSales } : s));
-    setStores(updated);
-    saveMasterStoreList(updated);
-    if (onDataUpdated) onDataUpdated();
+    commitStores(updated);
     showToast(`Coverage toko berhasil dialihkan ke Sales: ${newSales}`);
   };
 
   // Quick Inline Change Trainer
   const handleQuickChangeTrainer = (storeId: string, newTrainer: string) => {
     const updated = stores.map((s) => (s.id === storeId ? { ...s, trainerName: newTrainer } : s));
-    setStores(updated);
-    saveMasterStoreList(updated);
-    if (onDataUpdated) onDataUpdated();
+    commitStores(updated);
     showToast(`Coverage toko berhasil dialihkan ke Trainer: ${newTrainer}`);
   };
 
-  // Quick Inline Change Channel (KA / MG)
-  const handleQuickChangeChannel = (storeId: string, newChannel: 'KA' | 'MG') => {
-    const updated = stores.map((s) => (s.id === storeId ? { ...s, channel: newChannel } : s));
-    setStores(updated);
-    saveMasterStoreList(updated);
-    if (onDataUpdated) onDataUpdated();
-    showToast(`Kanal toko berhasil diubah ke: ${newChannel}`);
+  // Start Inline Edit Nama Toko (per bulan atau master)
+  const handleStartInlineEditStoreName = (item: MasterStoreItem) => {
+    const targetMonth = selectedMonth || 'ALL';
+    const resolved = resolveMasterStoreNameForMonth(item, targetMonth, sheetBaMonthMap);
+    setInlineEditStoreId(item.id);
+    setInlineEditMonth(targetMonth);
+    setInlineEditValue(resolved.storeName);
+  };
+
+  const handleChangeInlineEditMonth = (item: MasterStoreItem, nextMonthKey: string) => {
+    const resolved = resolveMasterStoreNameForMonth(item, nextMonthKey, sheetBaMonthMap);
+    setInlineEditMonth(nextMonthKey);
+    setInlineEditValue(resolved.storeName);
+  };
+
+  const handleSaveInlineStoreName = (itemId: string) => {
+    const cleanVal = joinUniqueStoreNames(inlineEditValue.toUpperCase());
+    if (!cleanVal && inlineEditMonth === 'ALL') {
+      showToast('Nama toko master tidak boleh kosong.');
+      return;
+    }
+
+    const updated = stores.map((s) => {
+      if (s.id !== itemId) return s;
+      if (inlineEditMonth === 'ALL') {
+        return {
+          ...s,
+          storeName: cleanVal,
+        };
+      }
+      const nextMonthly: Record<string, string> = { ...(s.monthlyStoreNames || {}) };
+      if (cleanVal) {
+        nextMonthly[inlineEditMonth] = cleanVal;
+      } else {
+        delete nextMonthly[inlineEditMonth];
+      }
+      return {
+        ...s,
+        monthlyStoreNames: Object.keys(nextMonthly).length > 0 ? nextMonthly : undefined,
+      };
+    });
+
+    commitStores(updated);
+    const mLabel =
+      inlineEditMonth === 'ALL'
+        ? 'Master (Semua Bulan)'
+        : MONTH_OPTIONS_2026.find((m) => m.key === inlineEditMonth)?.label || inlineEditMonth;
+    setInlineEditStoreId(null);
+    showToast(`Nama toko untuk ${mLabel} berhasil diperbarui!`);
+  };
+
+  const handleResetInlineMonthStoreName = (itemId: string, monthKey: string) => {
+    const updated = stores.map((s) => {
+      if (s.id !== itemId || !s.monthlyStoreNames) return s;
+      const nextMonthly = { ...s.monthlyStoreNames };
+      delete nextMonthly[monthKey];
+      return {
+        ...s,
+        monthlyStoreNames: Object.keys(nextMonthly).length > 0 ? nextMonthly : undefined,
+      };
+    });
+    commitStores(updated);
+    if (inlineEditStoreId === itemId) setInlineEditStoreId(null);
+    const mLabel = MONTH_OPTIONS_2026.find((m) => m.key === monthKey)?.label || monthKey;
+    showToast(`Edit nama toko bulan ${mLabel} dikembalikan ke data Sheet/Master.`);
   };
 
   // Batch Select Handlers
@@ -209,9 +311,7 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
     const updated = stores.map((s) =>
       selectedIds.includes(s.id) ? { ...s, salesName: batchSales } : s
     );
-    setStores(updated);
-    saveMasterStoreList(updated);
-    if (onDataUpdated) onDataUpdated();
+    commitStores(updated);
     showToast(`${selectedIds.length} toko berhasil dipindahkan ke Sales ${batchSales}!`);
     setSelectedIds([]);
   };
@@ -221,9 +321,7 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
     const updated = stores.map((s) =>
       selectedIds.includes(s.id) ? { ...s, trainerName: batchTrainer } : s
     );
-    setStores(updated);
-    saveMasterStoreList(updated);
-    if (onDataUpdated) onDataUpdated();
+    commitStores(updated);
     showToast(`${selectedIds.length} toko berhasil dialihkan ke Trainer ${batchTrainer}!`);
     setSelectedIds([]);
   };
@@ -243,16 +341,17 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
           }
         : s
     );
-    setStores(updated);
-    saveMasterStoreList(updated);
-    if (onDataUpdated) onDataUpdated();
+    commitStores(updated);
     showToast(`${selectedIds.length} toko diubah statusnya menjadi ${hasBa ? 'Toko BA' : 'Non-BA'}!`);
     setSelectedIds([]);
   };
 
   // Open edit modal
   const handleOpenEdit = (store: MasterStoreItem) => {
-    setEditingStore({ ...store });
+    setEditingStore({
+      ...store,
+      monthlyStoreNames: store.monthlyStoreNames ? { ...store.monthlyStoreNames } : undefined,
+    });
   };
 
   // Save edited store
@@ -260,21 +359,31 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
     e.preventDefault();
     if (!editingStore) return;
 
-    const updated = stores.map((s) => (s.id === editingStore.id ? editingStore : s));
-    setStores(updated);
-    saveMasterStoreList(updated);
+    const cleanedMonthly: Record<string, string> = {};
+    if (editingStore.monthlyStoreNames) {
+      Object.entries(editingStore.monthlyStoreNames).forEach(([mk, val]) => {
+        const clean = joinUniqueStoreNames(val.toUpperCase());
+        if (clean) cleanedMonthly[mk] = clean;
+      });
+    }
+
+    const sanitizedEditing: MasterStoreItem = {
+      ...editingStore,
+      storeName: joinUniqueStoreNames(editingStore.storeName.toUpperCase()) || editingStore.storeName.toUpperCase(),
+      monthlyStoreNames: Object.keys(cleanedMonthly).length > 0 ? cleanedMonthly : undefined,
+    };
+
+    const updated = stores.map((s) => (s.id === sanitizedEditing.id ? sanitizedEditing : s));
+    commitStores(updated);
     setEditingStore(null);
-    if (onDataUpdated) onDataUpdated();
-    showToast(`Data toko "${editingStore.storeName}" berhasil disimpan ke sistem!`);
+    showToast(`Data toko "${sanitizedEditing.storeName}" berhasil disimpan ke sistem!`);
   };
 
   // Delete store
   const handleDeleteStore = (id: string, name: string) => {
     if (window.confirm(`Yakin ingin menghapus toko "${name}" dari master data? Semua penugasan toko ini akan dihapus.`)) {
       const updated = stores.filter((s) => s.id !== id);
-      setStores(updated);
-      saveMasterStoreList(updated);
-      if (onDataUpdated) onDataUpdated();
+      commitStores(updated);
       showToast(`Toko "${name}" berhasil dihapus dari master data.`);
     }
   };
@@ -283,11 +392,12 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
   const handleResetToSheet = () => {
     if (
       window.confirm(
-        'Reset semua master toko dan BA kembali mengikuti data transaksi Google Sheet asli? Perubahan manual akan ditimpa.'
+        'Reset semua master toko dan BA kembali mengikuti data transaksi Google Sheet asli? Perubahan manual (termasuk edit nama toko per bulan) akan ditimpa.'
       )
     ) {
       const fresh = resetMasterStoreListToSheet(records);
       setStores(fresh);
+      notifyTargetsUpdated({ category: 'master_store' });
       if (onDataUpdated) onDataUpdated();
       showToast('Master data berhasil di-reset sesuai data Google Sheet!');
     }
@@ -314,9 +424,7 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
       notes: newNotes.trim(),
     };
 
-    const updated = [newStore, ...stores];
-    setStores(updated);
-    saveMasterStoreList(updated);
+    commitStores([newStore, ...stores]);
     setIsAddModalOpen(false);
 
     // Reset Form
@@ -325,7 +433,6 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
     setNewBaNumber('');
     setNewNotes('');
 
-    if (onDataUpdated) onDataUpdated();
     showToast(`Toko baru "${newStore.storeName}" berhasil ditambahkan & tersinkron!`);
   };
 
@@ -334,7 +441,9 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
     const wb = XLSX.utils.book_new();
     const headers = [
       'No',
-      'Nama Toko',
+      activeMonthMeta ? `Nama Toko (${activeMonthMeta.label})` : 'Nama Toko (Gabungan Master)',
+      'Nama Toko (Master Gabungan)',
+      'Edit Nama Toko Per Bulan',
       'Status Toko',
       'Nama BA',
       'Nomor BA',
@@ -347,20 +456,30 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
       'Keterangan',
     ];
 
-    const rows = filteredStores.map((s, idx) => [
-      idx + 1,
-      s.storeName,
-      s.hasBa ? 'Toko dengan BA' : 'Toko Non-BA',
-      s.baName,
-      s.baNumber || '-',
-      s.salesName,
-      s.trainerName,
-      s.coverArea,
-      s.region,
-      s.spvName,
-      s.channel === 'KA' ? 'KA (Key Account / Modern)' : 'MG (Market Group / General)',
-      s.notes || '-',
-    ]);
+    const rows = filteredStores.map((s, idx) => {
+      const resolved = resolveMasterStoreNameForMonth(s, selectedMonth, sheetBaMonthMap);
+      const monthlySummary = s.monthlyStoreNames
+        ? MONTH_OPTIONS_2026.filter((m) => s.monthlyStoreNames?.[m.key])
+            .map((m) => `${m.shortLabel}: ${s.monthlyStoreNames![m.key]}`)
+            .join(' | ')
+        : '-';
+      return [
+        idx + 1,
+        resolved.storeName,
+        s.storeName,
+        monthlySummary || '-',
+        s.hasBa ? 'Toko dengan BA' : 'Toko Non-BA',
+        s.baName,
+        s.baNumber || '-',
+        s.salesName,
+        s.trainerName,
+        s.coverArea,
+        s.region,
+        s.spvName,
+        s.channel === 'KA' ? 'KA (Key Account / Modern)' : 'MG (Market Group / General)',
+        s.notes || '-',
+      ];
+    });
 
     const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
     XLSX.utils.book_append_sheet(wb, ws, 'Master Toko & Coverage');
@@ -537,6 +656,27 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              {/* Filter Bulan (untuk melihat & edit Nama Toko Per Bulan) */}
+              <div className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 rounded-xl px-2.5 py-1.5 text-xs">
+                <Calendar className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                <span className="font-semibold text-indigo-800">Bulan:</span>
+                <select
+                  value={selectedMonth}
+                  onChange={(e) => {
+                    setSelectedMonth(e.target.value);
+                    setInlineEditStoreId(null);
+                  }}
+                  className="bg-transparent font-bold text-indigo-950 outline-none cursor-pointer"
+                >
+                  <option value="ALL">Semua Bulan (Gabungan)</option>
+                  {MONTH_OPTIONS_2026.map((m) => (
+                    <option key={m.key} value={m.key}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               {/* Status Gerai Filter */}
               <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl text-xs font-bold">
                 <button
@@ -570,7 +710,7 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
                 <span className="font-semibold text-slate-500">Tipe Toko:</span>
                 <select
                   value={channelFilter}
-                  onChange={(e) => setChannelFilter(e.target.value as any)}
+                  onChange={(e) => setChannelFilter(e.target.value as 'all' | 'KA' | 'MG')}
                   className="bg-transparent font-bold text-slate-800 outline-none cursor-pointer"
                 >
                   <option value="all">Semua Tipe</option>
@@ -693,12 +833,19 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
           <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-6 shadow-xs">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-100 gap-2">
               <div>
-                <h3 className="text-sm sm:text-base font-extrabold text-slate-900 flex items-center gap-2">
+                <h3 className="text-sm sm:text-base font-extrabold text-slate-900 flex flex-wrap items-center gap-2">
                   <Store className="w-4 h-4 text-emerald-600" />
-                  <span>Daftar Toko &amp; Tim Coverage Binaan WIDODO ({filteredStores.length} Gerai)</span>
+                  <span>
+                    Daftar Toko &amp; Tim Coverage Binaan WIDODO ({filteredStores.length} Gerai)
+                  </span>
+                  {activeMonthMeta && (
+                    <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-800 border border-indigo-200">
+                      Periode: {activeMonthMeta.label}
+                    </span>
+                  )}
                 </h3>
                 <span className="text-xs text-slate-500 font-medium">
-                  Ubah Sales, Trainer, Status BA, atau Coverage langsung dari dropdown pada tabel ini. Cukup revisi satu tempat, semua modul tersinkron otomatis.
+                  Toko berbeda dengan Nama BA yang sama otomatis digabung menjadi satu baris. Pilih bulan di atas atau klik ikon pensil pada Nama Toko untuk edit Nama Toko per bulan.
                 </span>
               </div>
               <div className="flex items-center gap-2">
@@ -734,7 +881,9 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
                       />
                     </th>
                     <th className="py-3 px-2 w-10">No</th>
-                    <th className="py-3 px-3">Nama Toko</th>
+                    <th className="py-3 px-3 min-w-[260px]">
+                      Nama Toko {activeMonthMeta ? `(${activeMonthMeta.shortLabel})` : '(Gabungan BA Sama)'}
+                    </th>
                     <th className="py-3 px-3">Status Toko</th>
                     <th className="py-3 px-3">Nama BA &amp; No BA</th>
                     <th className="py-3 px-3">Sales Rep (Ganti Cepat)</th>
@@ -751,7 +900,15 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
                       </td>
                     </tr>
                   ) : (
-                    filteredStores.map((item, idx) => (
+                    filteredStores.map((item, idx) => {
+                      const resolved = resolveMasterStoreNameForMonth(item, selectedMonth, sheetBaMonthMap);
+                      const storeTokens = splitMasterStoreNames(resolved.storeName);
+                      const editedMonthsCount = item.monthlyStoreNames
+                        ? Object.keys(item.monthlyStoreNames).length
+                        : 0;
+                      const isInlineEditing = inlineEditStoreId === item.id;
+
+                      return (
                       <tr
                         key={item.id}
                         className={`hover:bg-slate-50/80 transition-colors ${
@@ -767,12 +924,117 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
                           />
                         </td>
                         <td className="py-3 px-2 font-mono text-slate-400">{idx + 1}</td>
-                        <td className="py-3 px-3">
-                          <div className="font-extrabold text-slate-900">{item.storeName}</div>
-                          {item.isCustom && (
-                            <span className="text-[9px] text-emerald-700 font-bold bg-emerald-50 px-1.5 py-0.2 rounded border border-emerald-200 inline-block mt-0.5">
-                              Toko Manual
-                            </span>
+                        <td className="py-3 px-3 max-w-[340px]">
+                          {isInlineEditing ? (
+                            <div className="p-2 rounded-xl bg-indigo-50/80 border border-indigo-200 space-y-1.5">
+                              <div className="flex items-center justify-between gap-1.5">
+                                <span className="text-[10px] font-bold text-indigo-800">Edit Bulan:</span>
+                                <select
+                                  value={inlineEditMonth}
+                                  onChange={(e) => handleChangeInlineEditMonth(item, e.target.value)}
+                                  className="text-[10px] font-bold bg-white border border-indigo-200 rounded-md px-1.5 py-0.5 text-indigo-950 outline-none cursor-pointer"
+                                >
+                                  <option value="ALL">Master (Semua Bulan)</option>
+                                  {MONTH_OPTIONS_2026.map((m) => (
+                                    <option key={m.key} value={m.key}>
+                                      {m.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <input
+                                type="text"
+                                value={inlineEditValue}
+                                onChange={(e) => setInlineEditValue(e.target.value.toUpperCase())}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    handleSaveInlineStoreName(item.id);
+                                  } else if (e.key === 'Escape') {
+                                    setInlineEditStoreId(null);
+                                  }
+                                }}
+                                placeholder="Pisahkan dengan koma jika >1 toko..."
+                                className="w-full px-2 py-1 rounded-lg border border-indigo-300 bg-white text-xs font-bold text-slate-900 uppercase focus:outline-none focus:border-indigo-500"
+                                autoFocus
+                              />
+                              <div className="flex items-center justify-between gap-1">
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSaveInlineStoreName(item.id)}
+                                    className="px-2 py-0.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold flex items-center gap-0.5 cursor-pointer"
+                                  >
+                                    <Check className="w-3 h-3" />
+                                    <span>Simpan</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setInlineEditStoreId(null)}
+                                    className="px-2 py-0.5 rounded-md bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold cursor-pointer"
+                                  >
+                                    Batal
+                                  </button>
+                                </div>
+                                {inlineEditMonth !== 'ALL' && item.monthlyStoreNames?.[inlineEditMonth] && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleResetInlineMonthStoreName(item.id, inlineEditMonth)}
+                                    className="text-[10px] font-bold text-rose-600 hover:text-rose-800 cursor-pointer"
+                                    title="Kembalikan ke default Sheet/Master"
+                                  >
+                                    Reset
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="group flex items-start justify-between gap-2">
+                              <div>
+                                <div className="font-extrabold text-slate-900 leading-snug break-words">
+                                  {resolved.storeName}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-1 mt-1">
+                                  {storeTokens.length > 1 && (
+                                    <span className="text-[9px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 px-1.5 py-0.2 rounded">
+                                      {storeTokens.length} Toko Gabungan
+                                    </span>
+                                  )}
+                                  {resolved.source === 'manual_month' && activeMonthMeta && (
+                                    <span className="text-[9px] font-bold bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.2 rounded">
+                                      Edit {activeMonthMeta.shortLabel}
+                                    </span>
+                                  )}
+                                  {resolved.source === 'sheet_month' && activeMonthMeta && (
+                                    <span className="text-[9px] font-bold bg-sky-50 text-sky-700 border border-sky-200 px-1.5 py-0.2 rounded">
+                                      Sheet {activeMonthMeta.shortLabel}
+                                    </span>
+                                  )}
+                                  {selectedMonth === 'ALL' && editedMonthsCount > 0 && (
+                                    <span className="text-[9px] font-bold bg-amber-50 text-amber-700 border border-amber-200 px-1.5 py-0.2 rounded">
+                                      {editedMonthsCount} Bln Diedit
+                                    </span>
+                                  )}
+                                  {item.isCustom && (
+                                    <span className="text-[9px] text-emerald-700 font-bold bg-emerald-50 px-1.5 py-0.2 rounded border border-emerald-200">
+                                      Toko Manual
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleStartInlineEditStoreName(item)}
+                                className="p-1 rounded-lg text-slate-400 hover:text-indigo-700 hover:bg-indigo-50 border border-transparent hover:border-indigo-200 shrink-0 cursor-pointer transition-colors"
+                                title={
+                                  activeMonthMeta
+                                    ? `Edit Nama Toko untuk bulan ${activeMonthMeta.label}`
+                                    : 'Edit Nama Toko (Master atau Per Bulan)'
+                                }
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           )}
                         </td>
                         <td className="py-3 px-3">
@@ -854,7 +1116,8 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
                           </div>
                         </td>
                       </tr>
-                    ))
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -1270,10 +1533,10 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
         </div>
       )}
 
-      {/* Modal 2: Edit Detail Toko, BA, Sales & Trainer */}
+      {/* Modal 2: Edit Detail Toko, Nama Toko Per Bulan, BA, Sales & Trainer */}
       {editingStore && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150 my-6">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150 my-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div>
                 <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
@@ -1281,7 +1544,7 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
                   Edit Master Toko &amp; Penugasan
                 </h3>
                 <span className="text-xs text-slate-500">
-                  Ubah data nama toko, BA, sales, trainer, kanal atau status toko.
+                  Ubah nama toko master, nama toko khusus per bulan, BA, sales, trainer, atau kanal.
                 </span>
               </div>
               <button
@@ -1293,9 +1556,11 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
             </div>
 
             <form onSubmit={handleSaveEdit} className="space-y-4 mt-4 text-xs">
-              {/* Nama Toko */}
+              {/* Nama Toko Master / Gabungan */}
               <div>
-                <label className="font-bold text-slate-700 block mb-1">Nama Toko / Gerai *</label>
+                <label className="font-bold text-slate-700 block mb-1">
+                  Nama Toko / Gerai (Master / Gabungan) *
+                </label>
                 <input
                   type="text"
                   value={editingStore.storeName}
@@ -1303,6 +1568,100 @@ export const MasterStoreBaSettings: React.FC<MasterStoreBaSettingsProps> = ({
                   className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white font-bold text-xs focus:border-indigo-500 focus:outline-none uppercase"
                   required
                 />
+                <span className="text-[10px] text-slate-400 mt-0.5 block">
+                  Jika BA ini memegang lebih dari 1 toko, pisahkan dengan tanda koma (contoh: TOKO A, TOKO B).
+                </span>
+              </div>
+
+              {/* Edit Nama Toko Per Bulan (Jan - Des 2026) */}
+              <div className="p-3.5 bg-indigo-50/50 rounded-xl border border-indigo-200 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="font-bold text-indigo-950 text-xs flex items-center gap-1.5">
+                      <Calendar className="w-3.5 h-3.5 text-indigo-600" />
+                      Edit Nama Toko Per Bulan (Januari – Desember 2026)
+                    </span>
+                    <span className="text-[10px] text-indigo-700/80 block">
+                      Kosongkan jika ingin mengikuti data Google Sheet per bulan / Master di atas.
+                    </span>
+                  </div>
+                  {editingStore.monthlyStoreNames && Object.keys(editingStore.monthlyStoreNames).length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setEditingStore({ ...editingStore, monthlyStoreNames: undefined })}
+                      className="text-[10px] font-bold px-2 py-1 rounded-lg bg-white text-rose-600 border border-rose-200 hover:bg-rose-50 cursor-pointer"
+                    >
+                      Reset Semua Bulan
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                  {MONTH_OPTIONS_2026.map((m) => {
+                    const sheetHint =
+                      editingStore.hasBa && !isPlaceholderBaName(editingStore.baName, editingStore.storeName)
+                        ? sheetBaMonthMap.get(`${m.key}__${normalizeBaGroupKey(editingStore.baName)}`)
+                        : undefined;
+                    const monthVal = editingStore.monthlyStoreNames?.[m.key] ?? '';
+                    const isActiveEdit = monthVal.trim().length > 0;
+                    return (
+                      <div
+                        key={m.key}
+                        className={`p-2 rounded-lg border ${
+                          isActiveEdit
+                            ? 'bg-amber-50/70 border-amber-300'
+                            : 'bg-white border-indigo-100'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1 mb-1">
+                          <label className="text-[10px] font-bold text-slate-700">
+                            {m.bulanName}
+                          </label>
+                          {isActiveEdit ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = { ...(editingStore.monthlyStoreNames || {}) };
+                                delete next[m.key];
+                                setEditingStore({
+                                  ...editingStore,
+                                  monthlyStoreNames: Object.keys(next).length > 0 ? next : undefined,
+                                });
+                              }}
+                              className="text-[9px] font-bold text-rose-600 hover:text-rose-800 cursor-pointer"
+                              title="Hapus edit bulan ini"
+                            >
+                              Reset
+                            </button>
+                          ) : sheetHint ? (
+                            <span className="text-[9px] font-semibold text-sky-700 truncate max-w-[110px]" title={`Sheet: ${sheetHint}`}>
+                              Sheet: {sheetHint}
+                            </span>
+                          ) : null}
+                        </div>
+                        <input
+                          type="text"
+                          value={monthVal}
+                          onChange={(e) => {
+                            const val = e.target.value.toUpperCase();
+                            const next = { ...(editingStore.monthlyStoreNames || {}) };
+                            if (val.trim()) {
+                              next[m.key] = val;
+                            } else {
+                              delete next[m.key];
+                            }
+                            setEditingStore({
+                              ...editingStore,
+                              monthlyStoreNames: Object.keys(next).length > 0 ? next : undefined,
+                            });
+                          }}
+                          placeholder={sheetHint || editingStore.storeName}
+                          className="w-full px-2 py-1 rounded-md border border-slate-200 bg-white text-[11px] font-bold text-slate-900 uppercase focus:border-indigo-500 focus:outline-none"
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* Channel & SPV */}

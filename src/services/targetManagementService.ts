@@ -5,9 +5,14 @@ import {
   SalesTargetItem,
   BaTargetItem,
   TrainerTargetItem,
+  StoreSellInTargetItem,
+  StoreSellInFormulaMode,
+  StoreSellInMatrixResult,
+  QuarterPeriodKey,
 } from '../types/dashboard';
 import { calculateSalesSalary } from '../utils/costCalculations';
 import { isFocusProduct, getTrainerForRecord } from '../utils/analytics';
+import { normalizeStoreAlnum } from '../utils/weeklyBaRegistry';
 import {
   loadFocusOverrides,
   saveFocusOverrides,
@@ -34,6 +39,9 @@ export const STORAGE_KEY_BA_LAVOJOY = 'salespro_custom_ba_lavojoy_targets';
 export const STORAGE_KEY_TRAINER_TARGETS = 'salespro_custom_trainer_targets';
 export const STORAGE_KEY_MONTHLY_TARGETS = 'salespro_custom_monthly_targets_v2';
 export const STORAGE_KEY_CUSTOM_BA_PROFILES = 'salespro_custom_ba_profiles_v1';
+export const STORAGE_KEY_STORE_SELLIN_TARGETS = 'salespro_custom_store_sellin_targets_v1';
+export const STORAGE_KEY_STORE_SELLIN_POOL = 'salespro_custom_store_sellin_pool_v1';
+export const STORAGE_KEY_STORE_SELLIN_MODE = 'salespro_store_sellin_formula_mode_v1';
 
 export const DEFAULT_AREA_TARGET = 300000000; // 300 Jt default per area (Sell In)
 export const DEFAULT_AREA_SELLOUT_TARGET = 280000000; // 280 Jt default per area (Sell Out)
@@ -244,6 +252,8 @@ export interface MonthlyTargetBucket {
   baLavojoy?: Record<string, number>;
   baFocus?: Record<string, number>;
   trainer?: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; baSupervisedCount?: number; notes?: string }>;
+  storeSellIn?: Record<string, number>;
+  storeSellInPool?: number;
 }
 
 // Structure of monthly targets
@@ -429,6 +439,7 @@ export function saveSalesTargets(targets: Record<string, number>, monthKey?: str
   } else {
     writeGlobalMap(STORAGE_KEY_SALES_TARGETS, targets);
   }
+  clearBaQuarterlySellInOverridesForMonths(norm !== 'ALL' ? [norm] : undefined);
   notifyTargetsUpdated({ monthKey: norm, category: 'sales' });
 }
 
@@ -652,6 +663,9 @@ export function setSingleTargetOverride(
   if (!monthly[norm]) monthly[norm] = {};
   if (!monthly[norm][category]) monthly[norm][category] = {};
   monthly[norm][category]![entityKey] = value;
+  if (category === 'sales') {
+    clearBaQuarterlySellInOverridesForMonths(norm !== 'ALL' ? [norm] : undefined);
+  }
   saveMonthlyTargets(monthly);
   notifyTargetsUpdated({ monthKey: norm, category });
 }
@@ -687,6 +701,156 @@ function upsertCaseInsensitiveKey(map: Record<string, number>, targetKey: string
     }
   });
   map[targetKey] = value;
+}
+
+/**
+ * Sets a single Sales person's 1-month targets (Sell In & Sell Out)
+ * identically across the global baseline and all 12 months (Jan - Des 2026).
+ */
+export function applySingleSalesTargetToAllMonths(
+  salesName: string,
+  values: { targetSellIn?: number; targetSellOut?: number }
+): void {
+  const globalIn = readGlobalMap(STORAGE_KEY_SALES_TARGETS);
+  const globalOut = readGlobalMap(STORAGE_KEY_SALES_SELLOUT_TARGETS);
+  const monthly = loadMonthlyTargets();
+
+  if (values.targetSellIn !== undefined) {
+    upsertCaseInsensitiveKey(globalIn, salesName, values.targetSellIn);
+  }
+  if (values.targetSellOut !== undefined) {
+    upsertCaseInsensitiveKey(globalOut, salesName, values.targetSellOut);
+  }
+
+  MONTH_OPTIONS_2026.forEach((m) => {
+    if (!monthly[m.key]) monthly[m.key] = {};
+    if (values.targetSellIn !== undefined) {
+      if (!monthly[m.key].sales) monthly[m.key].sales = {};
+      upsertCaseInsensitiveKey(monthly[m.key].sales!, salesName, values.targetSellIn);
+    }
+    if (values.targetSellOut !== undefined) {
+      if (!monthly[m.key].salesSellOut) monthly[m.key].salesSellOut = {};
+      upsertCaseInsensitiveKey(monthly[m.key].salesSellOut!, salesName, values.targetSellOut);
+    }
+  });
+
+  writeGlobalMap(STORAGE_KEY_SALES_TARGETS, globalIn);
+  writeGlobalMap(STORAGE_KEY_SALES_SELLOUT_TARGETS, globalOut);
+  saveMonthlyTargets(monthly);
+  if (values.targetSellIn !== undefined) {
+    clearBaQuarterlySellInOverridesForMonths();
+  }
+  notifyTargetsUpdated({ monthKey: 'ALL', category: 'sales_all_months' });
+}
+
+/**
+ * Copies ONLY Sales targets (Sell In & Sell Out) from one source month
+ * into all 12 months (Jan - Des 2026) and the global baseline.
+ */
+export function copySalesTargetsToAllMonths(
+  sourceMonthKey: string,
+  records: TransactionRecord[] = []
+): { salesCount: number; monthCount: number } {
+  const srcNorm = normalizeMonthKey(sourceMonthKey);
+  const srcMatrix = aggregateTargetMatrix(records, srcNorm, { singleMonthBaselineOnly: true });
+
+  const salesInMap: Record<string, number> = {};
+  const salesOutMap: Record<string, number> = {};
+
+  srcMatrix.sales.forEach((sl) => {
+    salesInMap[sl.salesName] = sl.targetSellIn;
+    salesOutMap[sl.salesName] = sl.targetSellOut ?? DEFAULT_SALES_SELLOUT_TARGET;
+  });
+
+  const globalIn = readGlobalMap(STORAGE_KEY_SALES_TARGETS);
+  const globalOut = readGlobalMap(STORAGE_KEY_SALES_SELLOUT_TARGETS);
+  Object.entries(salesInMap).forEach(([k, v]) => upsertCaseInsensitiveKey(globalIn, k, v));
+  Object.entries(salesOutMap).forEach(([k, v]) => upsertCaseInsensitiveKey(globalOut, k, v));
+  writeGlobalMap(STORAGE_KEY_SALES_TARGETS, globalIn);
+  writeGlobalMap(STORAGE_KEY_SALES_SELLOUT_TARGETS, globalOut);
+
+  const monthly = loadMonthlyTargets();
+  MONTH_OPTIONS_2026.forEach((m) => {
+    if (!monthly[m.key]) monthly[m.key] = {};
+    monthly[m.key].sales = { ...(monthly[m.key].sales || {}), ...salesInMap };
+    monthly[m.key].salesSellOut = { ...(monthly[m.key].salesSellOut || {}), ...salesOutMap };
+  });
+  saveMonthlyTargets(monthly);
+  clearBaQuarterlySellInOverridesForMonths();
+  notifyTargetsUpdated({ monthKey: 'ALL', category: 'sales_all_months' });
+
+  return {
+    salesCount: srcMatrix.sales.length,
+    monthCount: MONTH_OPTIONS_2026.length,
+  };
+}
+
+/**
+ * Applies a list of per-Sales 1-month targets (Sell In &/or Sell Out) either to currentMonthKey
+ * or identically across all 12 months (Jan - Des 2026) + global baseline.
+ */
+export function applyBulkSalesTargets(
+  salesRows: Array<{ salesName: string; targetSellIn?: number; targetSellOut?: number }>,
+  scope: 'current' | 'ALL_MONTHS',
+  currentMonthKey?: string
+): void {
+  if (scope === 'current') {
+    const norm = normalizeMonthKey(currentMonthKey);
+    const inMap = loadSalesTargets(norm);
+    const outMap = loadSalesSellOutTargets(norm);
+    let hasIn = false;
+    let hasOut = false;
+
+    salesRows.forEach((row) => {
+      if (row.targetSellIn !== undefined) {
+        upsertCaseInsensitiveKey(inMap, row.salesName, row.targetSellIn);
+        hasIn = true;
+      }
+      if (row.targetSellOut !== undefined) {
+        upsertCaseInsensitiveKey(outMap, row.salesName, row.targetSellOut);
+        hasOut = true;
+      }
+    });
+
+    if (hasIn) saveSalesTargets(inMap, norm);
+    if (hasOut) saveSalesSellOutTargets(outMap, norm);
+    return;
+  }
+
+  const globalIn = readGlobalMap(STORAGE_KEY_SALES_TARGETS);
+  const globalOut = readGlobalMap(STORAGE_KEY_SALES_SELLOUT_TARGETS);
+  const monthly = loadMonthlyTargets();
+
+  salesRows.forEach((row) => {
+    if (row.targetSellIn !== undefined) {
+      upsertCaseInsensitiveKey(globalIn, row.salesName, row.targetSellIn);
+    }
+    if (row.targetSellOut !== undefined) {
+      upsertCaseInsensitiveKey(globalOut, row.salesName, row.targetSellOut);
+    }
+  });
+
+  MONTH_OPTIONS_2026.forEach((m) => {
+    if (!monthly[m.key]) monthly[m.key] = {};
+    salesRows.forEach((row) => {
+      if (row.targetSellIn !== undefined) {
+        if (!monthly[m.key].sales) monthly[m.key].sales = {};
+        upsertCaseInsensitiveKey(monthly[m.key].sales!, row.salesName, row.targetSellIn);
+      }
+      if (row.targetSellOut !== undefined) {
+        if (!monthly[m.key].salesSellOut) monthly[m.key].salesSellOut = {};
+        upsertCaseInsensitiveKey(monthly[m.key].salesSellOut!, row.salesName, row.targetSellOut);
+      }
+    });
+  });
+
+  writeGlobalMap(STORAGE_KEY_SALES_TARGETS, globalIn);
+  writeGlobalMap(STORAGE_KEY_SALES_SELLOUT_TARGETS, globalOut);
+  saveMonthlyTargets(monthly);
+  if (salesRows.some((row) => row.targetSellIn !== undefined)) {
+    clearBaQuarterlySellInOverridesForMonths();
+  }
+  notifyTargetsUpdated({ monthKey: 'ALL', category: 'sales_all_months' });
 }
 
 /**
@@ -926,6 +1090,11 @@ export function copyMonthTargets(
   const monthly = loadMonthlyTargets();
   let updatedCount = 0;
 
+  const existingStoreSellIn = monthly[srcNorm]?.storeSellIn
+    ? { ...monthly[srcNorm].storeSellIn }
+    : undefined;
+  const existingStoreSellInPool = monthly[srcNorm]?.storeSellInPool;
+
   targetMonthKeys.forEach((dest) => {
     const destNorm = normalizeMonthKey(dest);
     if (destNorm === 'ALL') {
@@ -938,6 +1107,12 @@ export function copyMonthTargets(
       writeGlobalMap(STORAGE_KEY_BA_NON_LAVOJOY, baNonMap);
       writeGlobalMap(STORAGE_KEY_BA_LAVOJOY, baLavMap);
       localStorage.setItem(STORAGE_KEY_TRAINER_TARGETS, JSON.stringify(trainerMap));
+      if (existingStoreSellIn) {
+        writeGlobalMap(STORAGE_KEY_STORE_SELLIN_TARGETS, existingStoreSellIn);
+      }
+      if (existingStoreSellInPool !== undefined) {
+        localStorage.setItem(STORAGE_KEY_STORE_SELLIN_POOL, String(existingStoreSellInPool));
+      }
       const ov = loadFocusOverrides();
       Object.entries(baFocusMap).forEach(([k, pcs]) => {
         if (!ov[k]) ov[k] = { storeName: k };
@@ -957,12 +1132,15 @@ export function copyMonthTargets(
         baLavojoy: { ...baLavMap },
         baFocus: { ...baFocusMap },
         trainer: JSON.parse(JSON.stringify(trainerMap)),
+        ...(existingStoreSellIn ? { storeSellIn: { ...existingStoreSellIn } } : {}),
+        ...(existingStoreSellInPool !== undefined ? { storeSellInPool: existingStoreSellInPool } : {}),
       };
       updatedCount++;
     }
   });
 
   saveMonthlyTargets(monthly);
+  clearBaQuarterlySellInOverridesForMonths(targetMonthKeys);
   notifyTargetsUpdated({ category: 'copy_month' });
   return updatedCount;
 }
@@ -981,11 +1159,16 @@ export function resetMonthTargets(monthKey?: string): void {
     localStorage.removeItem(STORAGE_KEY_TRAINER_TARGETS);
     localStorage.removeItem(STORAGE_KEY_MONTHLY_TARGETS);
     localStorage.removeItem(STORAGE_KEY_CUSTOM_BA_PROFILES);
+    localStorage.removeItem(STORAGE_KEY_STORE_SELLIN_TARGETS);
+    localStorage.removeItem(STORAGE_KEY_STORE_SELLIN_POOL);
+    localStorage.removeItem(STORAGE_KEY_STORE_SELLIN_MODE);
     localStorage.removeItem('salespro_ba_focus_overrides_v2');
+    clearBaQuarterlySellInOverridesForMonths();
   } else {
     const monthly = loadMonthlyTargets();
     delete monthly[norm];
     saveMonthlyTargets(monthly);
+    clearBaQuarterlySellInOverridesForMonths([norm]);
   }
   notifyTargetsUpdated({ monthKey: norm, category: 'reset' });
 }
@@ -1010,7 +1193,9 @@ export function getMonthCustomizationSummary(): Record<string, number> {
       Object.keys(bucket.baNonLavojoy || {}).length +
       Object.keys(bucket.baLavojoy || {}).length +
       Object.keys(bucket.baFocus || {}).length +
-      Object.keys(bucket.trainer || {}).length;
+      Object.keys(bucket.trainer || {}).length +
+      Object.keys(bucket.storeSellIn || {}).length +
+      (bucket.storeSellInPool !== undefined ? 1 : 0);
   });
 
   counts['ALL'] =
@@ -1022,7 +1207,9 @@ export function getMonthCustomizationSummary(): Record<string, number> {
     Object.keys(readGlobalMap(STORAGE_KEY_SALES_SELLOUT_TARGETS)).length +
     Object.keys(readGlobalMap(STORAGE_KEY_BA_NON_LAVOJOY)).length +
     Object.keys(readGlobalMap(STORAGE_KEY_BA_LAVOJOY)).length +
-    Object.keys(loadTrainerTargets('ALL')).length;
+    Object.keys(loadTrainerTargets('ALL')).length +
+    Object.keys(readGlobalMap(STORAGE_KEY_STORE_SELLIN_TARGETS)).length +
+    (readGlobalStoreSellInPool() !== undefined ? 1 : 0);
 
   return counts;
 }
@@ -1044,7 +1231,9 @@ export function getConfiguredMonthKeys(): string[] {
         Object.keys(bucket.baNonLavojoy || {}).length > 0 ||
         Object.keys(bucket.baLavojoy || {}).length > 0 ||
         Object.keys(bucket.baFocus || {}).length > 0 ||
-        Object.keys(bucket.trainer || {}).length > 0
+        Object.keys(bucket.trainer || {}).length > 0 ||
+        Object.keys(bucket.storeSellIn || {}).length > 0 ||
+        bucket.storeSellInPool !== undefined
       );
     });
 }
@@ -1075,9 +1264,28 @@ function isGenericBaPlaceholder(normKey: string): boolean {
     normKey === 'STANDBY' ||
     normKey === 'BA STANDBY' ||
     normKey === 'BA COUNTER' ||
+    normKey === 'BA TOKO' ||
+    normKey === 'BA GUARDIAN' ||
+    normKey === 'BA MISS' ||
+    normKey === 'BA WATSON' ||
+    normKey === 'BA SWALAYAN' ||
+    normKey === 'BA APOTEK' ||
+    normKey === 'BA WARUNG' ||
+    normKey === 'BA KIOS' ||
+    normKey === 'BA MART' ||
+    normKey === 'BA GROSIR' ||
+    normKey === 'BA KOSMETIK' ||
+    normKey === 'BA COSMETIC' ||
     normKey === 'KOSONG' ||
     normKey === 'VACANT' ||
+    normKey === 'EMPTY' ||
     normKey === 'ALL' ||
+    normKey === 'NONE' ||
+    normKey === 'NO BA' ||
+    normKey === 'TIDAK ADA' ||
+    normKey === 'TIDAK ADA BA' ||
+    normKey === 'TIDAK DIKETAHUI' ||
+    normKey === 'UNKNOWN' ||
     normKey === 'N/A' ||
     normKey === 'NULL' ||
     normKey === 'UNDEFINED'
@@ -2011,3 +2219,1126 @@ export function aggregateTargetMatrix(
     },
   };
 }
+
+// =========================================================================
+// STORE SELL IN TARGETS (AUTO KONTRIBUSI 3 BLN SEBELUMNYA x TARGET SALES + SYNC ACHIEVE QUARTAL)
+// =========================================================================
+
+const STORAGE_KEY_QUARTERLY_OVERRIDES_REF = 'salespro_quarterly_targets_v1';
+
+const QUARTER_KEY_MONTHS: Record<QuarterPeriodKey, [string, string, string]> = {
+  Q1: ['2026-01', '2026-02', '2026-03'],
+  Q2: ['2026-04', '2026-05', '2026-06'],
+  Q3: ['2026-07', '2026-08', '2026-09'],
+  Q4: ['2026-10', '2026-11', '2026-12'],
+};
+
+function monthKeyToQuarter(monthKey: string): QuarterPeriodKey | null {
+  const norm = normalizeMonthKey(monthKey);
+  if (norm === 'ALL') return null;
+  const meta = MONTH_OPTIONS_2026.find((m) => m.key === norm);
+  if (!meta) return null;
+  if (meta.monthIndex <= 2) return 'Q1';
+  if (meta.monthIndex <= 5) return 'Q2';
+  if (meta.monthIndex <= 8) return 'Q3';
+  return 'Q4';
+}
+
+export function clearBaQuarterlySellInOverridesForMonths(
+  monthKeys?: string[],
+  targetBaName?: string
+): void {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_QUARTERLY_OVERRIDES_REF);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return;
+
+    const affectedQuarters = new Set<QuarterPeriodKey>();
+    if (monthKeys && monthKeys.length > 0 && !monthKeys.some((k) => normalizeMonthKey(k) === 'ALL')) {
+      monthKeys.forEach((mk) => {
+        const q = monthKeyToQuarter(mk);
+        if (q) affectedQuarters.add(q);
+      });
+    } else {
+      (['Q1', 'Q2', 'Q3', 'Q4'] as QuarterPeriodKey[]).forEach((q) => affectedQuarters.add(q));
+    }
+
+    const targetBaUpper = targetBaName ? targetBaName.trim().toUpperCase() : null;
+    let changed = false;
+
+    Object.keys(parsed).forEach((key) => {
+      const parts = key.split('|');
+      if (parts.length < 4) return;
+      const q = parts[1] as QuarterPeriodKey;
+      const role = parts[2];
+      const entity = parts.slice(3).join('|').trim().toUpperCase();
+      if (role !== 'ba') return;
+      if (!affectedQuarters.has(q)) return;
+      if (targetBaUpper && entity !== targetBaUpper) return;
+      if (parsed[key] && parsed[key].targetSellIn !== undefined) {
+        delete parsed[key].targetSellIn;
+        if (parsed[key].targetSellOut === undefined) {
+          delete parsed[key];
+        }
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      localStorage.setItem(STORAGE_KEY_QUARTERLY_OVERRIDES_REF, JSON.stringify(parsed));
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function readGlobalStoreSellInPool(): number | undefined {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_STORE_SELLIN_POOL);
+    if (raw === null || raw === '') return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function loadStoreSellInFormulaMode(): StoreSellInFormulaMode {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_STORE_SELLIN_MODE);
+    return raw === 'per_sales' ? 'per_sales' : 'global';
+  } catch {
+    return 'global';
+  }
+}
+
+export function saveStoreSellInFormulaMode(mode: StoreSellInFormulaMode): void {
+  try {
+    localStorage.setItem(STORAGE_KEY_STORE_SELLIN_MODE, mode);
+  } catch {
+    // ignore
+  }
+  clearBaQuarterlySellInOverridesForMonths();
+  notifyTargetsUpdated({ category: 'store_sellin_mode' });
+}
+
+export function loadStoreSellInTargets(monthKey?: string): Record<string, number> {
+  const base = readGlobalMap(STORAGE_KEY_STORE_SELLIN_TARGETS);
+  const norm = normalizeMonthKey(monthKey);
+  if (norm !== 'ALL') {
+    const monthly = loadMonthlyTargets();
+    if (monthly[norm]?.storeSellIn) {
+      return { ...base, ...monthly[norm].storeSellIn };
+    }
+  }
+  return base;
+}
+
+export function saveStoreSellInTargets(targets: Record<string, number>, monthKey?: string): void {
+  const norm = normalizeMonthKey(monthKey);
+  if (norm !== 'ALL') {
+    const monthly = loadMonthlyTargets();
+    if (!monthly[norm]) monthly[norm] = {};
+    monthly[norm].storeSellIn = targets;
+    saveMonthlyTargets(monthly);
+  } else {
+    writeGlobalMap(STORAGE_KEY_STORE_SELLIN_TARGETS, targets);
+  }
+  clearBaQuarterlySellInOverridesForMonths(norm !== 'ALL' ? [norm] : undefined);
+  notifyTargetsUpdated({ monthKey: norm, category: 'store_sellin' });
+}
+
+export function loadStoreSellInPool(monthKey?: string): number | undefined {
+  const norm = normalizeMonthKey(monthKey);
+  if (norm !== 'ALL') {
+    const monthly = loadMonthlyTargets();
+    if (monthly[norm]?.storeSellInPool !== undefined) {
+      return monthly[norm].storeSellInPool;
+    }
+  }
+  return readGlobalStoreSellInPool();
+}
+
+export function saveStoreSellInPool(pool: number | undefined, monthKey?: string): void {
+  const norm = normalizeMonthKey(monthKey);
+  if (norm !== 'ALL') {
+    const monthly = loadMonthlyTargets();
+    if (!monthly[norm]) monthly[norm] = {};
+    if (pool === undefined) {
+      delete monthly[norm].storeSellInPool;
+    } else {
+      monthly[norm].storeSellInPool = Math.max(0, Math.round(pool));
+    }
+    saveMonthlyTargets(monthly);
+  } else {
+    if (pool === undefined) {
+      localStorage.removeItem(STORAGE_KEY_STORE_SELLIN_POOL);
+    } else {
+      localStorage.setItem(STORAGE_KEY_STORE_SELLIN_POOL, String(Math.max(0, Math.round(pool))));
+    }
+  }
+  clearBaQuarterlySellInOverridesForMonths(norm !== 'ALL' ? [norm] : undefined);
+  notifyTargetsUpdated({ monthKey: norm, category: 'store_sellin_pool' });
+}
+
+export function applyStoreSellInPoolToAllMonths(pool: number | undefined): void {
+  if (pool === undefined) {
+    localStorage.removeItem(STORAGE_KEY_STORE_SELLIN_POOL);
+  } else {
+    localStorage.setItem(STORAGE_KEY_STORE_SELLIN_POOL, String(Math.max(0, Math.round(pool))));
+  }
+  const monthly = loadMonthlyTargets();
+  MONTH_OPTIONS_2026.forEach((m) => {
+    if (!monthly[m.key]) monthly[m.key] = {};
+    if (pool === undefined) {
+      delete monthly[m.key].storeSellInPool;
+    } else {
+      monthly[m.key].storeSellInPool = Math.max(0, Math.round(pool));
+    }
+  });
+  saveMonthlyTargets(monthly);
+  clearBaQuarterlySellInOverridesForMonths();
+  notifyTargetsUpdated({ monthKey: 'ALL', category: 'store_sellin_pool_all' });
+}
+
+export function setSingleStoreSellInOverride(
+  storeName: string,
+  value: number,
+  monthKey?: string
+): void {
+  const norm = normalizeMonthKey(monthKey);
+  const cleanVal = Math.max(0, Math.round(value));
+  if (norm === 'ALL') {
+    const current = readGlobalMap(STORAGE_KEY_STORE_SELLIN_TARGETS);
+    upsertCaseInsensitiveKey(current, storeName, cleanVal);
+    writeGlobalMap(STORAGE_KEY_STORE_SELLIN_TARGETS, current);
+  } else {
+    const monthly = loadMonthlyTargets();
+    if (!monthly[norm]) monthly[norm] = {};
+    if (!monthly[norm].storeSellIn) monthly[norm].storeSellIn = {};
+    upsertCaseInsensitiveKey(monthly[norm].storeSellIn!, storeName, cleanVal);
+    saveMonthlyTargets(monthly);
+  }
+  clearBaQuarterlySellInOverridesForMonths(norm !== 'ALL' ? [norm] : undefined);
+  notifyTargetsUpdated({ monthKey: norm, category: 'store_sellin' });
+}
+
+export function applySingleStoreSellInToAllMonths(storeName: string, value: number): void {
+  const cleanVal = Math.max(0, Math.round(value));
+  const globalMap = readGlobalMap(STORAGE_KEY_STORE_SELLIN_TARGETS);
+  upsertCaseInsensitiveKey(globalMap, storeName, cleanVal);
+  writeGlobalMap(STORAGE_KEY_STORE_SELLIN_TARGETS, globalMap);
+
+  const monthly = loadMonthlyTargets();
+  MONTH_OPTIONS_2026.forEach((m) => {
+    if (!monthly[m.key]) monthly[m.key] = {};
+    if (!monthly[m.key].storeSellIn) monthly[m.key].storeSellIn = {};
+    upsertCaseInsensitiveKey(monthly[m.key].storeSellIn!, storeName, cleanVal);
+  });
+  saveMonthlyTargets(monthly);
+  clearBaQuarterlySellInOverridesForMonths();
+  notifyTargetsUpdated({ monthKey: 'ALL', category: 'store_sellin_all' });
+}
+
+export function clearSingleStoreSellInOverride(storeName: string, monthKey?: string): void {
+  const norm = normalizeMonthKey(monthKey);
+  const upperTarget = storeName.trim().toUpperCase();
+  const removeCI = (map: Record<string, number>) => {
+    Object.keys(map).forEach((k) => {
+      if (k.trim().toUpperCase() === upperTarget) {
+        delete map[k];
+      }
+    });
+  };
+
+  if (norm === 'ALL') {
+    const globalMap = readGlobalMap(STORAGE_KEY_STORE_SELLIN_TARGETS);
+    removeCI(globalMap);
+    writeGlobalMap(STORAGE_KEY_STORE_SELLIN_TARGETS, globalMap);
+    const monthly = loadMonthlyTargets();
+    MONTH_OPTIONS_2026.forEach((m) => {
+      if (monthly[m.key]?.storeSellIn) {
+        removeCI(monthly[m.key].storeSellIn!);
+      }
+    });
+    saveMonthlyTargets(monthly);
+  } else {
+    const monthly = loadMonthlyTargets();
+    if (monthly[norm]?.storeSellIn) {
+      removeCI(monthly[norm].storeSellIn!);
+      saveMonthlyTargets(monthly);
+    }
+    // Also clean global fallback key if present so this month reverts cleanly to formula
+    const globalMap = readGlobalMap(STORAGE_KEY_STORE_SELLIN_TARGETS);
+    if (Object.keys(globalMap).some((k) => k.trim().toUpperCase() === upperTarget)) {
+      removeCI(globalMap);
+      writeGlobalMap(STORAGE_KEY_STORE_SELLIN_TARGETS, globalMap);
+    }
+  }
+  clearBaQuarterlySellInOverridesForMonths(norm !== 'ALL' ? [norm] : undefined);
+  notifyTargetsUpdated({ monthKey: norm, category: 'store_sellin_reset_one' });
+}
+
+export function clearAllStoreSellInOverrides(monthKey?: string): void {
+  const norm = normalizeMonthKey(monthKey);
+  if (norm === 'ALL') {
+    localStorage.removeItem(STORAGE_KEY_STORE_SELLIN_TARGETS);
+    const monthly = loadMonthlyTargets();
+    MONTH_OPTIONS_2026.forEach((m) => {
+      if (monthly[m.key]) {
+        delete monthly[m.key].storeSellIn;
+      }
+    });
+    saveMonthlyTargets(monthly);
+  } else {
+    const monthly = loadMonthlyTargets();
+    if (monthly[norm]) {
+      delete monthly[norm].storeSellIn;
+      saveMonthlyTargets(monthly);
+    }
+  }
+  clearBaQuarterlySellInOverridesForMonths(norm !== 'ALL' ? [norm] : undefined);
+  notifyTargetsUpdated({ monthKey: norm, category: 'store_sellin_reset_all' });
+}
+
+const normStoreExactKey = (s: string): string => s.trim().toUpperCase().replace(/\s+/g, ' ');
+const normStoreNoPrefixKey = (s: string): string =>
+  normalizeStoreAlnum(s.replace(/^\s*(TOKO|TK)\b\.?\s*/i, ''));
+const normStoreKosmetikKey = (s: string): string =>
+  normStoreNoPrefixKey(s).replace(/cosmetic/g, 'kosmetik').replace(/cosmetik/g, 'kosmetik');
+
+function findStoreOverrideValue(
+  map: Record<string, number>,
+  storeName: string
+): number | undefined {
+  const direct = findMapValueCaseInsensitive(map, storeName);
+  if (direct !== undefined) return direct;
+  const exact = normStoreExactKey(storeName);
+  const alnum = normalizeStoreAlnum(storeName);
+  const noPrefix = normStoreNoPrefixKey(storeName);
+  const kosmetik = normStoreKosmetikKey(storeName);
+
+  for (const [k, v] of Object.entries(map)) {
+    if (
+      normStoreExactKey(k) === exact ||
+      (alnum && normalizeStoreAlnum(k) === alnum) ||
+      (noPrefix && normStoreNoPrefixKey(k) === noPrefix) ||
+      (kosmetik && normStoreKosmetikKey(k) === kosmetik)
+    ) {
+      return v;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Syncs a BA/Store quarterly Target Sell In edit made inside Achieve Quartal
+ * back into monthly Store Sell In overrides in Kelola Target so both menus remain synced.
+ */
+export function syncQuarterBaSellInToStores(params: {
+  year: number;
+  quarter: QuarterPeriodKey;
+  baName: string;
+  storeName: string;
+  quarterTargetSellIn: number;
+  monthlyBreakdown?: Array<{ monthIndex: number; targetSellIn?: number; assignedStores?: string[] }>;
+}): boolean {
+  const qMonthKeys = QUARTER_KEY_MONTHS[params.quarter];
+  if (!qMonthKeys) return false;
+  const totalQuarterTarget = Math.max(0, Math.round(params.quarterTargetSellIn));
+
+  const fallbackStores = (params.storeName || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s && s !== '-' && s.toUpperCase() !== 'COUNTER TOKO');
+
+  const monthly = loadMonthlyTargets();
+  const existingMonthWeights: [number, number, number] = [0, 0, 0];
+  const monthStores: [string[], string[], string[]] = [[], [], []];
+
+  qMonthKeys.forEach((mKey, idx) => {
+    const mb = params.monthlyBreakdown?.[idx];
+    const storesForMonth =
+      mb?.assignedStores && mb.assignedStores.length > 0 ? mb.assignedStores : fallbackStores;
+    monthStores[idx] = storesForMonth;
+    existingMonthWeights[idx] = Math.max(0, mb?.targetSellIn || 0);
+  });
+
+  if (monthStores.every((arr) => arr.length === 0)) {
+    return false;
+  }
+
+  // Distribute totalQuarterTarget across the 3 months preserving existing monthly ratios & exact integer sum
+  const weightSum = existingMonthWeights[0] + existingMonthWeights[1] + existingMonthWeights[2];
+  const monthlyTargets: [number, number, number] = [0, 0, 0];
+  if (weightSum > 0) {
+    monthlyTargets[0] = Math.round(totalQuarterTarget * (existingMonthWeights[0] / weightSum));
+    monthlyTargets[1] = Math.round(totalQuarterTarget * (existingMonthWeights[1] / weightSum));
+    monthlyTargets[2] = Math.max(0, totalQuarterTarget - monthlyTargets[0] - monthlyTargets[1]);
+  } else {
+    const part = Math.floor(totalQuarterTarget / 3);
+    monthlyTargets[0] = part;
+    monthlyTargets[1] = part;
+    monthlyTargets[2] = Math.max(0, totalQuarterTarget - part * 2);
+  }
+
+  let updatedStores = 0;
+  qMonthKeys.forEach((mKey, idx) => {
+    const stores = monthStores[idx];
+    if (stores.length === 0) return;
+    if (!monthly[mKey]) monthly[mKey] = {};
+    if (!monthly[mKey].storeSellIn) monthly[mKey].storeSellIn = {};
+
+    const mTarget = monthlyTargets[idx];
+    if (stores.length === 1) {
+      upsertCaseInsensitiveKey(monthly[mKey].storeSellIn!, stores[0], mTarget);
+      updatedStores++;
+    } else {
+      const storeWeights = stores.map((s) =>
+        Math.max(1, findStoreOverrideValue(monthly[mKey].storeSellIn!, s) ?? 1)
+      );
+      const swSum = storeWeights.reduce((a, b) => a + b, 0);
+      let running = 0;
+      stores.forEach((s, sIdx) => {
+        const val =
+          sIdx === stores.length - 1
+            ? Math.max(0, mTarget - running)
+            : Math.round(mTarget * (storeWeights[sIdx] / (swSum || 1)));
+        running += val;
+        upsertCaseInsensitiveKey(monthly[mKey].storeSellIn!, s, val);
+        updatedStores++;
+      });
+    }
+  });
+
+  if (updatedStores === 0) return false;
+
+  saveMonthlyTargets(monthly);
+  clearBaQuarterlySellInOverridesForMonths(qMonthKeys, params.baName);
+  notifyTargetsUpdated({ category: 'store_sellin_sync_from_quartal' });
+  return true;
+}
+
+const MONTH_UPPER_NAMES = [
+  'JANUARI', 'FEBRUARI', 'MARET', 'APRIL', 'MEI', 'JUNI',
+  'JULI', 'AGUSTUS', 'SEPTEMBER', 'OKTOBER', 'NOVEMBER', 'DESEMBER',
+];
+
+function extractRecordMonthYearStrict(r: TransactionRecord): { monthIndex: number; year: number } | null {
+  let parsedTanggal: { monthIndex: number; year: number } | null = null;
+  if (r.TANGGAL) {
+    const trimmed = r.TANGGAL.trim();
+    const parts = trimmed.split(/[-/]/);
+    if (parts.length === 3) {
+      if (parts[0].length === 4) {
+        const yr = parseInt(parts[0], 10);
+        const m = parseInt(parts[1], 10) - 1;
+        if (!isNaN(yr) && !isNaN(m) && m >= 0 && m <= 11) parsedTanggal = { monthIndex: m, year: yr };
+      } else {
+        const m = parseInt(parts[0], 10) - 1;
+        const rawYr = parseInt(parts[2], 10);
+        const yr = rawYr < 100 ? 2000 + rawYr : rawYr;
+        if (!isNaN(yr) && !isNaN(m) && m >= 0 && m <= 11) parsedTanggal = { monthIndex: m, year: yr };
+      }
+    }
+  }
+
+  if (r.BULAN) {
+    const bUpper = r.BULAN.trim().toUpperCase();
+    const fullIdx = MONTH_UPPER_NAMES.findIndex((m) => bUpper.includes(m));
+    if (fullIdx !== -1) {
+      const yr = r.TAHUN || parsedTanggal?.year || 2026;
+      return { monthIndex: fullIdx, year: yr };
+    }
+    const metaMatch = MONTH_OPTIONS_2026.find((meta) =>
+      meta.aliases.some((alias) => bUpper === alias || bUpper.includes(alias))
+    );
+    if (metaMatch) {
+      const yr = r.TAHUN || parsedTanggal?.year || 2026;
+      return { monthIndex: metaMatch.monthIndex, year: yr };
+    }
+  }
+
+  return parsedTanggal;
+}
+
+function classifySellKetForStore(ketRaw?: string): 'SELL IN' | 'SELL OUT' | 'OTHER' {
+  const upper = (ketRaw || '').toUpperCase().trim();
+  if (upper.includes('RETURN') || upper.includes('RETUR')) return 'OTHER';
+  if (
+    upper.includes('SELL IN') ||
+    upper.includes('SELL-IN') ||
+    upper === 'SELLIN' ||
+    upper.includes('TAKING ORDER')
+  ) {
+    return 'SELL IN';
+  }
+  if (upper.includes('SELL OUT') || upper.includes('SELL-OUT') || upper === 'SELLOUT') {
+    return 'SELL OUT';
+  }
+  return 'OTHER';
+}
+
+function getPrior3Months(targetYear: number, targetMonthIdx: number): Array<{ year: number; monthIndex: number; key: string; label: string }> {
+  const list: Array<{ year: number; monthIndex: number; key: string; label: string }> = [];
+  for (let offset = 3; offset >= 1; offset--) {
+    const rawIdx = targetMonthIdx - offset;
+    const pYear = rawIdx >= 0 ? targetYear : targetYear - 1;
+    const pMonthIdx = rawIdx >= 0 ? rawIdx : 12 + rawIdx;
+    const meta = MONTH_OPTIONS_2026[pMonthIdx];
+    const yrSuffix = pYear !== targetYear ? ` '${String(pYear).slice(-2)}` : '';
+    list.push({
+      year: pYear,
+      monthIndex: pMonthIdx,
+      key: `${pYear}-${String(pMonthIdx + 1).padStart(2, '0')}`,
+      label: `${meta ? meta.shortLabel : String(pMonthIdx + 1)}${yrSuffix}`,
+    });
+  }
+  return list;
+}
+
+interface ParsedStoreUniverse {
+  stores: Map<
+    string,
+    {
+      displayName: string;
+      baName: string;
+      coverArea: string;
+      region: string;
+      spv: string;
+      salesWeights: Map<string, number>;
+      primarySalesName: string;
+      sellInByYM: Map<string, number>;
+      totalSellInAllMonths: number;
+    }
+  >;
+  salesNames: Set<string>;
+  activeSellInYMs: Set<string>;
+}
+
+function buildStoreSellInUniverse(records: TransactionRecord[]): ParsedStoreUniverse {
+  const customBaProfiles = loadCustomBaProfiles();
+  const customProfileByStoreUpper = new Map<string, CustomBaProfile>();
+  const customProfileByBaUpper = new Map<string, CustomBaProfile>();
+
+  Object.values(customBaProfiles).forEach((p) => {
+    if (p.originalStoreName) {
+      customProfileByStoreUpper.set(normStoreExactKey(p.originalStoreName), p);
+    }
+    if (p.storeName) {
+      p.storeName.split(',').forEach((part) => {
+        const s = normStoreExactKey(part);
+        if (s) customProfileByStoreUpper.set(s, p);
+      });
+    }
+    const baUp = normalizeBaGroupKey(p.baName);
+    if (!isGenericBaPlaceholder(baUp)) {
+      customProfileByBaUpper.set(baUp, p);
+    }
+  });
+
+  const stores: ParsedStoreUniverse['stores'] = new Map();
+  const salesNames = new Set<string>();
+  const activeSellInYMs = new Set<string>();
+
+  const ensureStore = (
+    rawDisplay: string,
+    area: string,
+    region: string,
+    spv: string,
+    baName: string,
+    salesName: string
+  ) => {
+    const cleanDisplay = rawDisplay.trim().replace(/\s+/g, ' ');
+    const normKey = normStoreExactKey(cleanDisplay);
+    if (!normKey || normKey === '-' || normKey === 'ALL' || normKey === 'UNKNOWN' || normKey === 'COUNTER TOKO') {
+      return null;
+    }
+    if (!stores.has(normKey)) {
+      stores.set(normKey, {
+        displayName: cleanDisplay,
+        baName: '-',
+        coverArea: area && area !== '-' ? area : 'AREA BARU',
+        region: region && region !== '-' ? region : 'PEKAN BARU',
+        spv: spv && spv !== '-' ? spv : 'WIDODO',
+        salesWeights: new Map(),
+        primarySalesName: salesName && salesName !== '-' ? salesName.trim().toUpperCase() : 'UNKNOWN',
+        sellInByYM: new Map(),
+        totalSellInAllMonths: 0,
+      });
+    }
+    const entry = stores.get(normKey)!;
+    const cleanBaNorm = normalizeBaGroupKey(baName);
+    if (!isGenericBaPlaceholder(cleanBaNorm)) {
+      entry.baName = baName.trim().replace(/\s+/g, ' ');
+    }
+    if ((!entry.coverArea || entry.coverArea === 'AREA BARU') && area && area !== '-') {
+      entry.coverArea = area;
+    }
+    if ((!entry.region || entry.region === 'PEKAN BARU') && region && region !== '-') {
+      entry.region = region;
+    }
+    if ((!entry.spv || entry.spv === 'WIDODO') && spv && spv !== '-') {
+      entry.spv = spv;
+    }
+    return entry;
+  };
+
+  records.forEach((r) => {
+    const rawSales = (r.SALES || 'UNKNOWN').trim().toUpperCase();
+    if (rawSales && rawSales !== 'UNKNOWN' && rawSales !== '-') {
+      salesNames.add(rawSales);
+    }
+
+    const rawStore = (r.NAMA_STORE || '').trim();
+    const storeProfileMatch = rawStore ? customProfileByStoreUpper.get(normStoreExactKey(rawStore)) : undefined;
+    const resolvedStore =
+      storeProfileMatch &&
+      storeProfileMatch.originalStoreName &&
+      normStoreExactKey(storeProfileMatch.originalStoreName) === normStoreExactKey(rawStore)
+        ? storeProfileMatch.storeName
+        : rawStore;
+
+    const baProfileMatch = !storeProfileMatch ? customProfileByBaUpper.get(normalizeBaGroupKey(r.BA)) : undefined;
+    const resolvedBa = storeProfileMatch
+      ? storeProfileMatch.baName
+      : baProfileMatch
+      ? baProfileMatch.baName
+      : (r.BA || '');
+    const resolvedSales =
+      (storeProfileMatch?.salesName && storeProfileMatch.salesName !== '-' ? storeProfileMatch.salesName : '') ||
+      rawSales;
+    const resolvedArea =
+      (storeProfileMatch?.coverArea && storeProfileMatch.coverArea !== '-' ? storeProfileMatch.coverArea : '') ||
+      r.COVER_AREA ||
+      'AREA BARU';
+    const resolvedRegion =
+      (storeProfileMatch?.region && storeProfileMatch.region !== '-' ? storeProfileMatch.region : '') ||
+      r.REGION ||
+      'PEKAN BARU';
+    const resolvedSpv =
+      (storeProfileMatch?.spv && storeProfileMatch.spv !== '-' ? storeProfileMatch.spv : '') ||
+      r.SPV ||
+      'WIDODO';
+
+    const entry = ensureStore(resolvedStore, resolvedArea, resolvedRegion, resolvedSpv, resolvedBa, resolvedSales);
+    if (!entry) return;
+
+    const ketType = classifySellKetForStore(r.KET);
+    const val = Math.max(0, r.VALUE || 0);
+    const salesUpper = resolvedSales.trim().toUpperCase();
+    if (salesUpper && salesUpper !== 'UNKNOWN' && salesUpper !== '-') {
+      const weightAdd = ketType === 'SELL IN' && val > 0 ? val : 1;
+      entry.salesWeights.set(salesUpper, (entry.salesWeights.get(salesUpper) || 0) + weightAdd);
+    }
+
+    if (ketType === 'SELL IN') {
+      const dt = extractRecordMonthYearStrict(r);
+      if (dt) {
+        const ymKey = `${dt.year}-${String(dt.monthIndex + 1).padStart(2, '0')}`;
+        if (val > 0) activeSellInYMs.add(ymKey);
+        entry.sellInByYM.set(ymKey, (entry.sellInByYM.get(ymKey) || 0) + val);
+      }
+      entry.totalSellInAllMonths += val;
+    }
+  });
+
+  // Also include stores manually added via customBaProfiles
+  Object.values(customBaProfiles).forEach((profile) => {
+    const tokens = (profile.storeName || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    tokens.forEach((tok) => {
+      ensureStore(
+        tok,
+        profile.coverArea || 'PEKANBARU',
+        profile.region || 'PEKAN BARU',
+        profile.spv || 'WIDODO',
+        profile.baName || '',
+        profile.salesName || 'ILHAMSYAH'
+      );
+    });
+  });
+
+  // Finalize primary Sales for every store
+  stores.forEach((entry) => {
+    if (entry.salesWeights.size > 0) {
+      let bestSales = entry.primarySalesName;
+      let bestWeight = -1;
+      entry.salesWeights.forEach((w, sName) => {
+        if (w > bestWeight) {
+          bestWeight = w;
+          bestSales = sName;
+        }
+      });
+      entry.primarySalesName = bestSales;
+    }
+  });
+
+  return { stores, salesNames, activeSellInYMs };
+}
+
+function getSalesTargetForMonthFromSalesMap(
+  salesTargetsMap: Record<string, number>,
+  salesName: string
+): number {
+  const upper = salesName.trim().toUpperCase();
+  const direct = findMapValueCaseInsensitive(salesTargetsMap, upper);
+  if (direct !== undefined) return direct;
+  if (upper === 'ALBERT') {
+    const alt = findMapValueCaseInsensitive(salesTargetsMap, 'ALBERT FERNANDO');
+    if (alt !== undefined) return alt;
+  } else if (upper === 'ALBERT FERNANDO') {
+    const alt = findMapValueCaseInsensitive(salesTargetsMap, 'ALBERT');
+    if (alt !== undefined) return alt;
+  }
+  return DEFAULT_SALES_TARGET;
+}
+
+function computeSingleMonthStoreSellInInternal(
+  universe: ParsedStoreUniverse,
+  monthKey: string,
+  year: number,
+  formulaMode: StoreSellInFormulaMode
+): StoreSellInMatrixResult {
+  const normMonth = normalizeMonthKey(monthKey);
+  const meta = normMonth !== 'ALL' ? MONTH_OPTIONS_2026.find((m) => m.key === normMonth) : undefined;
+
+  const salesTargetsMap = loadSalesTargets(normMonth);
+  const salesNamesList =
+    universe.salesNames.size > 0
+      ? Array.from(universe.salesNames)
+      : ['ILHAMSYAH', 'TIWI', 'ABDUL RAHIM', 'LUAR KOTA', 'PARETO', 'ALBERT FERNANDO'];
+
+  let defaultSalesPoolTarget = 0;
+  const salesTargetByName = new Map<string, number>();
+  salesNamesList.forEach((sName) => {
+    const val = getSalesTargetForMonthFromSalesMap(salesTargetsMap, sName);
+    salesTargetByName.set(sName.trim().toUpperCase(), val);
+    defaultSalesPoolTarget += val;
+  });
+  if (defaultSalesPoolTarget <= 0) {
+    defaultSalesPoolTarget = DEFAULT_SALES_TARGET * 6;
+  }
+
+  const explicitPool = loadStoreSellInPool(normMonth);
+  const isPoolCustom = explicitPool !== undefined;
+  const poolTarget = explicitPool !== undefined ? explicitPool : defaultSalesPoolTarget;
+  const customStoreTargets = loadStoreSellInTargets(normMonth);
+
+  // Determine prior 3 months for Avg Sell In 3 Bulan Sebelumnya
+  let priorWindow: Array<{ key: string; label: string }> = [];
+  let activePriorYMs: Array<{ key: string; label: string }> = [];
+  let priorPeriodDescription = '';
+
+  if (meta) {
+    const targetYM = `${year}-${String(meta.monthIndex + 1).padStart(2, '0')}`;
+    const candidate3 = getPrior3Months(year, meta.monthIndex);
+    priorWindow = candidate3.map((c) => ({ key: c.key, label: c.label }));
+    activePriorYMs = priorWindow.filter((c) => universe.activeSellInYMs.has(c.key));
+    if (activePriorYMs.length > 0) {
+      priorPeriodDescription = `Rata-rata ${activePriorYMs.length} Bln Sebelumnya (${activePriorYMs.map((a) => a.label).join(', ')})`;
+    } else {
+      priorPeriodDescription = `Share Sell In Data Aktif (Belum ada data 3 bln sebelum ${meta.label})`;
+    }
+    void targetYM;
+  } else {
+    // Baseline 'ALL' fallback when no specific months configured
+    const sortedYMs = Array.from(universe.activeSellInYMs).sort();
+    const recent3 = sortedYMs.slice(-3);
+    priorWindow = recent3.map((ym) => {
+      const [yStr, mStr] = ym.split('-');
+      const mMeta = MONTH_OPTIONS_2026[Math.max(0, (parseInt(mStr, 10) || 1) - 1)];
+      return { key: ym, label: mMeta ? `${mMeta.shortLabel} '${yStr.slice(-2)}` : ym };
+    });
+    activePriorYMs = priorWindow;
+    priorPeriodDescription =
+      activePriorYMs.length > 0
+        ? `Rata-rata ${activePriorYMs.length} Bln Terakhir (${activePriorYMs.map((a) => a.label).join(', ')})`
+        : 'Distribusi Merata (Belum ada historis Sell In)';
+  }
+
+  const divisor = activePriorYMs.length > 0 ? activePriorYMs.length : Math.max(1, universe.activeSellInYMs.size);
+
+  // Compute raw prior 3M totals & averages per store and per sales
+  const rawStoreStats: Array<{
+    displayName: string;
+    baName: string;
+    coverArea: string;
+    region: string;
+    salesName: string;
+    spv: string;
+    priorTotal: number;
+    priorAvg: number;
+    actualSellIn: number;
+  }> = [];
+
+  let totalPrior3MonthsAvg = 0;
+  const salesAvgTotal = new Map<string, number>();
+  const salesStoreCount = new Map<string, number>();
+
+  const targetYMKey = meta ? `${year}-${String(meta.monthIndex + 1).padStart(2, '0')}` : null;
+
+  universe.stores.forEach((st) => {
+    let priorTotal = 0;
+    if (activePriorYMs.length > 0) {
+      activePriorYMs.forEach((p) => {
+        priorTotal += st.sellInByYM.get(p.key) || 0;
+      });
+    } else {
+      priorTotal = st.totalSellInAllMonths;
+    }
+    const priorAvg = priorTotal / divisor;
+    totalPrior3MonthsAvg += priorAvg;
+
+    const sUp = st.primarySalesName.trim().toUpperCase();
+    salesAvgTotal.set(sUp, (salesAvgTotal.get(sUp) || 0) + priorAvg);
+    salesStoreCount.set(sUp, (salesStoreCount.get(sUp) || 0) + 1);
+
+    const actualSellIn = targetYMKey ? st.sellInByYM.get(targetYMKey) || 0 : st.totalSellInAllMonths;
+
+    rawStoreStats.push({
+      displayName: st.displayName,
+      baName: st.baName,
+      coverArea: st.coverArea,
+      region: st.region,
+      salesName: st.primarySalesName,
+      spv: st.spv,
+      priorTotal,
+      priorAvg,
+      actualSellIn,
+    });
+  });
+
+  const storeCount = rawStoreStats.length;
+  const poolScaleFactor =
+    isPoolCustom && defaultSalesPoolTarget > 0 ? poolTarget / defaultSalesPoolTarget : 1;
+
+  let totalAutoTargetSellIn = 0;
+  let totalEffectiveTargetSellIn = 0;
+  let totalActualSellIn = 0;
+  let customOverrideCount = 0;
+
+  const storeItems: StoreSellInTargetItem[] = rawStoreStats.map((st) => {
+    const sUp = st.salesName.trim().toUpperCase();
+    const sAvg = salesAvgTotal.get(sUp) || 0;
+    const sCnt = salesStoreCount.get(sUp) || 1;
+    const baseSalesTarget = salesTargetByName.get(sUp) ?? DEFAULT_SALES_TARGET;
+    const scaledSalesTarget = isPoolCustom
+      ? Math.round(baseSalesTarget * poolScaleFactor)
+      : baseSalesTarget;
+
+    const globalContributionPct =
+      totalPrior3MonthsAvg > 0
+        ? (st.priorAvg / totalPrior3MonthsAvg) * 100
+        : storeCount > 0
+        ? 100 / storeCount
+        : 0;
+
+    let contributionPct = globalContributionPct;
+    let autoTargetSellIn = 0;
+    let salesTargetSellInBasis = poolTarget;
+
+    if (formulaMode === 'per_sales') {
+      salesTargetSellInBasis = scaledSalesTarget;
+      if (sAvg > 0) {
+        contributionPct = (st.priorAvg / sAvg) * 100;
+        autoTargetSellIn = Math.round((contributionPct / 100) * scaledSalesTarget);
+      } else if (totalPrior3MonthsAvg === 0) {
+        contributionPct = sCnt > 0 ? 100 / sCnt : 0;
+        autoTargetSellIn = Math.round((contributionPct / 100) * scaledSalesTarget);
+      } else {
+        contributionPct = 0;
+        autoTargetSellIn = 0;
+      }
+    } else {
+      contributionPct = globalContributionPct;
+      salesTargetSellInBasis = poolTarget;
+      autoTargetSellIn = Math.round((contributionPct / 100) * poolTarget);
+    }
+
+    const customOverride = findStoreOverrideValue(customStoreTargets, st.displayName);
+    const isCustom = customOverride !== undefined;
+    if (isCustom) customOverrideCount++;
+
+    const targetSellIn = isCustom ? customOverride! : autoTargetSellIn;
+    const gapSellIn = st.actualSellIn - targetSellIn;
+    const achievementPct = targetSellIn > 0 ? (st.actualSellIn / targetSellIn) * 100 : 0;
+    const status: 'achieved' | 'on_track' | 'lagging' =
+      achievementPct >= 100 ? 'achieved' : achievementPct >= 80 ? 'on_track' : 'lagging';
+
+    totalAutoTargetSellIn += autoTargetSellIn;
+    totalEffectiveTargetSellIn += targetSellIn;
+    totalActualSellIn += st.actualSellIn;
+
+    return {
+      storeName: st.displayName,
+      baName: st.baName,
+      coverArea: st.coverArea,
+      region: st.region,
+      salesName: st.salesName,
+      spv: st.spv,
+      prior3MonthsTotalSellIn: st.priorTotal,
+      prior3MonthsAvgSellIn: st.priorAvg,
+      priorMonthLabels: priorWindow.map((p) => p.label),
+      salesPrior3MonthsAvgSellIn: sAvg,
+      salesTargetSellInBasis,
+      contributionPct,
+      globalContributionPct,
+      autoTargetSellIn,
+      targetSellIn,
+      actualSellIn: st.actualSellIn,
+      gapSellIn,
+      achievementPct,
+      status,
+      isCustom,
+    };
+  });
+
+  storeItems.sort((a, b) => b.targetSellIn - a.targetSellIn || b.prior3MonthsAvgSellIn - a.prior3MonthsAvgSellIn);
+
+  const overallAch = totalEffectiveTargetSellIn > 0 ? (totalActualSellIn / totalEffectiveTargetSellIn) * 100 : 0;
+
+  return {
+    stores: storeItems,
+    formulaMode,
+    poolTarget,
+    isPoolCustom,
+    defaultSalesPoolTarget,
+    priorPeriodDescription,
+    priorMonthLabels: priorWindow.map((p) => p.label),
+    totalPrior3MonthsAvg,
+    totalAutoTargetSellIn,
+    totalEffectiveTargetSellIn,
+    totalActualSellIn,
+    achievementPct: overallAch,
+    customOverrideCount,
+    accumulatedMonthCount: 1,
+    isMultiMonthAccumulated: false,
+  };
+}
+
+export interface MonthlyStoreSellInLookupBucket {
+  poolTarget: number;
+  byExact: Map<string, StoreSellInTargetItem>;
+  byAlnum: Map<string, StoreSellInTargetItem>;
+  byNoPrefix: Map<string, StoreSellInTargetItem>;
+  byKosmetik: Map<string, StoreSellInTargetItem>;
+}
+
+export function findStoreSellInInLookup(
+  bucket: MonthlyStoreSellInLookupBucket | undefined,
+  rawStoreName?: string
+): StoreSellInTargetItem | undefined {
+  if (!bucket || !rawStoreName) return undefined;
+  const clean = rawStoreName.trim();
+  if (!clean || clean === '-' || clean.toUpperCase() === 'ALL') return undefined;
+  const exactHit = bucket.byExact.get(normStoreExactKey(clean));
+  if (exactHit) return exactHit;
+  const alnumHit = bucket.byAlnum.get(normalizeStoreAlnum(clean));
+  if (alnumHit) return alnumHit;
+  const noPrefixHit = bucket.byNoPrefix.get(normStoreNoPrefixKey(clean));
+  if (noPrefixHit) return noPrefixHit;
+  const kosmetikHit = bucket.byKosmetik.get(normStoreKosmetikKey(clean));
+  if (kosmetikHit) return kosmetikHit;
+  return undefined;
+}
+
+/**
+ * Fast batched computation of Store Sell In targets for multiple months in a single pass
+ * over TransactionRecord[] (used by Achieve Quartal / quarterlySummaryService).
+ */
+export function computeMonthlyStoreSellInLookup(
+  records: TransactionRecord[],
+  monthNamesOrKeys: string[],
+  year: number = 2026
+): Record<string, MonthlyStoreSellInLookupBucket> {
+  const universe = buildStoreSellInUniverse(records);
+  const formulaMode = loadStoreSellInFormulaMode();
+  const result: Record<string, MonthlyStoreSellInLookupBucket> = {};
+
+  monthNamesOrKeys.forEach((mk) => {
+    const norm = normalizeMonthKey(mk);
+    const res = computeSingleMonthStoreSellInInternal(universe, norm, year, formulaMode);
+    const byExact = new Map<string, StoreSellInTargetItem>();
+    const byAlnum = new Map<string, StoreSellInTargetItem>();
+    const byNoPrefix = new Map<string, StoreSellInTargetItem>();
+    const byKosmetik = new Map<string, StoreSellInTargetItem>();
+
+    res.stores.forEach((item) => {
+      const k1 = normStoreExactKey(item.storeName);
+      const k2 = normalizeStoreAlnum(item.storeName);
+      const k3 = normStoreNoPrefixKey(item.storeName);
+      const k4 = normStoreKosmetikKey(item.storeName);
+      if (k1) byExact.set(k1, item);
+      if (k2) byAlnum.set(k2, item);
+      if (k3) byNoPrefix.set(k3, item);
+      if (k4) byKosmetik.set(k4, item);
+    });
+
+    const bucket: MonthlyStoreSellInLookupBucket = {
+      poolTarget: res.poolTarget,
+      byExact,
+      byAlnum,
+      byNoPrefix,
+      byKosmetik,
+    };
+    result[mk] = bucket;
+    if (norm !== mk) result[norm] = bucket;
+  });
+
+  return result;
+}
+
+/**
+ * Computes Store Sell In Target matrix for Kelola Target (single month or accumulated ALL configured months).
+ */
+export function computeStoreSellInMatrix(
+  records: TransactionRecord[],
+  selectedMonth?: string,
+  year: number = 2026
+): StoreSellInMatrixResult {
+  const normMonth = normalizeMonthKey(selectedMonth);
+  const formulaMode = loadStoreSellInFormulaMode();
+  const universe = buildStoreSellInUniverse(records);
+
+  if (normMonth !== 'ALL') {
+    return computeSingleMonthStoreSellInInternal(universe, normMonth, year, formulaMode);
+  }
+
+  const configuredMonths = getConfiguredMonthKeys();
+  if (configuredMonths.length === 0) {
+    return computeSingleMonthStoreSellInInternal(universe, 'ALL', year, formulaMode);
+  }
+
+  // Accumulate across all configured months
+  const monthlyResults = configuredMonths.map((mk) =>
+    computeSingleMonthStoreSellInInternal(universe, mk, year, formulaMode)
+  );
+
+  const accMap = new Map<
+    string,
+    {
+      base: StoreSellInTargetItem;
+      sumPriorTotal: number;
+      sumPriorAvg: number;
+      sumContribution: number;
+      sumGlobalContribution: number;
+      sumSalesAvg: number;
+      sumSalesBasis: number;
+      sumAutoTarget: number;
+      sumTarget: number;
+      sumActual: number;
+      anyCustom: boolean;
+    }
+  >();
+
+  let totalPoolTarget = 0;
+  let totalDefaultPoolTarget = 0;
+  let anyPoolCustom = false;
+
+  monthlyResults.forEach((mr) => {
+    totalPoolTarget += mr.poolTarget;
+    totalDefaultPoolTarget += mr.defaultSalesPoolTarget;
+    if (mr.isPoolCustom) anyPoolCustom = true;
+
+    mr.stores.forEach((st) => {
+      const k = normStoreExactKey(st.storeName);
+      if (!accMap.has(k)) {
+        accMap.set(k, {
+          base: st,
+          sumPriorTotal: 0,
+          sumPriorAvg: 0,
+          sumContribution: 0,
+          sumGlobalContribution: 0,
+          sumSalesAvg: 0,
+          sumSalesBasis: 0,
+          sumAutoTarget: 0,
+          sumTarget: 0,
+          sumActual: 0,
+          anyCustom: false,
+        });
+      }
+      const acc = accMap.get(k)!;
+      acc.sumPriorTotal += st.prior3MonthsTotalSellIn;
+      acc.sumPriorAvg += st.prior3MonthsAvgSellIn;
+      acc.sumContribution += st.contributionPct;
+      acc.sumGlobalContribution += st.globalContributionPct;
+      acc.sumSalesAvg += st.salesPrior3MonthsAvgSellIn;
+      acc.sumSalesBasis += st.salesTargetSellInBasis;
+      acc.sumAutoTarget += st.autoTargetSellIn;
+      acc.sumTarget += st.targetSellIn;
+      acc.sumActual += st.actualSellIn;
+      if (st.isCustom) acc.anyCustom = true;
+    });
+  });
+
+  const mCount = monthlyResults.length;
+  let totalPriorAvg = 0;
+  let totalAuto = 0;
+  let totalEff = 0;
+  let totalAct = 0;
+  let customCount = 0;
+
+  const stores: StoreSellInTargetItem[] = [];
+  accMap.forEach((acc) => {
+    const avgPriorAvg = acc.sumPriorAvg / mCount;
+    const avgPriorTotal = acc.sumPriorTotal / mCount;
+    const avgContribution = acc.sumContribution / mCount;
+    const avgGlobalContribution = acc.sumGlobalContribution / mCount;
+    const gapSellIn = acc.sumActual - acc.sumTarget;
+    const achievementPct = acc.sumTarget > 0 ? (acc.sumActual / acc.sumTarget) * 100 : 0;
+    const status: 'achieved' | 'on_track' | 'lagging' =
+      achievementPct >= 100 ? 'achieved' : achievementPct >= 80 ? 'on_track' : 'lagging';
+
+    if (acc.anyCustom) customCount++;
+    totalPriorAvg += avgPriorAvg;
+    totalAuto += acc.sumAutoTarget;
+    totalEff += acc.sumTarget;
+    totalAct += acc.sumActual;
+
+    stores.push({
+      ...acc.base,
+      prior3MonthsTotalSellIn: avgPriorTotal,
+      prior3MonthsAvgSellIn: avgPriorAvg,
+      salesPrior3MonthsAvgSellIn: acc.sumSalesAvg / mCount,
+      salesTargetSellInBasis: acc.sumSalesBasis,
+      contributionPct: avgContribution,
+      globalContributionPct: avgGlobalContribution,
+      autoTargetSellIn: acc.sumAutoTarget,
+      targetSellIn: acc.sumTarget,
+      actualSellIn: acc.sumActual,
+      gapSellIn,
+      achievementPct,
+      status,
+      isCustom: acc.anyCustom,
+    });
+  });
+
+  stores.sort((a, b) => b.targetSellIn - a.targetSellIn || b.prior3MonthsAvgSellIn - a.prior3MonthsAvgSellIn);
+
+  return {
+    stores,
+    formulaMode,
+    poolTarget: totalPoolTarget,
+    isPoolCustom: anyPoolCustom,
+    defaultSalesPoolTarget: totalDefaultPoolTarget,
+    priorPeriodDescription: `Akumulasi ${mCount} Bulan (${configuredMonths
+      .map((k) => MONTH_OPTIONS_2026.find((m) => m.key === k)?.shortLabel || k)
+      .join(', ')}) — Rata-rata 3 Bln Sblm per bulan`,
+    priorMonthLabels: configuredMonths.map(
+      (k) => MONTH_OPTIONS_2026.find((m) => m.key === k)?.shortLabel || k
+    ),
+    totalPrior3MonthsAvg: totalPriorAvg,
+    totalAutoTargetSellIn: totalAuto,
+    totalEffectiveTargetSellIn: totalEff,
+    totalActualSellIn: totalAct,
+    achievementPct: totalEff > 0 ? (totalAct / totalEff) * 100 : 0,
+    customOverrideCount: customCount,
+    accumulatedMonthCount: mCount,
+    isMultiMonthAccumulated: true,
+  };
+}
+

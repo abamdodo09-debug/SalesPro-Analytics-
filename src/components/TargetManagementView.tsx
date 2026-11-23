@@ -31,6 +31,8 @@ import {
   SalesTargetItem,
   BaTargetItem,
   TrainerTargetItem,
+  StoreSellInTargetItem,
+  StoreSellInFormulaMode,
 } from '../types/dashboard';
 import {
   aggregateTargetMatrix,
@@ -47,6 +49,9 @@ import {
   loadTrainerTargets,
   setSingleTargetOverride,
   setSingleTrainerTargetOverride,
+  applySingleSalesTargetToAllMonths,
+  copySalesTargetsToAllMonths,
+  applyBulkSalesTargets,
   applySingleBaTargetToAllMonths,
   copyBaTargetsToAllMonths,
   applyUniformBaTargets,
@@ -73,6 +78,14 @@ import {
   loadCustomBaProfiles,
   saveCustomBaProfiles,
   TrainerTargetConfig,
+  computeStoreSellInMatrix,
+  saveStoreSellInPool,
+  applyStoreSellInPoolToAllMonths,
+  saveStoreSellInFormulaMode,
+  setSingleStoreSellInOverride,
+  applySingleStoreSellInToAllMonths,
+  clearSingleStoreSellInOverride,
+  clearAllStoreSellInOverrides,
 } from '../services/targetManagementService';
 import {
   DEFAULT_FOCUS_TARGET_PCS,
@@ -97,8 +110,8 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     return allRecords && allRecords.length > 0 ? allRecords : records;
   }, [allRecords, records]);
 
-  // Active sub-tab: area | spv | sales | ba | trainer
-  const [subTab, setSubTab] = useState<'area' | 'spv' | 'sales' | 'ba' | 'trainer'>('sales');
+  // Active sub-tab: area | spv | sales | store_sellin | ba | trainer
+  const [subTab, setSubTab] = useState<'area' | 'spv' | 'sales' | 'store_sellin' | 'ba' | 'trainer'>('sales');
 
   // Selected Target Month (Setiap bulan Januari-Desember memiliki target tersendiri untuk seluruh menu)
   const [selectedMonth, setSelectedMonth] = useState<string>(() => {
@@ -152,10 +165,22 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
   const [spvTargetInput, setSpvTargetInput] = useState<number>(DEFAULT_SPV_TARGET);
   const [spvSellOutInput, setSpvSellOutInput] = useState<number>(DEFAULT_SPV_SELLOUT_TARGET);
 
-  // 3. Edit Sales Modal (Sell In & Sell Out per bulan)
+  // 3. Edit Sales Modal (Sell In & Sell Out per bulan atau semua bulan sekaligus)
   const [editingSales, setEditingSales] = useState<SalesTargetItem | null>(null);
   const [salesTargetInput, setSalesTargetInput] = useState<number>(DEFAULT_SALES_TARGET);
   const [salesSellOutInput, setSalesSellOutInput] = useState<number>(DEFAULT_SALES_SELLOUT_TARGET);
+  const [salesApplyAllMonths, setSalesApplyAllMonths] = useState<boolean>(false);
+
+  // Dedicated Setting Target Sales 1 Bulan -> Semua Bulan Sekaligus (Jan - Des 2026)
+  const [isSalesAllMonthsOpen, setIsSalesAllMonthsOpen] = useState(false);
+  const [salesAllMonthsMode, setSalesAllMonthsMode] = useState<'per_sales' | 'copy_month'>('per_sales');
+  const [salesAllMonthsSourceMonth, setSalesAllMonthsSourceMonth] = useState<string>('2026-10');
+  const [salesAllMonthsScope, setSalesAllMonthsScope] = useState<'ALL_MONTHS' | 'current'>('ALL_MONTHS');
+  const [salesAllMonthsDraft, setSalesAllMonthsDraft] = useState<
+    Array<{ salesName: string; coverArea: string; targetSellIn: number; targetSellOut: number }>
+  >([]);
+  const [salesUniformSellIn, setSalesUniformSellIn] = useState<number>(DEFAULT_SALES_TARGET);
+  const [salesUniformSellOut, setSalesUniformSellOut] = useState<number>(DEFAULT_SALES_SELLOUT_TARGET);
 
   // 4. Edit BA Modal
   const [editingBa, setEditingBa] = useState<BaTargetItem | null>(null);
@@ -234,11 +259,32 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
   // 8. Reset Confirm Modal
   const [isResetModalOpen, setIsResetModalOpen] = useState(false);
 
+  // 9. Edit Target Sell In Toko Modal & Basis Pool Modal
+  const [editingStoreSellIn, setEditingStoreSellIn] = useState<StoreSellInTargetItem | null>(null);
+  const [storeSellInTargetInput, setStoreSellInTargetInput] = useState<number>(0);
+  const [storeSellInContributionInput, setStoreSellInContributionInput] = useState<number>(0);
+  const [storeSellInApplyAllMonths, setStoreSellInApplyAllMonths] = useState<boolean>(false);
+
+  const [isStorePoolModalOpen, setIsStorePoolModalOpen] = useState(false);
+  const [storePoolInput, setStorePoolInput] = useState<number>(0);
+  const [storePoolApplyAllMonths, setStorePoolApplyAllMonths] = useState<boolean>(false);
+
   // Aggregate target matrix data respecting selectedMonth (using full sourceRecords)
   const matrixData = useMemo(() => {
     return aggregateTargetMatrix(sourceRecords, selectedMonth);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceRecords, selectedMonth, refreshKey]);
+
+  // Store Sell In Matrix (Rumus otomatis % kontribusi 3 bulan sebelumnya x Target Sales + Manual Edit)
+  const storeSellInMatrix = useMemo(() => {
+    return computeStoreSellInMatrix(sourceRecords, selectedMonth);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceRecords, selectedMonth, refreshKey]);
+
+  const allConfiguredStoreMatrix = useMemo(() => {
+    return selectedMonth === 'ALL' ? storeSellInMatrix : computeStoreSellInMatrix(sourceRecords, 'ALL');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceRecords, selectedMonth, storeSellInMatrix, refreshKey]);
 
   // Automatic accumulation across ALL months that have configured targets
   const allConfiguredMatrix = useMemo(() => {
@@ -274,6 +320,17 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     };
   }, [isBaAllMonthsOpen, sourceRecords, baAllMonthsSourceMonth, refreshKey]);
 
+  const salesSourceMonthPreview = useMemo(() => {
+    if (!isSalesAllMonthsOpen) return null;
+    const srcMatrix = aggregateTargetMatrix(sourceRecords, salesAllMonthsSourceMonth, { singleMonthBaselineOnly: true });
+    return {
+      salesCount: srcMatrix.sales.length,
+      totalSellIn: srcMatrix.sales.reduce((acc, sl) => acc + sl.targetSellIn, 0),
+      totalSellOut: srcMatrix.sales.reduce((acc, sl) => acc + (sl.targetSellOut ?? DEFAULT_SALES_SELLOUT_TARGET), 0),
+      salesList: srcMatrix.sales,
+    };
+  }, [isSalesAllMonthsOpen, sourceRecords, salesAllMonthsSourceMonth, refreshKey]);
+
   // Handlers for Saving Single Targets (All scoped per selectedMonth!)
   const handleSaveAreaTarget = (e: React.FormEvent) => {
     e.preventDefault();
@@ -304,13 +361,68 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
   const handleSaveSalesTarget = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSales) return;
-    setSingleTargetOverride('sales', editingSales.salesName, salesTargetInput, selectedMonth);
-    setSingleTargetOverride('salesSellOut', editingSales.salesName, salesSellOutInput, selectedMonth);
+    if (salesApplyAllMonths) {
+      applySingleSalesTargetToAllMonths(editingSales.salesName, {
+        targetSellIn: salesTargetInput,
+        targetSellOut: salesSellOutInput,
+      });
+    } else {
+      setSingleTargetOverride('sales', editingSales.salesName, salesTargetInput, selectedMonth);
+      setSingleTargetOverride('salesSellOut', editingSales.salesName, salesSellOutInput, selectedMonth);
+    }
     setEditingSales(null);
     setRefreshKey((k) => k + 1);
     if (onTargetUpdated) onTargetUpdated();
     showNotification(
-      `Target Sales "${editingSales.salesName}" (${activeMonthLabel}) disimpan — Sell In: ${formatRupiah(salesTargetInput)}, Sell Out: ${formatRupiah(salesSellOutInput)}`
+      salesApplyAllMonths
+        ? `Target Sales "${editingSales.salesName}" disamakan untuk SEMUA 12 BULAN (Jan–Des 2026) — Sell In: ${formatRupiah(salesTargetInput)}/bln, Sell Out: ${formatRupiah(salesSellOutInput)}/bln!`
+        : `Target Sales "${editingSales.salesName}" (${activeMonthLabel}) disimpan — Sell In: ${formatRupiah(salesTargetInput)}, Sell Out: ${formatRupiah(salesSellOutInput)}`
+    );
+  };
+
+  const handleOpenSalesAllMonthsModal = () => {
+    const defaultSource =
+      selectedMonth !== 'ALL'
+        ? selectedMonth
+        : configuredMonthKeys[0] || '2026-10';
+    const baseMatrix = aggregateTargetMatrix(sourceRecords, defaultSource, { singleMonthBaselineOnly: true });
+    setSalesAllMonthsSourceMonth(defaultSource);
+    setSalesAllMonthsMode('per_sales');
+    setSalesAllMonthsScope('ALL_MONTHS');
+    setSalesUniformSellIn(DEFAULT_SALES_TARGET);
+    setSalesUniformSellOut(DEFAULT_SALES_SELLOUT_TARGET);
+    setSalesAllMonthsDraft(
+      baseMatrix.sales.map((sl) => ({
+        salesName: sl.salesName,
+        coverArea: sl.coverArea,
+        targetSellIn: sl.targetSellIn,
+        targetSellOut: sl.targetSellOut ?? DEFAULT_SALES_SELLOUT_TARGET,
+      }))
+    );
+    setIsSalesAllMonthsOpen(true);
+  };
+
+  const handleApplySalesAllMonths = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (salesAllMonthsMode === 'copy_month') {
+      const { salesCount, monthCount } = copySalesTargetsToAllMonths(salesAllMonthsSourceMonth, sourceRecords);
+      setIsSalesAllMonthsOpen(false);
+      setRefreshKey((k) => k + 1);
+      if (onTargetUpdated) onTargetUpdated();
+      showNotification(
+        `Target Sales dari ${getMonthDisplayLabel(salesAllMonthsSourceMonth)} (${salesCount} Sales) berhasil disamakan ke seluruh ${monthCount} bulan (Jan–Des 2026)!`
+      );
+      return;
+    }
+
+    applyBulkSalesTargets(salesAllMonthsDraft, salesAllMonthsScope, selectedMonth);
+    setIsSalesAllMonthsOpen(false);
+    setRefreshKey((k) => k + 1);
+    if (onTargetUpdated) onTargetUpdated();
+    showNotification(
+      salesAllMonthsScope === 'ALL_MONTHS'
+        ? `Target Sell In & Sell Out (${salesAllMonthsDraft.length} Sales) berhasil diterapkan SAMA ke seluruh 12 bulan (Jan–Des 2026)!`
+        : `Target Sell In & Sell Out (${salesAllMonthsDraft.length} Sales) berhasil disimpan untuk periode ${activeMonthLabel}!`
     );
   };
 
@@ -584,19 +696,35 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
       saveSpvSellOutTargets(current, selectedMonth);
       showNotification(`Target Sell Out serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.spvs.length} SPV!`);
     } else if (batchTargetType === 'sales') {
-      const current: Record<string, number> = {};
-      matrixData.sales.forEach((sl) => {
-        current[sl.salesName] = batchTargetValue;
-      });
-      saveSalesTargets(current, selectedMonth);
-      showNotification(`Target Sell In serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.sales.length} Sales!`);
+      if (batchBaApplyAllMonths) {
+        applyBulkSalesTargets(
+          matrixData.sales.map((sl) => ({ salesName: sl.salesName, targetSellIn: batchTargetValue })),
+          'ALL_MONTHS'
+        );
+        showNotification(`Target Sell In serentak ${formatRupiah(batchTargetValue)}/bln diterapkan SAMA ke semua 12 bulan (Jan–Des 2026) untuk ${matrixData.sales.length} Sales!`);
+      } else {
+        const current: Record<string, number> = {};
+        matrixData.sales.forEach((sl) => {
+          current[sl.salesName] = batchTargetValue;
+        });
+        saveSalesTargets(current, selectedMonth);
+        showNotification(`Target Sell In serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.sales.length} Sales!`);
+      }
     } else if (batchTargetType === 'sales_out') {
-      const current: Record<string, number> = {};
-      matrixData.sales.forEach((sl) => {
-        current[sl.salesName] = batchTargetValue;
-      });
-      saveSalesSellOutTargets(current, selectedMonth);
-      showNotification(`Target Sell Out serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.sales.length} Sales!`);
+      if (batchBaApplyAllMonths) {
+        applyBulkSalesTargets(
+          matrixData.sales.map((sl) => ({ salesName: sl.salesName, targetSellOut: batchTargetValue })),
+          'ALL_MONTHS'
+        );
+        showNotification(`Target Sell Out serentak ${formatRupiah(batchTargetValue)}/bln diterapkan SAMA ke semua 12 bulan (Jan–Des 2026) untuk ${matrixData.sales.length} Sales!`);
+      } else {
+        const current: Record<string, number> = {};
+        matrixData.sales.forEach((sl) => {
+          current[sl.salesName] = batchTargetValue;
+        });
+        saveSalesSellOutTargets(current, selectedMonth);
+        showNotification(`Target Sell Out serentak ${formatRupiah(batchTargetValue)} (${activeMonthLabel}) diterapkan ke ${matrixData.sales.length} Sales!`);
+      }
     } else if (batchTargetType === 'ba_non') {
       if (batchBaApplyAllMonths) {
         applyUniformBaTargets(
@@ -769,6 +897,97 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     if (onTargetUpdated) onTargetUpdated();
   };
 
+  // Handlers for Store Sell In Target & Formula Controls
+  const handleChangeStoreFormulaMode = (mode: StoreSellInFormulaMode) => {
+    saveStoreSellInFormulaMode(mode);
+    setRefreshKey((k) => k + 1);
+    if (onTargetUpdated) onTargetUpdated();
+    showNotification(
+      mode === 'global'
+        ? 'Mode Rumus diubah ke Kontribusi Global Toko × Total Target Sales (sinkron Achieve Quartal).'
+        : 'Mode Rumus diubah ke Kontribusi Per-Sales × Target Sales Ybs (sinkron Achieve Quartal).',
+      'info'
+    );
+  };
+
+  const handleOpenEditStoreSellIn = (item: StoreSellInTargetItem) => {
+    setEditingStoreSellIn(item);
+    setStoreSellInTargetInput(Math.round(item.targetSellIn));
+    setStoreSellInContributionInput(Number(item.contributionPct.toFixed(2)));
+    setStoreSellInApplyAllMonths(false);
+  };
+
+  const handleSaveStoreSellInTarget = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingStoreSellIn) return;
+    const cleanVal = Math.max(0, Math.round(Number(storeSellInTargetInput) || 0));
+    if (storeSellInApplyAllMonths) {
+      applySingleStoreSellInToAllMonths(editingStoreSellIn.storeName, cleanVal);
+      showNotification(
+        `Target Sell In Toko "${editingStoreSellIn.storeName}" (${formatRupiah(cleanVal)}/bln) diterapkan ke SEMUA 12 bulan & tersinkron ke Achieve Quartal!`
+      );
+    } else {
+      setSingleStoreSellInOverride(editingStoreSellIn.storeName, cleanVal, selectedMonth);
+      showNotification(
+        `Target Sell In Toko "${editingStoreSellIn.storeName}" (${activeMonthLabel}) disimpan: ${formatRupiah(cleanVal)} & tersinkron ke Achieve Quartal!`
+      );
+    }
+    setEditingStoreSellIn(null);
+    setRefreshKey((k) => k + 1);
+    if (onTargetUpdated) onTargetUpdated();
+  };
+
+  const handleResetSingleStoreSellIn = (item: StoreSellInTargetItem) => {
+    clearSingleStoreSellInOverride(item.storeName, selectedMonth);
+    setEditingStoreSellIn(null);
+    setRefreshKey((k) => k + 1);
+    if (onTargetUpdated) onTargetUpdated();
+    showNotification(
+      `Target Sell In "${item.storeName}" dikembalikan ke rumus otomatis (${formatRupiah(item.autoTargetSellIn)}).`,
+      'info'
+    );
+  };
+
+  const handleResetAllStoresToFormula = () => {
+    clearAllStoreSellInOverrides(selectedMonth);
+    setRefreshKey((k) => k + 1);
+    if (onTargetUpdated) onTargetUpdated();
+    showNotification(
+      `Seluruh target toko (${activeMonthLabel}) dikembalikan ke hitungan rumus otomatis % Kontribusi × Target Sales!`,
+      'info'
+    );
+  };
+
+  const handleSaveStorePoolTarget = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanPool = Math.max(0, Math.round(Number(storePoolInput) || 0));
+    if (storePoolApplyAllMonths) {
+      applyStoreSellInPoolToAllMonths(cleanPool);
+      showNotification(
+        `Basis Total Target Toko (${formatRupiah(cleanPool)}/bln) diterapkan ke semua 12 bulan & otomatis menghitung ulang target tiap toko!`
+      );
+    } else {
+      saveStoreSellInPool(cleanPool, selectedMonth);
+      showNotification(
+        `Basis Total Target Toko (${activeMonthLabel}) diubah ke ${formatRupiah(cleanPool)} & otomatis menghitung ulang target tiap toko!`
+      );
+    }
+    setIsStorePoolModalOpen(false);
+    setRefreshKey((k) => k + 1);
+    if (onTargetUpdated) onTargetUpdated();
+  };
+
+  const handleResetStorePoolToSales = () => {
+    saveStoreSellInPool(undefined, selectedMonth);
+    setIsStorePoolModalOpen(false);
+    setRefreshKey((k) => k + 1);
+    if (onTargetUpdated) onTargetUpdated();
+    showNotification(
+      `Basis Target Toko (${activeMonthLabel}) disinkronkan kembali dengan Total Target Sell In Sales!`,
+      'info'
+    );
+  };
+
   // Export Target Matrix to Excel
   const handleExportExcel = () => {
     try {
@@ -830,7 +1049,29 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
       const wsSales = XLSX.utils.json_to_sheet(salesRows);
       XLSX.utils.book_append_sheet(wb, wsSales, 'Target Sales');
 
-      // Sheet 4: Target BA
+      // Sheet 4: Target Sell In Toko
+      const storeSellInRows = storeSellInMatrix.stores.map((st, idx) => ({
+        No: idx + 1,
+        'Nama Toko': st.storeName,
+        'Beauty Advisor (BA)': st.baName,
+        Sales: st.salesName,
+        SPV: st.spv,
+        Area: st.coverArea,
+        'Sell In 3 Bln Sblm Total (IDR)': Math.round(st.prior3MonthsTotalSellIn),
+        'Avg Sell In 3 Bln Sblm / Bln (IDR)': Math.round(st.prior3MonthsAvgSellIn),
+        '% Kontribusi Toko': `${st.contributionPct.toFixed(2)}%`,
+        'Target Otomatis Rumus (IDR)': Math.round(st.autoTargetSellIn),
+        'Target Sell In Aktif (IDR)': Math.round(st.targetSellIn),
+        'Mode Sumber': st.isCustom ? 'Edit Manual' : 'Rumus Otomatis',
+        'Realisasi Sell In (IDR)': Math.round(st.actualSellIn),
+        'Gap Sell In (IDR)': Math.round(st.gapSellIn),
+        '% Pencapaian': `${st.achievementPct.toFixed(1)}%`,
+        Status: st.status === 'achieved' ? 'Tercapai (≥100%)' : st.status === 'on_track' ? 'On Track (80-99%)' : 'Belum Capai (<80%)',
+      }));
+      const wsStoreSellIn = XLSX.utils.json_to_sheet(storeSellInRows);
+      XLSX.utils.book_append_sheet(wb, wsStoreSellIn, 'Target Sell In Toko');
+
+      // Sheet 5: Target BA
       const baRows = matrixData.bas.map((b, idx) => ({
         No: idx + 1,
         'Nama BA': b.baName,
@@ -947,6 +1188,33 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
       return matchQ && matchS;
     });
   }, [matrixData.trainers, effectiveSearch, statusFilter, filters.REGION]);
+
+  const filteredStoreSellIns = useMemo(() => {
+    return storeSellInMatrix.stores.filter((st) => {
+      if (filters.SALES && filters.SALES !== 'ALL' && st.salesName.toUpperCase() !== filters.SALES.toUpperCase()) {
+        return false;
+      }
+      if (filters.SPV && filters.SPV !== 'ALL' && st.spv.toUpperCase() !== filters.SPV.toUpperCase()) {
+        return false;
+      }
+      if (filters.REGION && filters.REGION !== 'ALL') {
+        const reg = filters.REGION.toUpperCase();
+        if (st.coverArea.toUpperCase() !== reg && st.region.toUpperCase() !== reg) return false;
+      }
+      if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL') {
+        if (st.storeName.toUpperCase() !== filters.NAMA_STORE.toUpperCase()) return false;
+      }
+      const matchQ =
+        !effectiveSearch ||
+        st.storeName.toLowerCase().includes(effectiveSearch) ||
+        st.baName.toLowerCase().includes(effectiveSearch) ||
+        st.salesName.toLowerCase().includes(effectiveSearch) ||
+        st.coverArea.toLowerCase().includes(effectiveSearch) ||
+        st.region.toLowerCase().includes(effectiveSearch);
+      const matchS = statusFilter === 'all' || st.status === statusFilter;
+      return matchQ && matchS;
+    });
+  }, [storeSellInMatrix.stores, effectiveSearch, statusFilter, filters]);
 
   return (
     <div className="space-y-6">
@@ -1388,6 +1656,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 <span>SPV Out: <strong className="text-teal-200">{formatRupiah(allConfiguredMatrix.summary.totalSpvTargetSellOut, true)}</strong></span>
                 <span>Sales In: <strong className="text-indigo-200">{formatRupiah(allConfiguredMatrix.summary.totalSalesTarget, true)}</strong></span>
                 <span>Sales Out: <strong className="text-teal-200">{formatRupiah(allConfiguredMatrix.summary.totalSalesTargetSellOut, true)}</strong></span>
+                <span>Toko Sell In: <strong className="text-sky-200">{formatRupiah(allConfiguredStoreMatrix.totalEffectiveTargetSellIn, true)}</strong></span>
                 <span>BA Toko: <strong className="text-emerald-200">{formatRupiah(allConfiguredMatrix.summary.totalBaTarget, true)}</strong> ({allConfiguredMatrix.summary.totalBaFocusTargetPcs.toLocaleString('id-ID')} pcs)</span>
                 <span>Trainer: <strong className="text-amber-200">{formatRupiah(allConfiguredMatrix.summary.totalTrainerTargetSellOut, true)}</strong> ({allConfiguredMatrix.summary.totalTrainerTargetFocusPcs.toLocaleString('id-ID')} pcs)</span>
               </div>
@@ -1448,6 +1717,18 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
           </button>
 
           <button
+            onClick={() => setSubTab('store_sellin')}
+            className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-black transition-all cursor-pointer ${
+              subTab === 'store_sellin'
+                ? 'bg-sky-600 text-white shadow-md shadow-sky-600/30'
+                : 'bg-slate-50 text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            <Building2 className="w-4 h-4" />
+            <span>4. Target Sell In Toko ({storeSellInMatrix.stores.length})</span>
+          </button>
+
+          <button
             onClick={() => setSubTab('ba')}
             className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-black transition-all cursor-pointer ${
               subTab === 'ba'
@@ -1456,7 +1737,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
             }`}
           >
             <Store className="w-4 h-4" />
-            <span>4. Target BA Toko &amp; Produk Fokus ({matrixData.bas.length})</span>
+            <span>5. Target BA Toko &amp; Produk Fokus ({matrixData.bas.length})</span>
           </button>
 
           <button
@@ -1468,7 +1749,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
             }`}
           >
             <GraduationCap className="w-4 h-4" />
-            <span>5. Target Trainer ({matrixData.trainers?.length || 0})</span>
+            <span>6. Target Trainer ({matrixData.trainers?.length || 0})</span>
           </button>
         </div>
 
@@ -1948,6 +2229,15 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                   <strong className="text-teal-700 font-bold">{formatRupiah(matrixData.summary.totalSalesTargetSellOut)}</strong>
                 </span>
               )}
+              <button
+                type="button"
+                onClick={handleOpenSalesAllMonthsModal}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-sans font-bold text-xs shadow-xs cursor-pointer transition-all"
+                title="Atur Target Sell In & Sell Out Sales agar berlaku sekaligus untuk seluruh 12 bulan (Jan–Des 2026)"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Setting Target Sales 1 Bln = Semua Bulan</span>
+              </button>
             </div>
           </div>
 
@@ -2077,9 +2367,15 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                       <td className="py-3 px-3.5 text-center">
                         <button
                           onClick={() => {
+                            const isAccumulatedAll =
+                              selectedMonth === 'ALL' && matrixData.summary.accumulatedMonthCount > 1;
+                            const divisor = isAccumulatedAll ? matrixData.summary.accumulatedMonthCount : 1;
                             setEditingSales(item);
-                            setSalesTargetInput(item.targetSellIn);
-                            setSalesSellOutInput(item.targetSellOut ?? DEFAULT_SALES_SELLOUT_TARGET);
+                            setSalesTargetInput(Math.max(1, Math.round(item.targetSellIn / divisor)));
+                            setSalesSellOutInput(
+                              Math.max(1, Math.round((item.targetSellOut ?? DEFAULT_SALES_SELLOUT_TARGET) / divisor))
+                            );
+                            setSalesApplyAllMonths(isAccumulatedAll);
                           }}
                           className="px-2.5 py-1 rounded-lg border border-indigo-300 text-indigo-700 hover:bg-indigo-50 transition-colors shadow-2xs cursor-pointer font-bold flex items-center gap-1 mx-auto whitespace-nowrap"
                         >
@@ -2572,6 +2868,332 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                   ))
                 )}
               </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================================= */}
+      {/* SUBTAB 6: TARGET SELL IN TOKO (RUMUS OTOMATIS % KONTRIBUSI 3 BLN SBLM x TARGET SALES)    */}
+      {/* ========================================================================================= */}
+      {subTab === 'store_sellin' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-6 shadow-xs space-y-4">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+            <div>
+              <h3 className="text-sm sm:text-base font-extrabold text-slate-900 flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-sky-600" />
+                Setting Target Sell In Per Toko ({activeMonthLabel}) — Tersinkron ke Achieve Quartal
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Rumus otomatis: <strong>% Kontribusi Sell In Toko (Avg Sell In 3 Bulan Sebelumnya)</strong> ×{' '}
+                <strong>Target Sell In Sales yang Sudah Disetting</strong>. Dapat diedit manual per toko maupun basis targetnya, dan langsung menyinkronkan{' '}
+                <strong>Target Sell In</strong> pada menu <strong>Achieve Quartal</strong>.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setStorePoolInput(Math.round(storeSellInMatrix.poolTarget));
+                  setStorePoolApplyAllMonths(false);
+                  setIsStorePoolModalOpen(true);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold shadow-xs cursor-pointer transition-all"
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>Ubah Basis Target Sales / Toko</span>
+              </button>
+
+              {storeSellInMatrix.isPoolCustom && (
+                <button
+                  type="button"
+                  onClick={handleResetStorePoolToSales}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer transition-all"
+                  title="Kembalikan basis perhitungan toko mengikuti total Target Sell In Sales"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reset Basis ke Target Sales</span>
+                </button>
+              )}
+
+              {storeSellInMatrix.customOverrideCount > 0 && (
+                <button
+                  type="button"
+                  onClick={handleResetAllStoresToFormula}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-xs font-bold cursor-pointer transition-all"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reset {storeSellInMatrix.customOverrideCount} Toko ke Rumus Otomatis</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Formula Control & Lookback Guide Banner */}
+          <div className="p-4 rounded-2xl bg-gradient-to-r from-sky-50 via-cyan-50/60 to-indigo-50/50 border border-sky-200 space-y-3">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg bg-sky-600 text-white text-[11px] font-extrabold">
+                    <Calculator className="w-3.5 h-3.5" />
+                    Rumus Otomatis Aktif
+                  </span>
+                  <span className="text-xs font-bold text-sky-950">
+                    Periode Lookback: {storeSellInMatrix.priorPeriodDescription}
+                  </span>
+                </div>
+                <p className="text-[11px] text-sky-900/80">
+                  {storeSellInMatrix.formulaMode === 'global' ? (
+                    <>
+                      <strong>Mode Global:</strong> % Kontribusi = (Avg Sell In Toko 3 Bln Sblm ÷ Total Avg Semua Toko 3 Bln Sblm) × 100%, lalu dikalikan{' '}
+                      <strong>Total Basis Target Sales ({formatRupiah(storeSellInMatrix.poolTarget)})</strong>.
+                    </>
+                  ) : (
+                    <>
+                      <strong>Mode Per-Sales:</strong> % Kontribusi = (Avg Sell In Toko 3 Bln Sblm ÷ Avg Tim Sales Ybs 3 Bln Sblm) × 100%, lalu dikalikan{' '}
+                      <strong>Target Sell In Sales Ybs</strong>.
+                    </>
+                  )}
+                </p>
+              </div>
+
+              {/* Formula Mode Toggle */}
+              <div className="flex flex-wrap items-center gap-1.5 bg-white p-1 rounded-xl border border-sky-200 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => handleChangeStoreFormulaMode('global')}
+                  className={`px-3 py-1.5 rounded-lg text-[11px] font-extrabold transition-all cursor-pointer ${
+                    storeSellInMatrix.formulaMode === 'global'
+                      ? 'bg-sky-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  Kontribusi Global × Total Sales
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleChangeStoreFormulaMode('per_sales')}
+                  className={`px-3 py-1.5 rounded-lg text-[11px] font-extrabold transition-all cursor-pointer ${
+                    storeSellInMatrix.formulaMode === 'per_sales'
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  Kontribusi Per-Sales × Target Sales Ybs
+                </button>
+              </div>
+            </div>
+
+            {/* 4 Mini Summary KPI Boxes */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 pt-2 border-t border-sky-200/70 text-xs">
+              <div className="p-2.5 rounded-xl bg-white/90 border border-sky-100">
+                <div className="text-[10px] font-bold text-slate-500 uppercase">Basis Target Sales Diset</div>
+                <div className="text-sm font-black font-mono text-sky-900 mt-0.5 tabular-nums">
+                  {formatRupiah(storeSellInMatrix.poolTarget)}
+                </div>
+                <div className="text-[10px] mt-0.5">
+                  {storeSellInMatrix.isPoolCustom ? (
+                    <span className="text-amber-700 font-bold">
+                      Custom (Default Sales: {formatRupiah(storeSellInMatrix.defaultSalesPoolTarget, true)})
+                    </span>
+                  ) : (
+                    <span className="text-emerald-700 font-semibold">Sinkron Total Target Sell In Sales</span>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-white/90 border border-sky-100">
+                <div className="text-[10px] font-bold text-slate-500 uppercase">Total Avg Sell In 3 Bln Sblm</div>
+                <div className="text-sm font-black font-mono text-slate-900 mt-0.5 tabular-nums">
+                  {formatRupiah(storeSellInMatrix.totalPrior3MonthsAvg)}
+                </div>
+                <div className="text-[10px] text-slate-500 mt-0.5">
+                  Dasar pembagi % kontribusi seluruh gerai ({storeSellInMatrix.stores.length} toko)
+                </div>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-white/90 border border-sky-100">
+                <div className="text-[10px] font-bold text-slate-500 uppercase">Total Target Toko Aktif</div>
+                <div className="text-sm font-black font-mono text-indigo-900 mt-0.5 tabular-nums">
+                  {formatRupiah(storeSellInMatrix.totalEffectiveTargetSellIn)}
+                </div>
+                <div className="text-[10px] text-indigo-700 mt-0.5">
+                  Rumus: {formatRupiah(storeSellInMatrix.totalAutoTargetSellIn, true)} • {storeSellInMatrix.customOverrideCount} toko diedit manual
+                </div>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-white/90 border border-sky-100">
+                <div className="text-[10px] font-bold text-slate-500 uppercase">Realisasi Sell In Toko</div>
+                <div className="text-sm font-black font-mono text-emerald-800 mt-0.5 tabular-nums">
+                  {formatRupiah(storeSellInMatrix.totalActualSellIn)}
+                </div>
+                <div className="text-[10px] font-bold text-emerald-700 mt-0.5">
+                  Capaian: {storeSellInMatrix.achievementPct.toFixed(1)}% ({filteredStoreSellIns.length} toko ditampilkan)
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Store Sell In Table */}
+          <div className="overflow-x-auto border border-slate-200 rounded-xl">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-slate-200 text-slate-600 font-bold bg-slate-50">
+                  <th className="py-3 px-3">No</th>
+                  <th className="py-3 px-3">Nama Toko &amp; BA</th>
+                  <th className="py-3 px-3">Sales &amp; Area</th>
+                  <th className="py-3 px-3 text-right">Sell In 3 Bln Sblm</th>
+                  <th className="py-3 px-3 text-right">Avg / Bln (3 Bln Sblm)</th>
+                  <th className="py-3 px-3 text-center bg-sky-50/70 text-sky-950">% Kontribusi</th>
+                  <th className="py-3 px-3 text-right bg-slate-100/70">Target Rumus (Rp)</th>
+                  <th className="py-3 px-3 text-right bg-indigo-50/70 text-indigo-950">Target Sell In Aktif (Rp)</th>
+                  <th className="py-3 px-3 text-right">Realisasi Sell In</th>
+                  <th className="py-3 px-2.5 text-center">% Capai</th>
+                  <th className="py-3 px-3 text-center">Aksi</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filteredStoreSellIns.length === 0 ? (
+                  <tr>
+                    <td colSpan={11} className="py-10 text-center text-slate-400 font-medium">
+                      Tidak ada data toko yang sesuai dengan filter.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredStoreSellIns.map((item, idx) => (
+                    <tr key={item.storeName} className="hover:bg-sky-50/25 transition-colors">
+                      <td className="py-3 px-3 font-mono text-slate-400">{idx + 1}</td>
+                      <td className="py-3 px-3 max-w-[240px]">
+                        <div className="font-extrabold text-slate-900 flex items-center gap-1.5 flex-wrap">
+                          <span>{item.storeName}</span>
+                          {item.isCustom ? (
+                            <span className="px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 border border-amber-300 text-[9px] font-bold">
+                              Edit Manual
+                            </span>
+                          ) : (
+                            <span className="px-1.5 py-0.2 rounded bg-sky-100 text-sky-800 border border-sky-200 text-[9px] font-bold">
+                              Rumus
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-500 mt-0.5 truncate" title={item.baName}>
+                          BA: <strong className="text-slate-700">{item.baName}</strong>
+                        </div>
+                      </td>
+                      <td className="py-3 px-3">
+                        <div className="font-bold text-slate-800">{item.salesName}</div>
+                        <div className="text-[10px] text-slate-500">
+                          {item.coverArea} • SPV {item.spv}
+                        </div>
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-600">
+                        {formatRupiah(item.prior3MonthsTotalSellIn)}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono tabular-nums font-bold text-slate-900">
+                        {formatRupiah(item.prior3MonthsAvgSellIn)}
+                      </td>
+                      <td className="py-3 px-3 text-center font-mono tabular-nums bg-sky-50/30">
+                        <span className="inline-block px-2 py-0.5 rounded-lg bg-sky-100 text-sky-900 font-extrabold text-[11px]">
+                          {item.contributionPct.toFixed(2)}%
+                        </span>
+                        {storeSellInMatrix.formulaMode === 'per_sales' && (
+                          <div className="text-[9px] text-slate-500 mt-0.5">
+                            Global: {item.globalContributionPct.toFixed(2)}%
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-600 bg-slate-50/70">
+                        {formatRupiah(item.autoTargetSellIn)}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono tabular-nums bg-indigo-50/30">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenEditStoreSellIn(item)}
+                          className="font-black text-indigo-950 text-sm hover:text-indigo-600 underline decoration-dotted underline-offset-4 cursor-pointer"
+                          title="Klik untuk edit Target Sell In Toko ini"
+                        >
+                          {formatRupiah(item.targetSellIn)}
+                        </button>
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono tabular-nums font-bold text-slate-900">
+                        {formatRupiah(item.actualSellIn)}
+                      </td>
+                      <td className="py-3 px-2.5 text-center">
+                        <span
+                          className={`inline-block px-2 py-0.5 rounded font-mono tabular-nums font-bold text-[11px] ${
+                            item.achievementPct >= 100
+                              ? 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300'
+                              : item.achievementPct >= 80
+                              ? 'bg-sky-100 text-sky-800'
+                              : 'bg-rose-100 text-rose-800'
+                          }`}
+                        >
+                          {item.achievementPct.toFixed(1)}%
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 text-center">
+                        <div className="flex items-center justify-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditStoreSellIn(item)}
+                            className="px-2 py-1 rounded-lg border border-sky-300 text-sky-800 hover:bg-sky-50 transition-colors shadow-2xs cursor-pointer font-bold flex items-center gap-1"
+                            title="Edit Target Sell In Toko Ini"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                            <span className="text-[11px]">Ubah</span>
+                          </button>
+                          {item.isCustom && (
+                            <button
+                              type="button"
+                              onClick={() => handleResetSingleStoreSellIn(item)}
+                              className="p-1.5 rounded-lg border border-amber-300 text-amber-800 hover:bg-amber-50 transition-colors cursor-pointer"
+                              title="Kembalikan toko ini ke rumus otomatis"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+              {filteredStoreSellIns.length > 0 && (
+                <tfoot>
+                  <tr className="border-t-2 border-slate-300 bg-slate-100/90 font-extrabold text-slate-900 text-xs">
+                    <td colSpan={3} className="py-3 px-3">
+                      TOTAL ({filteredStoreSellIns.length} Toko Ditampilkan)
+                    </td>
+                    <td className="py-3 px-3 text-right font-mono tabular-nums">
+                      {formatRupiah(filteredStoreSellIns.reduce((s, r) => s + r.prior3MonthsTotalSellIn, 0))}
+                    </td>
+                    <td className="py-3 px-3 text-right font-mono tabular-nums">
+                      {formatRupiah(filteredStoreSellIns.reduce((s, r) => s + r.prior3MonthsAvgSellIn, 0))}
+                    </td>
+                    <td className="py-3 px-3 text-center font-mono tabular-nums text-sky-900">
+                      {filteredStoreSellIns.reduce((s, r) => s + r.globalContributionPct, 0).toFixed(1)}%
+                    </td>
+                    <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-700">
+                      {formatRupiah(filteredStoreSellIns.reduce((s, r) => s + r.autoTargetSellIn, 0))}
+                    </td>
+                    <td className="py-3 px-3 text-right font-mono tabular-nums text-indigo-950">
+                      {formatRupiah(filteredStoreSellIns.reduce((s, r) => s + r.targetSellIn, 0))}
+                    </td>
+                    <td className="py-3 px-3 text-right font-mono tabular-nums">
+                      {formatRupiah(filteredStoreSellIns.reduce((s, r) => s + r.actualSellIn, 0))}
+                    </td>
+                    <td className="py-3 px-2.5 text-center font-mono tabular-nums">
+                      {(() => {
+                        const totT = filteredStoreSellIns.reduce((s, r) => s + r.targetSellIn, 0);
+                        const totA = filteredStoreSellIns.reduce((s, r) => s + r.actualSellIn, 0);
+                        return `${(totT > 0 ? (totA / totT) * 100 : 0).toFixed(1)}%`;
+                      })()}
+                    </td>
+                    <td className="py-3 px-3" />
+                  </tr>
+                </tfoot>
+              )}
             </table>
           </div>
         </div>
@@ -3076,16 +3698,16 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
       )}
 
       {/* ========================================================================================= */}
-      {/* MODAL 3: EDIT TARGET SALES (SELL IN & SELL OUT PER BULAN) */}
+      {/* MODAL 3: EDIT TARGET SALES (SELL IN & SELL OUT PER BULAN ATAU SEMUA BULAN SEKALIGUS)      */}
       {/* ========================================================================================= */}
       {editingSales && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-slate-100 overflow-hidden">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-200 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-slate-100 overflow-hidden my-6">
             <div className="p-5 bg-gradient-to-r from-indigo-800 to-slate-900 text-white flex items-center justify-between">
               <div>
                 <h3 className="text-base font-extrabold flex items-center gap-2">
                   <Users className="w-4 h-4 text-indigo-300" />
-                  Edit Target Sales ({activeMonthLabel})
+                  Edit Target Sales ({salesApplyAllMonths ? 'Semua 12 Bulan' : activeMonthLabel})
                 </h3>
                 <p className="text-xs text-indigo-200 mt-0.5">{editingSales.salesName} • {editingSales.coverArea}</p>
               </div>
@@ -3099,7 +3721,9 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
 
             <form onSubmit={handleSaveSalesTarget} className="p-5 space-y-4 text-xs">
               <div>
-                <label className="block text-slate-700 font-bold mb-1">Target Sell In Sales (Rp)</label>
+                <label className="block text-slate-700 font-bold mb-1">
+                  Target Sell In Sales {salesApplyAllMonths ? 'Per Bulan' : ''} (Rp)
+                </label>
                 <input
                   type="number"
                   step="any"
@@ -3110,11 +3734,14 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 />
                 <span className="text-[11px] text-slate-500 font-mono mt-1 block">
                   Terbilang: {formatRupiah(salesTargetInput)}
+                  {salesApplyAllMonths ? ` / bln (12 bln = ${formatRupiah(salesTargetInput * 12)})` : ''}
                 </span>
               </div>
 
               <div>
-                <label className="block text-teal-900 font-bold mb-1">Target Sell Out Sales (Rp)</label>
+                <label className="block text-teal-900 font-bold mb-1">
+                  Target Sell Out Sales {salesApplyAllMonths ? 'Per Bulan' : ''} (Rp)
+                </label>
                 <input
                   type="number"
                   step="any"
@@ -3124,20 +3751,67 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                   required
                 />
                 <span className="text-[11px] text-slate-500 font-mono mt-1 block">
-                  Terbilang: {formatRupiah(salesSellOutInput)} (Sinkron ke Analisa Sales &amp; KPI)
+                  Terbilang: {formatRupiah(salesSellOutInput)}
+                  {salesApplyAllMonths ? ` / bln (12 bln = ${formatRupiah(salesSellOutInput * 12)})` : ' (Sinkron ke Analisa Sales & KPI)'}
                 </span>
+              </div>
+
+              {/* Opsi Terapkan Sama untuk Semua 12 Bulan (Jan - Des 2026) */}
+              <div className="p-3 rounded-xl border border-indigo-200 bg-indigo-50/60 space-y-2">
+                <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={salesApplyAllMonths}
+                    onChange={(e) => setSalesApplyAllMonths(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                  />
+                  <div className="leading-snug">
+                    <span className="font-extrabold text-indigo-950 block">
+                      Terapkan target Sales ini sama untuk SEMUA bulan (Januari – Desember 2026)
+                    </span>
+                    <span className="text-[11px] text-indigo-800">
+                      {salesApplyAllMonths
+                        ? 'Nominal di atas akan diset sebagai target per 1 bulan yang sama di seluruh 12 bulan (Jan–Des 2026).'
+                        : `Saat ini hanya disimpan untuk periode: ${activeMonthLabel}. Centang jika ingin semua bulan diset sama sekaligus.`}
+                    </span>
+                  </div>
+                </label>
+
+                {selectedMonth === 'ALL' && matrixData.summary.accumulatedMonthCount > 1 && !salesApplyAllMonths && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-indigo-200/70 text-[11px] text-indigo-900">
+                    <span>
+                      Anda sedang melihat total {matrixData.summary.accumulatedMonthCount} bulan.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSalesApplyAllMonths(true);
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer"
+                    >
+                      Set untuk 12 Bulan Sekaligus
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Simulation card of 0.4% incentive */}
               {(() => {
-                const projPct = (editingSales.actualSellIn / (salesTargetInput || 1)) * 100;
+                const simMultiplier =
+                  selectedMonth === 'ALL' && salesApplyAllMonths
+                    ? (matrixData.summary.accumulatedMonthCount || 12)
+                    : 1;
+                const effectiveTarget = (salesTargetInput || 1) * simMultiplier;
+                const projPct = (editingSales.actualSellIn / effectiveTarget) * 100;
                 const incPct = projPct >= 100 ? 0.4 : projPct >= 80 ? 0.2 : 0;
                 const estInc = Math.round((incPct / 100) * editingSales.actualSellIn);
 
                 return (
                   <div className="p-3.5 bg-gradient-to-br from-indigo-50 to-white rounded-xl border border-indigo-200 space-y-2 text-slate-700">
                     <div className="flex justify-between items-center">
-                      <span className="font-bold text-indigo-900">Proyeksi Capai Sell In:</span>
+                      <span className="font-bold text-indigo-900">
+                        Proyeksi Capai Sell In{simMultiplier > 1 ? ` (${simMultiplier} Bln)` : ''}:
+                      </span>
                       <span className="font-mono font-black text-sm text-indigo-950">
                         {projPct.toFixed(1)}% ({projPct >= 100 ? 'Memenuhi 0,4%' : projPct >= 80 ? '0,2%' : '0%'})
                       </span>
@@ -3169,7 +3843,280 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                   className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold shadow-md shadow-indigo-600/30 flex items-center gap-1.5 cursor-pointer"
                 >
                   <Save className="w-4 h-4" />
-                  <span>Simpan Target Sales</span>
+                  <span>{salesApplyAllMonths ? 'Simpan untuk Semua 12 Bulan' : 'Simpan Target Sales'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================================= */}
+      {/* MODAL: SETTING TARGET SALES 1 BULAN -> SEMUA BULAN SEKALIGUS (6 SALES, JAN - DES 2026)     */}
+      {/* ========================================================================================= */}
+      {isSalesAllMonthsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-200 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-3xl w-full shadow-2xl border border-slate-100 overflow-hidden my-6 max-h-[92vh] flex flex-col">
+            <div className="p-5 bg-gradient-to-r from-indigo-900 via-slate-900 to-teal-900 text-white flex items-center justify-between shrink-0">
+              <div>
+                <h3 className="text-base font-extrabold flex items-center gap-2">
+                  <Users className="w-4 h-4 text-cyan-300" />
+                  Setting Target Sales (Sell In &amp; Sell Out) — Semua Bulan Sekaligus
+                </h3>
+                <p className="text-xs text-indigo-100 mt-0.5">
+                  Atur target per-Sales (Insentif 0,4%) satu kali agar otomatis berlaku untuk seluruh 12 bulan (Januari – Desember 2026)
+                </p>
+              </div>
+              <button
+                onClick={() => setIsSalesAllMonthsOpen(false)}
+                className="p-1 rounded-lg hover:bg-white/10 text-white/80 hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleApplySalesAllMonths} className="p-5 space-y-4 text-xs overflow-y-auto">
+              {/* Mode Switcher */}
+              <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-slate-100 border border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setSalesAllMonthsMode('per_sales')}
+                  className={`py-2 px-3 rounded-lg font-bold transition-all cursor-pointer ${
+                    salesAllMonthsMode === 'per_sales'
+                      ? 'bg-white text-indigo-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Atur Langsung Per Sales ({salesAllMonthsDraft.length} Sales)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSalesAllMonthsMode('copy_month')}
+                  className={`py-2 px-3 rounded-lg font-bold transition-all cursor-pointer ${
+                    salesAllMonthsMode === 'copy_month'
+                      ? 'bg-white text-teal-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Samakan dari 1 Bulan
+                </button>
+              </div>
+
+              {salesAllMonthsMode === 'per_sales' ? (
+                <div className="space-y-3">
+                  {/* Bar Bantu: Samakan Semua Sales */}
+                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-end gap-2.5">
+                    <div className="flex-1">
+                      <label className="block text-[10px] font-bold text-slate-600 uppercase mb-1">
+                        Samakan Sell In / Bln (Opsional)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        step="any"
+                        value={salesUniformSellIn}
+                        onChange={(e) => setSalesUniformSellIn(Math.max(1, Number(e.target.value)))}
+                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white font-mono font-bold text-xs"
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <label className="block text-[10px] font-bold text-slate-600 uppercase mb-1">
+                        Samakan Sell Out / Bln (Opsional)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        step="any"
+                        value={salesUniformSellOut}
+                        onChange={(e) => setSalesUniformSellOut(Math.max(1, Number(e.target.value)))}
+                        className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white font-mono font-bold text-xs"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSalesAllMonthsDraft((prev) =>
+                          prev.map((row) => ({
+                            ...row,
+                            targetSellIn: salesUniformSellIn,
+                            targetSellOut: salesUniformSellOut,
+                          }))
+                        )
+                      }
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs whitespace-nowrap cursor-pointer"
+                    >
+                      Terapkan ke Semua Sales
+                    </button>
+                  </div>
+
+                  {/* Tabel Editable Semua Sales */}
+                  <div className="border border-slate-200 rounded-xl overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-700 font-bold">
+                          <th className="py-2.5 px-3">No</th>
+                          <th className="py-2.5 px-3">Nama Sales &amp; Area</th>
+                          <th className="py-2.5 px-3 bg-indigo-50/50 text-indigo-950">Target Sell In / Bulan (Rp)</th>
+                          <th className="py-2.5 px-3 bg-teal-50/50 text-teal-950">Target Sell Out / Bulan (Rp)</th>
+                          <th className="py-2.5 px-3 text-right">Total 12 Bulan (Sell In)</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {salesAllMonthsDraft.map((row, idx) => (
+                          <tr key={row.salesName} className="hover:bg-slate-50/70">
+                            <td className="py-2 px-3 font-mono text-slate-400">{idx + 1}</td>
+                            <td className="py-2 px-3">
+                              <div className="font-black text-slate-900">{row.salesName}</div>
+                              <div className="text-[10px] text-slate-500">{row.coverArea}</div>
+                            </td>
+                            <td className="py-2 px-3 bg-indigo-50/20">
+                              <input
+                                type="number"
+                                min={1}
+                                step="any"
+                                value={row.targetSellIn}
+                                onChange={(e) => {
+                                  const val = Math.max(1, Number(e.target.value));
+                                  setSalesAllMonthsDraft((prev) =>
+                                    prev.map((r) => (r.salesName === row.salesName ? { ...r, targetSellIn: val } : r))
+                                  );
+                                }}
+                                className="w-full min-w-[140px] px-2.5 py-1.5 rounded-lg border border-indigo-200 bg-white font-mono font-bold text-indigo-950 focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
+                                required
+                              />
+                              <span className="text-[10px] font-mono text-slate-500 block mt-0.5">
+                                {formatRupiah(row.targetSellIn)}
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 bg-teal-50/20">
+                              <input
+                                type="number"
+                                min={1}
+                                step="any"
+                                value={row.targetSellOut}
+                                onChange={(e) => {
+                                  const val = Math.max(1, Number(e.target.value));
+                                  setSalesAllMonthsDraft((prev) =>
+                                    prev.map((r) => (r.salesName === row.salesName ? { ...r, targetSellOut: val } : r))
+                                  );
+                                }}
+                                className="w-full min-w-[140px] px-2.5 py-1.5 rounded-lg border border-teal-200 bg-white font-mono font-bold text-teal-950 focus:outline-hidden focus:ring-2 focus:ring-teal-500"
+                                required
+                              />
+                              <span className="text-[10px] font-mono text-slate-500 block mt-0.5">
+                                {formatRupiah(row.targetSellOut)}
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono font-bold text-indigo-900 whitespace-nowrap">
+                              {formatRupiah(row.targetSellIn * 12)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Scope Switch */}
+                  <div className="space-y-1.5">
+                    <label className="block text-slate-700 font-bold">Cakupan Penerapan Bulan</label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSalesAllMonthsScope('ALL_MONTHS')}
+                        className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                          salesAllMonthsScope === 'ALL_MONTHS'
+                            ? 'border-indigo-600 bg-indigo-50 text-indigo-950 font-extrabold ring-1 ring-indigo-600'
+                            : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 font-bold'
+                        }`}
+                      >
+                        <div>Semua Bulan Sama (12 Bln Sekaligus)</div>
+                        <div className="text-[10px] font-normal opacity-80">Januari – Desember 2026</div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSalesAllMonthsScope('current')}
+                        className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                          salesAllMonthsScope === 'current'
+                            ? 'border-teal-600 bg-teal-50 text-teal-950 font-extrabold ring-1 ring-teal-600'
+                            : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 font-bold'
+                        }`}
+                      >
+                        <div>Hanya Bulan Ini</div>
+                        <div className="text-[10px] font-normal opacity-80">{activeMonthLabel}</div>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-slate-700 font-bold mb-1">
+                      Pilih Pengaturan Target Sales Bulan Sumber (1 Bulan)
+                    </label>
+                    <select
+                      value={salesAllMonthsSourceMonth}
+                      onChange={(e) => setSalesAllMonthsSourceMonth(e.target.value)}
+                      className="w-full px-3 py-2 text-xs font-bold rounded-xl border border-slate-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
+                    >
+                      {MONTH_OPTIONS_2026.map((m) => (
+                        <option key={m.key} value={m.key}>
+                          {m.label}{monthCustomCounts[m.key] > 0 ? ` (${monthCustomCounts[m.key]} custom)` : ''}
+                        </option>
+                      ))}
+                      <option value="ALL">Baseline Global (Default 1 Bulan)</option>
+                    </select>
+                  </div>
+
+                  {salesSourceMonthPreview && (
+                    <div className="p-3.5 rounded-xl bg-indigo-50/70 border border-indigo-200 space-y-2 text-slate-700">
+                      <div className="font-extrabold text-indigo-950">
+                        Pratinjau Target Sales 1 Bulan ({getMonthDisplayLabel(salesAllMonthsSourceMonth)}):
+                      </div>
+                      <div className="flex justify-between font-mono">
+                        <span>Total Target Sell In / Bln ({salesSourceMonthPreview.salesCount} Sales):</span>
+                        <span className="font-bold text-indigo-800">{formatRupiah(salesSourceMonthPreview.totalSellIn)}</span>
+                      </div>
+                      <div className="flex justify-between font-mono">
+                        <span>Total Target Sell Out / Bln ({salesSourceMonthPreview.salesCount} Sales):</span>
+                        <span className="font-bold text-teal-800">{formatRupiah(salesSourceMonthPreview.totalSellOut)}</span>
+                      </div>
+                      <div className="pt-2 border-t border-indigo-200/70 grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px]">
+                        {salesSourceMonthPreview.salesList.map((sl) => (
+                          <div key={sl.salesName} className="flex justify-between bg-white/80 px-2 py-1 rounded border border-indigo-100">
+                            <span className="font-bold text-slate-800">{sl.salesName}</span>
+                            <span className="font-mono text-indigo-900">
+                              {formatRupiah(sl.targetSellIn)} / {formatRupiah(sl.targetSellOut ?? DEFAULT_SALES_SELLOUT_TARGET)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-[11px] leading-relaxed">
+                    Seluruh target <strong>Sell In &amp; Sell Out Sales</strong> dari bulan sumber di atas akan diterapkan sama ke semua 12 bulan (<strong>Januari – Desember 2026</strong>) tanpa mengubah target BA maupun Trainer.
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsSalesAllMonthsOpen(false)}
+                  className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 font-bold cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold shadow-md shadow-indigo-600/30 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>
+                    {salesAllMonthsMode === 'copy_month' || salesAllMonthsScope === 'ALL_MONTHS'
+                      ? 'Terapkan Sama ke Semua 12 Bulan'
+                      : 'Terapkan ke Bulan Ini'}
+                  </span>
                 </button>
               </div>
             </form>
@@ -3796,7 +4743,11 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 </span>
               </div>
 
-              {(batchTargetType === 'ba_non' || batchTargetType === 'ba_lav' || batchTargetType === 'ba_focus') && (
+              {(batchTargetType === 'sales' ||
+                batchTargetType === 'sales_out' ||
+                batchTargetType === 'ba_non' ||
+                batchTargetType === 'ba_lav' ||
+                batchTargetType === 'ba_focus') && (
                 <label className="flex items-start gap-2.5 p-3 rounded-xl border border-indigo-200 bg-indigo-50/60 cursor-pointer select-none">
                   <input
                     type="checkbox"
@@ -3809,7 +4760,7 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                       Terapkan serentak sama untuk SEMUA bulan (Januari – Desember 2026)
                     </span>
                     <span className="text-[11px] text-indigo-800">
-                      Jika dicentang, seluruh 12 bulan otomatis memakai target BA yang sama ini.
+                      Jika dicentang, seluruh 12 bulan otomatis memakai target per bulan yang sama ini.
                     </span>
                   </div>
                 </label>
@@ -3818,7 +4769,12 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
               <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-amber-900 text-[11px] leading-relaxed">
                 <strong>Perhatian:</strong> Target serentak ini diterapkan khusus untuk periode{' '}
                 <strong>
-                  {batchBaApplyAllMonths && (batchTargetType === 'ba_non' || batchTargetType === 'ba_lav' || batchTargetType === 'ba_focus')
+                  {batchBaApplyAllMonths &&
+                  (batchTargetType === 'sales' ||
+                    batchTargetType === 'sales_out' ||
+                    batchTargetType === 'ba_non' ||
+                    batchTargetType === 'ba_lav' ||
+                    batchTargetType === 'ba_focus')
                     ? 'Semua Bulan (Jan–Des 2026)'
                     : activeMonthLabel}
                 </strong>{' '}
@@ -4007,6 +4963,256 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================================= */}
+      {/* MODAL 8: EDIT TARGET SELL IN PER TOKO (MANUAL ATAU BY % KONTRIBUSI)                       */}
+      {/* ========================================================================================= */}
+      {editingStoreSellIn && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-lg w-full shadow-2xl border border-slate-100 overflow-hidden">
+            <div className="p-5 bg-gradient-to-r from-sky-800 via-sky-900 to-indigo-950 text-white flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-extrabold flex items-center gap-2">
+                  <Building2 className="w-5 h-5 text-sky-300" />
+                  Edit Target Sell In Toko ({activeMonthLabel})
+                </h3>
+                <p className="text-xs text-sky-200 mt-0.5">
+                  Toko: <strong>{editingStoreSellIn.storeName}</strong> • BA: {editingStoreSellIn.baName}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingStoreSellIn(null)}
+                className="p-1 rounded-lg hover:bg-white/10 text-white/80 hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveStoreSellInTarget} className="p-5 space-y-4 text-xs">
+              {/* Info Perhitungan Rumus */}
+              <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 space-y-1 text-[11px] text-sky-950">
+                <div className="flex items-center justify-between">
+                  <span>Avg Sell In 3 Bln Sebelumnya:</span>
+                  <strong className="font-mono">{formatRupiah(editingStoreSellIn.prior3MonthsAvgSellIn)} / bln</strong>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>% Kontribusi Rumus Otomatis:</span>
+                  <strong className="font-mono">{editingStoreSellIn.contributionPct.toFixed(2)}%</strong>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Target Otomatis Sesuai Rumus:</span>
+                  <strong className="font-mono text-sky-800">{formatRupiah(editingStoreSellIn.autoTargetSellIn)}</strong>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">
+                    Ubah Target Sell In (Rp)
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={storeSellInTargetInput}
+                    onChange={(e) => {
+                      const val = Math.max(0, Number(e.target.value) || 0);
+                      setStoreSellInTargetInput(val);
+                      const basis =
+                        storeSellInMatrix.formulaMode === 'per_sales'
+                          ? editingStoreSellIn.salesTargetSellInBasis || storeSellInMatrix.poolTarget
+                          : storeSellInMatrix.poolTarget;
+                      if (basis > 0) {
+                        setStoreSellInContributionInput(Number(((val / basis) * 100).toFixed(2)));
+                      }
+                    }}
+                    className="w-full px-3 py-2 text-sm font-mono font-black rounded-xl border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-sky-500"
+                    required
+                  />
+                  <span className="text-[11px] text-slate-500 font-mono mt-1 block">
+                    {formatRupiah(storeSellInTargetInput)}
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">
+                    Atau Hitung dari % Kontribusi
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step="0.01"
+                    value={storeSellInContributionInput}
+                    onChange={(e) => {
+                      const pct = Math.max(0, Number(e.target.value) || 0);
+                      setStoreSellInContributionInput(pct);
+                      const basis =
+                        storeSellInMatrix.formulaMode === 'per_sales'
+                          ? editingStoreSellIn.salesTargetSellInBasis || storeSellInMatrix.poolTarget
+                          : storeSellInMatrix.poolTarget;
+                      setStoreSellInTargetInput(Math.round((basis * pct) / 100));
+                    }}
+                    className="w-full px-3 py-2 text-sm font-mono font-black rounded-xl border border-sky-300 bg-sky-50/40 focus:outline-hidden focus:ring-2 focus:ring-sky-500"
+                  />
+                  <span className="text-[10px] text-sky-700 mt-1 block">
+                    Basis: {formatRupiah(
+                      storeSellInMatrix.formulaMode === 'per_sales'
+                        ? editingStoreSellIn.salesTargetSellInBasis || storeSellInMatrix.poolTarget
+                        : storeSellInMatrix.poolTarget,
+                      true
+                    )}
+                  </span>
+                </div>
+              </div>
+
+              <label className="flex items-start gap-2.5 p-3 rounded-xl border border-indigo-200 bg-indigo-50/60 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={storeSellInApplyAllMonths}
+                  onChange={(e) => setStoreSellInApplyAllMonths(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                />
+                <div className="leading-snug">
+                  <span className="font-extrabold text-indigo-950 block">
+                    Terapkan nominal sama untuk SEMUA bulan (Januari – Desember 2026)
+                  </span>
+                  <span className="text-[11px] text-indigo-800">
+                    Jika tidak dicentang, target hanya berlaku untuk periode {activeMonthLabel} dan otomatis sinkron ke Achieve Quartal.
+                  </span>
+                </div>
+              </label>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+                {editingStoreSellIn.isCustom ? (
+                  <button
+                    type="button"
+                    onClick={() => handleResetSingleStoreSellIn(editingStoreSellIn)}
+                    className="px-3 py-2 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 font-bold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Reset ke Rumus</span>
+                  </button>
+                ) : (
+                  <span />
+                )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingStoreSellIn(null)}
+                    className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 font-bold cursor-pointer"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold shadow-md shadow-sky-600/30 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>Simpan &amp; Sinkron Quartal</span>
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================================= */}
+      {/* MODAL 9: EDIT BASIS TARGET TOKO / SALES POOL                                              */}
+      {/* ========================================================================================= */}
+      {isStorePoolModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-slate-100 overflow-hidden">
+            <div className="p-5 bg-gradient-to-r from-indigo-900 to-sky-900 text-white flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-extrabold flex items-center gap-2">
+                  <Sliders className="w-4 h-4 text-sky-300" />
+                  Basis Total Target Sales / Toko ({activeMonthLabel})
+                </h3>
+                <p className="text-xs text-sky-200 mt-0.5">
+                  Nilai pengali rumus (% Kontribusi Toko × Basis Target)
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsStorePoolModalOpen(false)}
+                className="p-1 rounded-lg hover:bg-white/10 text-white/80 hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveStorePoolTarget} className="p-5 space-y-4 text-xs">
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-700 flex items-center justify-between">
+                <span>Total Target Sell In Sales Saat Ini:</span>
+                <strong className="font-mono text-indigo-800">{formatRupiah(storeSellInMatrix.defaultSalesPoolTarget)}</strong>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">
+                  Basis Target Total (Rp)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  step="any"
+                  value={storePoolInput}
+                  onChange={(e) => setStorePoolInput(Math.max(0, Number(e.target.value) || 0))}
+                  className="w-full px-3 py-2 text-sm font-mono font-black rounded-xl border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-sky-500"
+                  required
+                />
+                <span className="text-[11px] text-slate-500 font-mono mt-1 block">
+                  {formatRupiah(storePoolInput)}
+                </span>
+              </div>
+
+              <label className="flex items-start gap-2.5 p-3 rounded-xl border border-indigo-200 bg-indigo-50/60 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={storePoolApplyAllMonths}
+                  onChange={(e) => setStorePoolApplyAllMonths(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                />
+                <div className="leading-snug">
+                  <span className="font-extrabold text-indigo-950 block">
+                    Terapkan basis ini sama untuk SEMUA bulan (Jan–Des 2026)
+                  </span>
+                </div>
+              </label>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={handleResetStorePoolToSales}
+                  className="px-3 py-2 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-100 font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Ikuti Target Sales</span>
+                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsStorePoolModalOpen(false)}
+                    className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 font-bold cursor-pointer"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold shadow-md shadow-sky-600/30 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>Terapkan</span>
+                  </button>
+                </div>
+              </div>
+            </form>
           </div>
         </div>
       )}

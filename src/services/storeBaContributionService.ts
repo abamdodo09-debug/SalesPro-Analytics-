@@ -11,7 +11,7 @@ import {
   classifyRecordKet,
 } from './sellInSellOutService';
 import { isFocusProduct } from '../utils/analytics';
-import { loadMasterStoreList } from './masterStoreService';
+import { loadMasterStoreList, splitMasterStoreNames } from './masterStoreService';
 import { resolveWeeklyBaStores, normalizeStoreAlnum } from '../utils/weeklyBaRegistry';
 import * as XLSX from 'xlsx';
 
@@ -135,20 +135,23 @@ function buildStoreDirectory(allRecords: TransactionRecord[]): {
   masterStores.forEach((ms) => {
     if (!ms.storeName) return;
     const validBa = ms.hasBa && !isPlaceholderBaName(ms.baName);
-    upsertMeta(
-      {
-        storeName: ms.storeName.trim(),
-        hasBa: validBa,
-        baName: validBa ? ms.baName.trim() : '- (Non-BA)',
-        baNumber: ms.baNumber,
-        coverArea: (ms.coverArea || 'PEKAN BARU').trim(),
-        region: (ms.region || 'PEKAN BARU').trim(),
-        salesName: (ms.salesName || '-').trim(),
-        spvName: (ms.spvName || 'WIDODO').trim(),
-        trainerName: (ms.trainerName || '-').trim(),
-      },
-      'master'
-    );
+    const individualStores = splitMasterStoreNames(ms.storeName);
+    individualStores.forEach((individualStore) => {
+      upsertMeta(
+        {
+          storeName: individualStore,
+          hasBa: validBa,
+          baName: validBa ? ms.baName.trim() : '- (Non-BA)',
+          baNumber: ms.baNumber,
+          coverArea: (ms.coverArea || 'PEKAN BARU').trim(),
+          region: (ms.region || 'PEKAN BARU').trim(),
+          salesName: (ms.salesName || '-').trim(),
+          spvName: (ms.spvName || 'WIDODO').trim(),
+          trainerName: (ms.trainerName || '-').trim(),
+        },
+        'master'
+      );
+    });
   });
 
   // 2. Weekly BA Stores (sinkron dengan Google Sheet SELL OUT & roster aktif)

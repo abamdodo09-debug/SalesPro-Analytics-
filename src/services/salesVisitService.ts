@@ -3,7 +3,7 @@ import {
   SalesVisitSalesName,
   TransactionRecord,
 } from '../types/dashboard';
-import { loadMasterStoreList } from './masterStoreService';
+import { loadMasterStoreList, splitMasterStoreNames } from './masterStoreService';
 
 export const SALES_VISIT_STORAGE_KEY = 'salespro_sales_visits_v1';
 
@@ -158,10 +158,9 @@ export function extractStoreOptions(transactions: TransactionRecord[]): string[]
   const seen: Record<string, string> = {};
   const masterStores = loadMasterStoreList(transactions);
   masterStores.forEach((m) => {
-    const clean = (m.storeName || '').trim();
-    if (clean) {
+    splitMasterStoreNames(m.storeName).forEach((clean) => {
       seen[clean.toUpperCase()] = clean;
-    }
+    });
   });
   transactions.forEach((r) => {
     const clean = (r.NAMA_STORE || '').trim();
