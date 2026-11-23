@@ -224,8 +224,27 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
   const filteredBa = useMemo(() => {
     return baList.filter((b) => {
       if (filters.SPV && filters.SPV !== 'ALL' && b.spvName && b.spvName.toUpperCase() !== filters.SPV.toUpperCase()) return false;
-      if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL' && b.storeName.toUpperCase() !== filters.NAMA_STORE.toUpperCase()) return false;
-      if (filters.REGION && filters.REGION !== 'ALL' && (b.region || '').toUpperCase() !== filters.REGION.toUpperCase() && (b.coverArea || '').toUpperCase() !== filters.REGION.toUpperCase()) return false;
+      if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL') {
+        const targetStore = filters.NAMA_STORE.toUpperCase().trim();
+        const storeTokens = (b.storeName || '')
+          .split(',')
+          .map((t) => t.trim().toUpperCase())
+          .filter(Boolean);
+        if ((b.storeName || '').toUpperCase().trim() !== targetStore && !storeTokens.includes(targetStore)) {
+          return false;
+        }
+      }
+      if (filters.REGION && filters.REGION !== 'ALL') {
+        const targetReg = filters.REGION.toUpperCase().trim();
+        const regionMatch = (b.region || '').toUpperCase().trim() === targetReg;
+        const areaTokens = (b.coverArea || '')
+          .split(',')
+          .map((t) => t.trim().toUpperCase())
+          .filter(Boolean);
+        if (!regionMatch && (b.coverArea || '').toUpperCase().trim() !== targetReg && !areaTokens.includes(targetReg)) {
+          return false;
+        }
+      }
       if (!effectiveSearch) return true;
       return (
         b.baName.toLowerCase().includes(effectiveSearch) ||
@@ -1862,7 +1881,7 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                           </span>
                         )}
                       </div>
-                      <span className="text-[10px] text-slate-500 truncate max-w-[170px] block">
+                      <span className="text-[10px] text-slate-500 max-w-[240px] leading-snug block">
                         {b.storeName}
                       </span>
                     </td>

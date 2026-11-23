@@ -4999,16 +4999,26 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
         if (filters.SPV && filters.SPV !== 'ALL' && b.spvName && b.spvName.toUpperCase() !== filters.SPV.toUpperCase()) {
           return false;
         }
-        if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL' && b.storeName.toUpperCase() !== filters.NAMA_STORE.toUpperCase()) {
-          return false;
+        if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL') {
+          const targetStore = filters.NAMA_STORE.toUpperCase().trim();
+          const storeTokens = (b.storeName || '')
+            .split(',')
+            .map((t) => t.trim().toUpperCase())
+            .filter(Boolean);
+          if ((b.storeName || '').toUpperCase().trim() !== targetStore && !storeTokens.includes(targetStore)) {
+            return false;
+          }
         }
-        if (
-          filters.REGION &&
-          filters.REGION !== 'ALL' &&
-          (b.region || '').toUpperCase() !== filters.REGION.toUpperCase() &&
-          (b.coverArea || '').toUpperCase() !== filters.REGION.toUpperCase()
-        ) {
-          return false;
+        if (filters.REGION && filters.REGION !== 'ALL') {
+          const targetReg = filters.REGION.toUpperCase().trim();
+          const regionMatch = (b.region || '').toUpperCase().trim() === targetReg;
+          const areaTokens = (b.coverArea || '')
+            .split(',')
+            .map((t) => t.trim().toUpperCase())
+            .filter(Boolean);
+          if (!regionMatch && (b.coverArea || '').toUpperCase().trim() !== targetReg && !areaTokens.includes(targetReg)) {
+            return false;
+          }
         }
         if (!effSearch) return true;
         return (
@@ -7996,9 +8006,9 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                               return (
                                 <tr key={`${b.baName}-${b.storeName}`} className="hover:bg-white/5 transition-colors">
                                   <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
-                                  <td className="py-2 px-3 font-sans">
+                                  <td className="py-2 px-3 font-sans max-w-[260px]">
                                     <span className="font-bold text-white block">{b.baName}</span>
-                                    <span className="text-[10px] text-slate-400">{b.storeName}</span>
+                                    <span className="text-[10px] text-slate-400 leading-snug block">{b.storeName}</span>
                                   </td>
                                   <td className="py-2 px-3 font-sans text-slate-400">{b.coverArea}</td>
                                   {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (

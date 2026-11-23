@@ -337,10 +337,17 @@ export function parseRecordMonthYear(record: TransactionRecord): { monthIndex: n
 function classifyKet(ketRaw?: string): 'SELL IN' | 'SELL OUT' | 'OTHER' {
   const upper = (ketRaw || '').toUpperCase().trim();
   if (upper.includes('RETURN') || upper.includes('RETUR')) return 'OTHER';
-  if (upper.includes('SELL IN') || upper.includes('SELL-IN') || upper.includes('TAKING ORDER')) {
+  if (
+    upper.includes('SELL IN') ||
+    upper.includes('SELL-IN') ||
+    upper === 'SELLIN' ||
+    upper.includes('TAKING ORDER')
+  ) {
     return 'SELL IN';
   }
-  if (upper.includes('SELL OUT') || upper.includes('SELL-OUT')) return 'SELL OUT';
+  if (upper.includes('SELL OUT') || upper.includes('SELL-OUT') || upper === 'SELLOUT') {
+    return 'SELL OUT';
+  }
   return 'OTHER';
 }
 
@@ -595,7 +602,7 @@ export function calculateQuarterlySummary(
   // 2. BEAUTY ADVISOR (BA) QUARTERLY SUMMARY
   // -------------------------------------------------------------
   const isPlaceholderBaToken = (raw?: string): boolean => {
-    const upper = (raw || '').trim().toUpperCase();
+    const upper = (raw || '').trim().replace(/\s+/g, ' ').toUpperCase();
     if (!upper) return true;
     return (
       upper === '-' ||
@@ -608,6 +615,11 @@ export function calculateQuarterlySummary(
       upper === '- (TANPA BA)' ||
       upper === 'STANDBY' ||
       upper === 'BA STANDBY' ||
+      upper === 'BA COUNTER' ||
+      upper === 'KOSONG' ||
+      upper === 'VACANT' ||
+      upper === 'NO BA' ||
+      upper === 'BELUM ADA BA' ||
       upper === 'EMPTY' ||
       upper === 'NULL' ||
       upper === 'UNDEFINED' ||
@@ -615,12 +627,22 @@ export function calculateQuarterlySummary(
     );
   };
 
+  const normalizeBaKey = (raw?: string): string =>
+    (raw || '').trim().replace(/\s+/g, ' ').toUpperCase();
+
+  const normalizeStoreDisplay = (raw?: string): string =>
+    (raw || '').trim().replace(/\s+/g, ' ');
+
   const baMap = new Map<
     string,
     {
       baNumber: string;
       storeName: string;
-      storeNames: Set<string>;
+      quarterStoreNames: Set<string>;
+      allYearStoreNames: Set<string>;
+      monthlySellOutStores: [Set<string>, Set<string>, Set<string>];
+      monthlyAnyRowStores: [Set<string>, Set<string>, Set<string>];
+      preQuarterStores: { monthIdx: number; store: string }[];
       coverArea: string;
       region: string;
       spvName: string;
@@ -632,19 +654,19 @@ export function calculateQuarterlySummary(
   >();
   const baKeyByUpper = new Map<string, string>();
 
-  // Pass 1: Kumpulkan seluruh BA & relasi Nama Toko dari transaksi sheet
+  // Pass 1: Kumpulkan seluruh BA terdaftar & relasi Nama Toko per bulan dari Google Sheet terhubung
   scopedRecords.forEach((r) => {
-    const bName = (r.BA || '').trim();
-    if (!bName || bName === '-' || bName.toLowerCase() === 'all') return;
+    const bName = (r.BA || '').trim().replace(/\s+/g, ' ');
+    if (isPlaceholderBaToken(bName)) return;
 
-    const bUpper = bName.toUpperCase();
+    const bUpper = normalizeBaKey(bName);
     let canonicalKey = baKeyByUpper.get(bUpper);
     if (!canonicalKey) {
       canonicalKey = bName;
       baKeyByUpper.set(bUpper, canonicalKey);
     }
 
-    const recStore = (r.NAMA_STORE || '').trim();
+    const recStore = normalizeStoreDisplay(r.NAMA_STORE);
     const validRecStore =
       recStore && recStore !== '-' && recStore.toUpperCase() !== 'ALL' ? recStore : '';
 
@@ -652,32 +674,58 @@ export function calculateQuarterlySummary(
       baMap.set(canonicalKey, {
         baNumber: r.BA_Number || `BA-${baMap.size + 101}`,
         storeName: validRecStore || 'Counter Toko',
-        storeNames: new Set(validRecStore ? [validRecStore] : []),
-        coverArea: r.COVER_AREA || 'AREA BARU',
-        region: r.REGION || 'PEKAN BARU',
-        spvName: r.SPV || 'WIDODO',
+        quarterStoreNames: new Set(),
+        allYearStoreNames: new Set(),
+        monthlySellOutStores: [new Set(), new Set(), new Set()],
+        monthlyAnyRowStores: [new Set(), new Set(), new Set()],
+        preQuarterStores: [],
+        coverArea: r.COVER_AREA && r.COVER_AREA !== '-' ? r.COVER_AREA : 'AREA BARU',
+        region: r.REGION && r.REGION !== '-' ? r.REGION : 'PEKAN BARU',
+        spvName: r.SPV && r.SPV !== '-' ? r.SPV : 'WIDODO',
         monthlySellInActual: [0, 0, 0],
         monthlySellOutActual: [0, 0, 0],
         monthlyAllActual: [0, 0, 0],
         monthlyFocusActual: [0, 0, 0],
       });
-    } else {
-      const existing = baMap.get(canonicalKey)!;
-      if (validRecStore) {
-        existing.storeNames.add(validRecStore);
-        if (!existing.storeName || existing.storeName === 'Counter Toko') {
-          existing.storeName = validRecStore;
+    }
+
+    const entry = baMap.get(canonicalKey)!;
+    if (validRecStore) {
+      const dt = parseRecordMonthYear(r);
+      const ketType = classifyKet(r.KET);
+      const existingAllUpper = new Set(Array.from(entry.allYearStoreNames).map((s) => s.toUpperCase()));
+      if (!existingAllUpper.has(validRecStore.toUpperCase())) {
+        entry.allYearStoreNames.add(validRecStore);
+      }
+      if (!entry.storeName || entry.storeName === 'Counter Toko') {
+        entry.storeName = validRecStore;
+      }
+
+      if (dt && dt.year === year) {
+        const qPos = qMonths.indexOf(dt.monthIndex);
+        if (qPos !== -1) {
+          const existingQUpper = new Set(Array.from(entry.quarterStoreNames).map((s) => s.toUpperCase()));
+          if (!existingQUpper.has(validRecStore.toUpperCase())) {
+            entry.quarterStoreNames.add(validRecStore);
+          }
+          entry.monthlyAnyRowStores[qPos].add(validRecStore);
+          if (ketType === 'SELL OUT') {
+            entry.monthlySellOutStores[qPos].add(validRecStore);
+          }
+        } else if (dt.monthIndex < qMonths[0]) {
+          entry.preQuarterStores.push({ monthIdx: dt.monthIndex, store: validRecStore });
         }
       }
-      if ((!existing.coverArea || existing.coverArea === 'AREA BARU') && r.COVER_AREA && r.COVER_AREA !== '-') {
-        existing.coverArea = r.COVER_AREA;
-      }
-      if ((!existing.region || existing.region === 'PEKAN BARU') && r.REGION && r.REGION !== '-') {
-        existing.region = r.REGION;
-      }
-      if ((!existing.spvName || existing.spvName === 'WIDODO') && r.SPV && r.SPV !== '-') {
-        existing.spvName = r.SPV;
-      }
+    }
+
+    if ((!entry.coverArea || entry.coverArea === 'AREA BARU') && r.COVER_AREA && r.COVER_AREA !== '-') {
+      entry.coverArea = r.COVER_AREA;
+    }
+    if ((!entry.region || entry.region === 'PEKAN BARU') && r.REGION && r.REGION !== '-') {
+      entry.region = r.REGION;
+    }
+    if ((!entry.spvName || entry.spvName === 'WIDODO') && r.SPV && r.SPV !== '-') {
+      entry.spvName = r.SPV;
     }
   });
 
@@ -695,38 +743,47 @@ export function calculateQuarterlySummary(
     { name: 'WINDY PRATIWI', store: 'CITRA SWALAYAN', target: 60000000 },
   ];
 
-  templateBAs.forEach((tb, idx) => {
-    const tbUpper = tb.name.toUpperCase();
-    const existingKey = baKeyByUpper.get(tbUpper);
-    if (!existingKey) {
-      baKeyByUpper.set(tbUpper, tb.name);
-      baMap.set(tb.name, {
-        baNumber: `BA-0${idx + 1}`,
-        storeName: tb.store,
-        storeNames: new Set([tb.store]),
-        coverArea: 'INDRAGIRI',
-        region: 'PEKAN BARU',
-        spvName: 'WIDODO',
-        monthlySellInActual: [0, 0, 0],
-        monthlySellOutActual: [0, 0, 0],
-        monthlyAllActual: [0, 0, 0],
-        monthlyFocusActual: [0, 0, 0],
-      });
-    } else {
-      baMap.get(existingKey)?.storeNames.add(tb.store);
-    }
-  });
+  // Hanya gunakan template BA bawaan jika tidak ada BA dari Google Sheet yang terhubung
+  if (baMap.size === 0) {
+    templateBAs.forEach((tb, idx) => {
+      const tbUpper = normalizeBaKey(tb.name);
+      if (!baKeyByUpper.has(tbUpper)) {
+        baKeyByUpper.set(tbUpper, tb.name);
+        baMap.set(tb.name, {
+          baNumber: `BA-0${idx + 1}`,
+          storeName: tb.store,
+          quarterStoreNames: new Set([tb.store]),
+          allYearStoreNames: new Set([tb.store]),
+          monthlySellOutStores: [new Set([tb.store]), new Set([tb.store]), new Set([tb.store])],
+          monthlyAnyRowStores: [new Set([tb.store]), new Set([tb.store]), new Set([tb.store])],
+          preQuarterStores: [],
+          coverArea: 'INDRAGIRI',
+          region: 'PEKAN BARU',
+          spvName: 'WIDODO',
+          monthlySellInActual: [0, 0, 0],
+          monthlySellOutActual: [0, 0, 0],
+          monthlyAllActual: [0, 0, 0],
+          monthlyFocusActual: [0, 0, 0],
+        });
+      }
+    });
+  }
 
-  // Lengkapi alias Nama Toko tiap BA dari Weekly BA Registry & Master Store List
+  // Lengkapi nama toko hanya jika BA di Google Sheet belum memiliki toko sama sekali
   const weeklyStores = resolveWeeklyBaStores(records);
   weeklyStores.forEach((ws) => {
     if (isPlaceholderBaToken(ws.baName) || !ws.storeName) return;
-    const key = baKeyByUpper.get(ws.baName.trim().toUpperCase());
+    const key = baKeyByUpper.get(normalizeBaKey(ws.baName));
     if (key) {
       const entry = baMap.get(key)!;
-      entry.storeNames.add(ws.storeName.trim());
-      if (!entry.storeName || entry.storeName === 'Counter Toko') {
-        entry.storeName = ws.storeName.trim();
+      if (entry.allYearStoreNames.size === 0) {
+        const cleanSt = normalizeStoreDisplay(ws.storeName);
+        if (cleanSt) {
+          entry.allYearStoreNames.add(cleanSt);
+          if (!entry.storeName || entry.storeName === 'Counter Toko') {
+            entry.storeName = cleanSt;
+          }
+        }
       }
     }
   });
@@ -734,60 +791,178 @@ export function calculateQuarterlySummary(
   const masterStores = loadMasterStoreList(records);
   masterStores.forEach((ms) => {
     if (!ms.hasBa || isPlaceholderBaToken(ms.baName) || !ms.storeName) return;
-    const key = baKeyByUpper.get(ms.baName.trim().toUpperCase());
+    const key = baKeyByUpper.get(normalizeBaKey(ms.baName));
     if (key) {
       const entry = baMap.get(key)!;
-      entry.storeNames.add(ms.storeName.trim());
-      if (!entry.storeName || entry.storeName === 'Counter Toko') {
-        entry.storeName = ms.storeName.trim();
+      if (entry.allYearStoreNames.size === 0) {
+        const cleanSt = normalizeStoreDisplay(ms.storeName);
+        if (cleanSt) {
+          entry.allYearStoreNames.add(cleanSt);
+          if (!entry.storeName || entry.storeName === 'Counter Toko') {
+            entry.storeName = cleanSt;
+          }
+        }
       }
     }
   });
 
-  // Bangun indeks Nama Toko -> Daftar BA untuk menarik data SELL IN berdasarkan NAMA TOKO
+  // Bangun indeks Nama Toko -> Daftar BA PER BULAN dalam kuartal (mPos: 0, 1, 2)
+  // agar BA yang pindah toko setiap bulan hanya menarik Realisasi Sell In sesuai toko pada bulan tersebut
   const normStoreExact = (s: string) => s.trim().toUpperCase().replace(/\s+/g, ' ');
   const normStoreNoPrefix = (s: string) =>
     normalizeStoreAlnum(s.replace(/^\s*(TOKO|TK)\b\.?\s*/i, ''));
   const normStoreKosmetik = (s: string) =>
     normStoreNoPrefix(s).replace(/cosmetic/g, 'kosmetik').replace(/cosmetik/g, 'kosmetik');
 
-  const storeExactToBas = new Map<string, Set<string>>();
-  const storeAlnumToBas = new Map<string, Set<string>>();
-  const storeNoPrefixToBas = new Map<string, Set<string>>();
-  const storeKosmetikToBas = new Map<string, Set<string>>();
+  interface MonthlyStoreIndex {
+    exactToBas: Map<string, Set<string>>;
+    alnumToBas: Map<string, Set<string>>;
+    noPrefixToBas: Map<string, Set<string>>;
+    kosmetikToBas: Map<string, Set<string>>;
+  }
 
-  const registerStoreIndex = (map: Map<string, Set<string>>, key: string, baKey: string) => {
-    if (!key) return;
-    if (!map.has(key)) map.set(key, new Set());
-    map.get(key)!.add(baKey);
-  };
-
-  baMap.forEach((bData, baKey) => {
-    if (isPlaceholderBaToken(baKey)) return;
-    bData.storeNames.forEach((stName) => {
-      if (!stName || stName === 'Counter Toko' || stName === '-') return;
-      registerStoreIndex(storeExactToBas, normStoreExact(stName), baKey);
-      registerStoreIndex(storeAlnumToBas, normalizeStoreAlnum(stName), baKey);
-      registerStoreIndex(storeNoPrefixToBas, normStoreNoPrefix(stName), baKey);
-      registerStoreIndex(storeKosmetikToBas, normStoreKosmetik(stName), baKey);
-    });
+  const createMonthlyStoreIndex = (): MonthlyStoreIndex => ({
+    exactToBas: new Map<string, Set<string>>(),
+    alnumToBas: new Map<string, Set<string>>(),
+    noPrefixToBas: new Map<string, Set<string>>(),
+    kosmetikToBas: new Map<string, Set<string>>(),
   });
 
-  const findBasByStoreName = (rawStore?: string): string[] => {
+  const registerStoreToMonthlyIndex = (
+    idxObj: MonthlyStoreIndex,
+    stName: string,
+    baKey: string
+  ) => {
+    if (!stName || stName === 'Counter Toko' || stName === '-') return;
+    const addKey = (map: Map<string, Set<string>>, k: string) => {
+      if (!k) return;
+      if (!map.has(k)) map.set(k, new Set());
+      map.get(k)!.add(baKey);
+    };
+    addKey(idxObj.exactToBas, normStoreExact(stName));
+    addKey(idxObj.alnumToBas, normalizeStoreAlnum(stName));
+    addKey(idxObj.noPrefixToBas, normStoreNoPrefix(stName));
+    addKey(idxObj.kosmetikToBas, normStoreKosmetik(stName));
+  };
+
+  const monthlyStoreIndexes: [MonthlyStoreIndex, MonthlyStoreIndex, MonthlyStoreIndex] = [0, 1, 2].map(
+    (mPos) => {
+      const idxObj = createMonthlyStoreIndex();
+      const explicitClaimedKeys = new Set<string>();
+
+      const markClaimed = (stName: string) => {
+        const k1 = normStoreExact(stName);
+        const k2 = normalizeStoreAlnum(stName);
+        const k3 = normStoreKosmetik(stName);
+        if (k1) explicitClaimedKeys.add(k1);
+        if (k2) explicitClaimedKeys.add(k2);
+        if (k3) explicitClaimedKeys.add(k3);
+      };
+
+      const isClaimedExplicitly = (stName: string): boolean => {
+        const k1 = normStoreExact(stName);
+        const k2 = normalizeStoreAlnum(stName);
+        const k3 = normStoreKosmetik(stName);
+        return (
+          (Boolean(k1) && explicitClaimedKeys.has(k1)) ||
+          (Boolean(k2) && explicitClaimedKeys.has(k2)) ||
+          (Boolean(k3) && explicitClaimedKeys.has(k3))
+        );
+      };
+
+      // Tahap 1: BA yang memiliki transaksi/absensi eksplisit di bulan mPos
+      const basNeedingFallback: string[] = [];
+      baMap.forEach((bData, baKey) => {
+        if (isPlaceholderBaToken(baKey)) return;
+        const explicitStores =
+          bData.monthlySellOutStores[mPos].size > 0
+            ? bData.monthlySellOutStores[mPos]
+            : bData.monthlyAnyRowStores[mPos];
+        if (explicitStores.size > 0) {
+          explicitStores.forEach((stName) => {
+            registerStoreToMonthlyIndex(idxObj, stName, baKey);
+            markClaimed(stName);
+          });
+        } else {
+          basNeedingFallback.push(baKey);
+        }
+      });
+
+      // Tahap 2: Fallback toko terakhir/berikutnya hanya jika toko tersebut belum diklaim BA lain di bulan mPos
+      basNeedingFallback.forEach((baKey) => {
+        const bData = baMap.get(baKey)!;
+        let fallbackStores: string[] = [];
+
+        // Cek bulan sebelumnya di kuartal yang sama (mPos - 1 -> 0)
+        for (let prev = mPos - 1; prev >= 0; prev--) {
+          const prevSet =
+            bData.monthlySellOutStores[prev].size > 0
+              ? bData.monthlySellOutStores[prev]
+              : bData.monthlyAnyRowStores[prev];
+          if (prevSet.size > 0) {
+            fallbackStores = Array.from(prevSet);
+            break;
+          }
+        }
+
+        // Jika bulan pertama kuartal belum punya data, cek bulan sebelum kuartal pada tahun yang sama
+        if (fallbackStores.length === 0 && bData.preQuarterStores.length > 0) {
+          const sortedPre = [...bData.preQuarterStores].sort((a, b) => b.monthIdx - a.monthIdx);
+          const latestMonthIdx = sortedPre[0].monthIdx;
+          fallbackStores = sortedPre
+            .filter((p) => p.monthIdx === latestMonthIdx)
+            .map((p) => p.store);
+        }
+
+        // Cek bulan berikutnya di kuartal yang sama jika memang baru muncul
+        if (fallbackStores.length === 0) {
+          for (let next = mPos + 1; next <= 2; next++) {
+            const nextSet =
+              bData.monthlySellOutStores[next].size > 0
+                ? bData.monthlySellOutStores[next]
+                : bData.monthlyAnyRowStores[next];
+            if (nextSet.size > 0) {
+              fallbackStores = Array.from(nextSet);
+              break;
+            }
+          }
+        }
+
+        // Fallback terakhir dari daftar toko BA
+        if (fallbackStores.length === 0 && bData.allYearStoreNames.size > 0) {
+          fallbackStores = [Array.from(bData.allYearStoreNames)[0]];
+        }
+
+        fallbackStores.forEach((stName) => {
+          if (!isClaimedExplicitly(stName)) {
+            registerStoreToMonthlyIndex(idxObj, stName, baKey);
+          }
+        });
+      });
+
+      return idxObj;
+    }
+  ) as [MonthlyStoreIndex, MonthlyStoreIndex, MonthlyStoreIndex];
+
+  const findBasByStoreNameInMonth = (mPos: number, rawStore?: string): string[] => {
     const clean = (rawStore || '').trim();
     if (!clean || clean === '-' || clean.toUpperCase() === 'ALL') return [];
-    const exactHit = storeExactToBas.get(normStoreExact(clean));
+    const idxObj = monthlyStoreIndexes[mPos];
+    if (!idxObj) return [];
+    const exactHit = idxObj.exactToBas.get(normStoreExact(clean));
     if (exactHit && exactHit.size > 0) return Array.from(exactHit);
-    const alnumHit = storeAlnumToBas.get(normalizeStoreAlnum(clean));
+    const alnumHit = idxObj.alnumToBas.get(normalizeStoreAlnum(clean));
     if (alnumHit && alnumHit.size > 0) return Array.from(alnumHit);
-    const noPrefixHit = storeNoPrefixToBas.get(normStoreNoPrefix(clean));
+    const noPrefixHit = idxObj.noPrefixToBas.get(normStoreNoPrefix(clean));
     if (noPrefixHit && noPrefixHit.size > 0) return Array.from(noPrefixHit);
-    const kosmetikHit = storeKosmetikToBas.get(normStoreKosmetik(clean));
+    const kosmetikHit = idxObj.kosmetikToBas.get(normStoreKosmetik(clean));
     if (kosmetikHit && kosmetikHit.size > 0) return Array.from(kosmetikHit);
     return [];
   };
 
-  // Pass 2: Akumulasi Realisasi Kuartal — SELL IN ditarik berdasarkan NAMA_STORE, SELL OUT berdasarkan BA
+  // Pass 2: Akumulasi Realisasi Kuartal dari Google Sheet terhubung:
+  // - SELL IN ditarik berdasarkan NAMA TOKO pada bulan transaksi tersebut
+  // - SELL OUT ditarik berdasarkan NAMA BA yang terdaftar pada baris Google Sheet
   scopedRecords.forEach((r) => {
     const dt = parseRecordMonthYear(r);
     if (!dt || dt.year !== year) return;
@@ -796,22 +971,18 @@ export function calculateQuarterlySummary(
 
     const val = r.VALUE || 0;
     const ketType = classifyKet(r.KET);
-    const bNameRaw = (r.BA || '').trim();
+    const bNameNorm = normalizeBaKey(r.BA);
     const matchedBaFromRow =
-      bNameRaw && bNameRaw !== '-' && bNameRaw.toLowerCase() !== 'all'
-        ? baKeyByUpper.get(bNameRaw.toUpperCase())
+      bNameNorm && !isPlaceholderBaToken(bNameNorm)
+        ? baKeyByUpper.get(bNameNorm)
         : undefined;
 
     if (ketType === 'SELL IN') {
-      const storeMatchedBas = findBasByStoreName(r.NAMA_STORE);
+      const storeMatchedBas = findBasByStoreNameInMonth(qMonthPosition, r.NAMA_STORE);
       let targetBas: string[] = [];
 
       if (storeMatchedBas.length > 0) {
-        if (
-          matchedBaFromRow &&
-          !isPlaceholderBaToken(matchedBaFromRow) &&
-          storeMatchedBas.includes(matchedBaFromRow)
-        ) {
+        if (matchedBaFromRow && storeMatchedBas.includes(matchedBaFromRow)) {
           targetBas = [matchedBaFromRow];
         } else {
           targetBas = storeMatchedBas;
@@ -856,23 +1027,44 @@ export function calculateQuarterlySummary(
     const monthlyTargetNominal = matchedTemplate ? matchedTemplate.target : 45000000;
     const monthlyFocusTargetPcs = 120;
 
+    // Gabungkan semua nama toko berbeda untuk BA yang sama (prioritaskan toko di kuartal aktif)
+    const displayStoresSource =
+      bData.quarterStoreNames.size > 0 ? bData.quarterStoreNames : bData.allYearStoreNames;
+    const mergedStoresList = Array.from(displayStoresSource).filter(
+      (s) => s && s !== 'Counter Toko' && s !== '-'
+    );
+    const mergedStoreName =
+      mergedStoresList.length > 0
+        ? mergedStoresList.join(', ')
+        : bData.storeName || 'Counter Toko';
+
     const actualSellInOv = quarterlyActualSellInOverrides[buildQuarterlyTargetKey(year, quarter, 'ba', bName)];
     const { monthlySellIn: resolvedSellInMonths, isCustomActualSellIn } = resolveMonthlySellInActuals(
       bData.monthlySellInActual,
       actualSellInOv
     );
 
+    const upperBa = normalizeBaKey(bName);
+    const upperMergedStore = mergedStoreName.toUpperCase().trim();
+    const upperStoreTokens = mergedStoresList.map((s) => s.toUpperCase().trim());
+
+    const findTargetMapKey = (mapObj: Record<string, number>): string | undefined => {
+      const keys = Object.keys(mapObj);
+      const byBa = keys.find((k) => normalizeBaKey(k) === upperBa);
+      if (byBa !== undefined) return byBa;
+      const byMerged = keys.find((k) => k.toUpperCase().trim() === upperMergedStore);
+      if (byMerged !== undefined) return byMerged;
+      return keys.find((k) => upperStoreTokens.includes(k.toUpperCase().trim()));
+    };
+
     const baseMonths = qMonths.map((mIdx, i) => {
       const mName = qMonthNames[i];
       const baNonMap = loadBaNonLavojoyTargets(mName);
       const baLavMap = loadBaLavojoyTargets(mName);
       const baFocusMap = loadBaFocusTargets(mName);
-      const upperStore = bData.storeName.toUpperCase().trim();
-      const nonKey = Object.keys(baNonMap).find((k) => k.toUpperCase().trim() === upperStore);
-      const lavKey = Object.keys(baLavMap).find((k) => k.toUpperCase().trim() === upperStore);
-      const focusKey = Object.keys(baFocusMap).find(
-        (k) => k.toUpperCase().trim() === upperStore || k.toUpperCase().trim() === bName.toUpperCase().trim()
-      );
+      const nonKey = findTargetMapKey(baNonMap);
+      const lavKey = findTargetMapKey(baLavMap);
+      const focusKey = findTargetMapKey(baFocusMap);
 
       const monthBaSellOutTarget =
         nonKey !== undefined || lavKey !== undefined
@@ -991,7 +1183,7 @@ export function calculateQuarterlySummary(
     baListRaw.push({
       baName: bName,
       baNumber: bData.baNumber,
-      storeName: bData.storeName,
+      storeName: mergedStoreName,
       coverArea: bData.coverArea,
       region: bData.region,
       spvName: bData.spvName,
