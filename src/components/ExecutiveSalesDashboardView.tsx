@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect, useTransition, useDeferredValue } from 'react';
+import React, { useMemo, useState, useEffect, useTransition, useDeferredValue, useRef } from 'react';
 import {
   TransactionRecord,
   DashboardFilters,
@@ -53,9 +53,12 @@ import {
   aggregateTimeframe,
   MONTH_ORDER,
 } from '../utils/analytics';
+import { captureElementToPng } from '../utils/screenCapture';
 import { TimeframeTrendChart } from './TimeframeTrendChart';
 import { SearchableStoreFilter } from './SearchableStoreFilter';
 import {
+  Camera,
+  Loader2,
   LayoutDashboard,
   MapPin,
   PieChart as PieChartIcon,
@@ -4859,6 +4862,9 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
 
   const deferredDayRange = useDeferredValue(rawDayRange);
 
+  const mainPanelRef = useRef<HTMLDivElement | null>(null);
+  const [screenshotStatus, setScreenshotStatus] = useState<'idle' | 'capturing' | 'done' | 'error'>('idle');
+
   const handleSelectLens = (lens: SidebarLens) => {
     setUiLens(lens);
     startLensTransition(() => {
@@ -5379,51 +5385,128 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
         </aside>
 
         {/* MAIN RIGHT CONTENT PANEL */}
-        <div className="flex-1 min-w-0 flex flex-col justify-between p-3 xl:p-3.5 gap-2.5">
+        <div
+          ref={mainPanelRef}
+          className="flex-1 min-w-0 flex flex-col justify-between p-3 xl:p-3.5 gap-2.5 bg-[#0A0E17]"
+        >
           {/* TOP DASHBOARD HEADER */}
-          <div className="flex flex-col 2xl:flex-row 2xl:items-center justify-between gap-2 pb-2 border-b border-[#1C2536]">
-            <div className="min-w-0 flex items-center gap-3 flex-wrap">
-              {onToggleFullScreen && (
+          <div className="flex flex-col gap-2 pb-2 border-b border-[#1C2536]">
+            {/* ROW 1: TITLE (LEFT) & PRIMARY ACTIONS AT VERY TOP-RIGHT */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0 flex items-center gap-3 flex-wrap">
+                {onToggleFullScreen && (
+                  <button
+                    type="button"
+                    data-capture-hide="true"
+                    onClick={onToggleFullScreen}
+                    title={
+                      isFullScreen
+                        ? 'Tampilkan kembali semua menu navigasi SalesPro Analytics'
+                        : 'Sembunyikan menu SalesPro Analytics agar Dashboard tampil penuh di layar'
+                    }
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-extrabold transition-colors cursor-pointer whitespace-nowrap shrink-0 border ${
+                      isFullScreen
+                        ? 'bg-cyan-500/15 hover:bg-cyan-500/25 border-cyan-400/50 text-cyan-200 shadow-sm shadow-cyan-500/10'
+                        : 'bg-[#162033] hover:bg-[#1E2B45] border-[#2C3E5E] text-slate-200'
+                    }`}
+                  >
+                    {isFullScreen ? (
+                      <>
+                        <PanelTopOpen className="w-4 h-4 text-cyan-300" />
+                        <span>Tampilkan Menu</span>
+                      </>
+                    ) : (
+                      <>
+                        <PanelTopClose className="w-4 h-4 text-[#FF6B00]" />
+                        <span>Sembunyikan Menu (Full Layar)</span>
+                      </>
+                    )}
+                  </button>
+                )}
+                <div>
+                  <h1 className="text-sm xl:text-base font-extrabold tracking-tight text-white uppercase leading-tight">
+                    SALESPRO ANALYTICS &amp; MARKET SHARE DASHBOARD
+                  </h1>
+                  <p className="text-[11px] text-slate-400 mt-0.5 leading-tight">
+                    Semua Data SalesPro Analytics Terintegrasi · Ringkasan Eksekutif {snap.selectedMonthLabel}
+                    {isPendingLens ? ' · Memuat...' : ''}
+                  </p>
+                </div>
+              </div>
+
+              {/* TOP-RIGHT ACTIONS: EXPORT PDF + SCREENSHOOT LAYAR */}
+              <div data-capture-hide="true" className="flex items-center gap-2 ml-auto shrink-0">
                 <button
                   type="button"
-                  onClick={onToggleFullScreen}
-                  title={
-                    isFullScreen
-                      ? 'Tampilkan kembali semua menu navigasi SalesPro Analytics'
-                      : 'Sembunyikan menu SalesPro Analytics agar Dashboard tampil penuh di layar'
-                  }
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-extrabold transition-colors cursor-pointer whitespace-nowrap shrink-0 border ${
-                    isFullScreen
-                      ? 'bg-cyan-500/15 hover:bg-cyan-500/25 border-cyan-400/50 text-cyan-200 shadow-sm shadow-cyan-500/10'
-                      : 'bg-[#162033] hover:bg-[#1E2B45] border-[#2C3E5E] text-slate-200'
+                  onClick={onExportPdf}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#FF6B00] hover:bg-[#EA580C] text-white text-xs font-extrabold transition-colors cursor-pointer whitespace-nowrap shrink-0 shadow-md shadow-orange-600/20"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Export PDF</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={screenshotStatus === 'capturing'}
+                  onClick={async () => {
+                    if (!mainPanelRef.current || screenshotStatus === 'capturing') return;
+                    setScreenshotStatus('capturing');
+                    const activeLabel =
+                      sidebarItems.find((s) => s.id === activeLens)?.label || 'Dashboard';
+                    const safeMenu = activeLabel.replace(/[^a-zA-Z0-9_-]+/g, '_');
+                    const safeMonth = (filters.BULAN || 'ALL').replace(/[^a-zA-Z0-9_-]+/g, '_');
+                    const stamp = new Date().toISOString().slice(0, 10);
+                    try {
+                      await captureElementToPng({
+                        element: mainPanelRef.current,
+                        filename: `Screenshoot_${safeMenu}_${safeMonth}_${snap.selectedYear}_${stamp}.png`,
+                        backgroundColor: '#0A0E17',
+                        scale: 1.5,
+                      });
+                      setScreenshotStatus('done');
+                      setTimeout(() => setScreenshotStatus('idle'), 2200);
+                    } catch (err) {
+                      console.error('Screenshoot gagal:', err);
+                      setScreenshotStatus('error');
+                      setTimeout(() => setScreenshotStatus('idle'), 2500);
+                    }
+                  }}
+                  title="Ambil gambar seluruh tampilan menu dashboard yang sedang dibuka"
+                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border text-xs font-extrabold transition-colors cursor-pointer whitespace-nowrap shrink-0 shadow-md ${
+                    screenshotStatus === 'done'
+                      ? 'bg-emerald-500/20 border-emerald-400/60 text-emerald-200 shadow-emerald-500/15'
+                      : screenshotStatus === 'error'
+                      ? 'bg-rose-500/20 border-rose-400/60 text-rose-200 shadow-rose-500/15'
+                      : 'bg-cyan-500/15 hover:bg-cyan-500/25 border-cyan-400/50 text-cyan-200 shadow-cyan-500/15'
                   }`}
                 >
-                  {isFullScreen ? (
+                  {screenshotStatus === 'capturing' ? (
                     <>
-                      <PanelTopOpen className="w-4 h-4 text-cyan-300" />
-                      <span>Tampilkan Menu</span>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-300" />
+                      <span>Menyimpan...</span>
+                    </>
+                  ) : screenshotStatus === 'done' ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-300" />
+                      <span>Tersimpan ✓</span>
+                    </>
+                  ) : screenshotStatus === 'error' ? (
+                    <>
+                      <AlertTriangle className="w-3.5 h-3.5 text-rose-300" />
+                      <span>Gagal</span>
                     </>
                   ) : (
                     <>
-                      <PanelTopClose className="w-4 h-4 text-[#FF6B00]" />
-                      <span>Sembunyikan Menu (Full Layar)</span>
+                      <Camera className="w-3.5 h-3.5 text-cyan-300" />
+                      <span>Screenshoot Layar</span>
                     </>
                   )}
                 </button>
-              )}
-              <div>
-                <h1 className="text-sm xl:text-base font-extrabold tracking-tight text-white uppercase leading-tight">
-                  SALESPRO ANALYTICS &amp; MARKET SHARE DASHBOARD
-                </h1>
-                <p className="text-[11px] text-slate-400 mt-0.5 leading-tight">
-                  Semua Data SalesPro Analytics Terintegrasi · Ringkasan Eksekutif {snap.selectedMonthLabel}
-                  {isPendingLens ? ' · Memuat...' : ''}
-                </p>
               </div>
             </div>
 
-            {/* Interactive Controls (Periode + Area + Sales + Brand + Tipe + PDF) */}
-            <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+            {/* ROW 2: INTEGRATED FILTERS (Periode + Area + Sales + Toko + Brand + Tipe) */}
+            <div className="flex items-center gap-1.5 flex-wrap">
               <div className="flex items-center gap-1 bg-[#121926] border border-[#243147] rounded-lg px-2.5 py-1.5 text-xs">
                 <span className="text-slate-400 font-medium">Periode:</span>
                 <select
@@ -5521,15 +5604,6 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                   ))}
                 </select>
               </div>
-
-              <button
-                type="button"
-                onClick={onExportPdf}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#FF6B00] hover:bg-[#EA580C] text-white text-xs font-extrabold transition-colors cursor-pointer whitespace-nowrap shrink-0 shadow-md shadow-orange-600/20"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>Export PDF</span>
-              </button>
             </div>
           </div>
 
