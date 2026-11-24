@@ -127,7 +127,8 @@ export interface ExportTimeframeRow {
 export function exportTimeframeBreakdownToExcel(
   rows: ExportTimeframeRow[],
   mode: TimeframeMode,
-  scopeLabel: string
+  scopeLabel: string,
+  targetColumnLabel: string = 'Target ALL'
 ): void {
   const modeLabel =
     mode === 'harian'
@@ -144,6 +145,10 @@ export function exportTimeframeBreakdownToExcel(
   const totalQty = rows.reduce((s, r) => s + r.qty, 0);
   const totalTx = rows.reduce((s, r) => s + r.txCount, 0);
 
+  const colTarget = `${targetColumnLabel} (IDR)`;
+  const colAchv = `Achv ${targetColumnLabel} (%)`;
+  const colGap = `Gap ${targetColumnLabel} (IDR)`;
+
   const sheetData = rows.map((r, idx) => {
     const baseRow: Record<string, string | number> = {
       No: idx + 1,
@@ -159,9 +164,9 @@ export function exportTimeframeBreakdownToExcel(
           : targetVal > 0
           ? `${((r.value / targetVal) * 100).toFixed(1)}%`
           : '-';
-      baseRow['Target SPV (IDR)'] = targetVal;
-      baseRow['Achv Target SPV (%)'] = achv;
-      baseRow['Gap Target SPV (IDR)'] = r.value - targetVal;
+      baseRow[colTarget] = targetVal;
+      baseRow[colAchv] = achv;
+      baseRow[colGap] = r.value - targetVal;
     }
     baseRow['Unit (QTY)'] = r.qty;
     baseRow['Jumlah Transaksi'] = r.txCount;
@@ -180,10 +185,10 @@ export function exportTimeframeBreakdownToExcel(
     'Nilai Penjualan (IDR)': totalValue,
   };
   if (hasSpvTarget) {
-    totalRow['Target SPV (IDR)'] = totalSpvTarget;
-    totalRow['Achv Target SPV (%)'] =
+    totalRow[colTarget] = totalSpvTarget;
+    totalRow[colAchv] =
       totalSpvTarget > 0 ? `${((totalValue / totalSpvTarget) * 100).toFixed(1)}%` : '-';
-    totalRow['Gap Target SPV (IDR)'] = totalValue - totalSpvTarget;
+    totalRow[colGap] = totalValue - totalSpvTarget;
   }
   totalRow['Unit (QTY)'] = totalQty;
   totalRow['Jumlah Transaksi'] = totalTx;

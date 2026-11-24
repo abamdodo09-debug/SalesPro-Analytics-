@@ -12,7 +12,7 @@ import {
 } from '../types/dashboard';
 import { calculateSalesSalary } from '../utils/costCalculations';
 import { isFocusProduct, getTrainerForRecord } from '../utils/analytics';
-import { normalizeStoreAlnum } from '../utils/weeklyBaRegistry';
+import { normalizeStoreAlnum, resolveWeeklyBaStores } from '../utils/weeklyBaRegistry';
 import {
   loadFocusOverrides,
   saveFocusOverrides,
@@ -3468,15 +3468,41 @@ export interface SpvMonthTargetEntry {
 export interface MonthlySpvTargetsResult {
   byKey: Record<string, SpvMonthTargetEntry>;
   spvScopeLabel: string;
+  targetMode: 'spv' | 'sales' | 'store';
+  targetEntityLabel: string;
 }
 
 function normalizeSpvDirectoryToken(val?: string): string {
   return (val || '').trim().toUpperCase().replace(/\s+/g, ' ');
 }
 
+function lookupSalesMapWithAliases(
+  map: Record<string, number>,
+  salesName: string
+): number | undefined {
+  const direct = findMapValueCaseInsensitive(map, salesName);
+  if (direct !== undefined) return direct;
+  const upper = normalizeSpvDirectoryToken(salesName);
+  if (upper === 'ALBERT') {
+    const alt = findMapValueCaseInsensitive(map, 'ALBERT FERNANDO');
+    if (alt !== undefined) return alt;
+  } else if (upper === 'ALBERT FERNANDO') {
+    const alt = findMapValueCaseInsensitive(map, 'ALBERT');
+    if (alt !== undefined) return alt;
+  }
+  const matchedKey = Object.keys(map).find((k) => {
+    const kn = normalizeSpvDirectoryToken(k);
+    return kn && (kn.startsWith(upper) || upper.startsWith(kn));
+  });
+  return matchedKey !== undefined ? map[matchedKey] : undefined;
+}
+
 /**
- * Resolves per-month Target SPV (Sell In & Sell Out) configured in Kelola Target
- * with the same SPV/Sales rollup & entity filtering logic used in Dashboard Gap Summary.
+ * Resolves per-month Target (Sell In & Sell Out) configured in Kelola Target
+ * following the integrated filters:
+ * 1. Specific NAMA_STORE -> Store Sell In Target & Store/BA Sell Out Target
+ * 2. Specific SALES -> Sales Sell In Target & Sales Sell Out Target
+ * 3. Default / ALL Sales -> Target SPV (displayed as Target ALL)
  */
 export function buildMonthlySpvTargetsMap(
   records: TransactionRecord[],
@@ -3484,11 +3510,218 @@ export function buildMonthlySpvTargetsMap(
     TAHUN?: string;
     SPV?: string;
     REGION?: string;
+    SALES?: string;
     NAMA_STORE?: string;
   }
 ): MonthlySpvTargetsResult {
   const yearFilter = filters?.TAHUN && filters.TAHUN !== 'ALL' ? String(filters.TAHUN).trim() : '';
+  let effectiveYear = yearFilter ? Number(yearFilter) : 0;
+  if (!effectiveYear || effectiveYear < 1900) {
+    effectiveYear = 2026;
+    for (let i = 0; i < records.length; i++) {
+      const ds = String(records[i].TANGGAL || records[i].BULAN || '');
+      const yMatch = ds.match(/(20\d{2})/);
+      if (yMatch) {
+        const y = Number(yMatch[1]);
+        if (y > effectiveYear) effectiveYear = y;
+      }
+    }
+  }
 
+  const configuredMonthKeys = new Set(getConfiguredMonthKeys());
+  const storeFilterRaw = (filters?.NAMA_STORE || '').trim();
+  const salesFilterRaw = (filters?.SALES || '').trim();
+  const hasStoreFilter = Boolean(storeFilterRaw && normalizeSpvDirectoryToken(storeFilterRaw) !== 'ALL');
+  const hasSalesFilter = Boolean(salesFilterRaw && normalizeSpvDirectoryToken(salesFilterRaw) !== 'ALL');
+
+  // ---------------------------------------------------------------------------
+  // PRIORITY 1: SPECIFIC TOKO / STORE FILTER
+  // ---------------------------------------------------------------------------
+  if (hasStoreFilter) {
+    const targetStoreNorm = normalizeSpvDirectoryToken(storeFilterRaw);
+    const targetStoreAlnum = normalizeStoreAlnum(storeFilterRaw);
+
+    const storeSellInLookup = computeMonthlyStoreSellInLookup(
+      records,
+      MONTH_OPTIONS_2026.map((m) => m.key),
+      effectiveYear
+    );
+
+    // Map store -> assigned BAs and BA -> count of stores so Sell Out splits cleanly
+    const baStoresMap = new Map<string, Set<string>>();
+    const storeBasMap = new Map<string, { baName: string; baKey: string }[]>();
+
+    const registerBaStoreLink = (rawSt?: string, rawBa?: string) => {
+      const stClean = (rawSt || '').trim();
+      const baClean = (rawBa || '').trim();
+      if (!stClean || !baClean) return;
+      const baKey = normalizeBaGroupKey(baClean);
+      if (isGenericBaPlaceholder(baKey)) return;
+      const stAlnum = normalizeStoreAlnum(stClean) || normalizeSpvDirectoryToken(stClean);
+      if (!stAlnum) return;
+
+      if (!baStoresMap.has(baKey)) baStoresMap.set(baKey, new Set<string>());
+      baStoresMap.get(baKey)!.add(stAlnum);
+
+      if (!storeBasMap.has(stAlnum)) storeBasMap.set(stAlnum, []);
+      const existing = storeBasMap.get(stAlnum)!;
+      if (!existing.some((x) => x.baKey === baKey)) {
+        existing.push({ baName: baClean, baKey });
+      }
+    };
+
+    const weeklyStores = resolveWeeklyBaStores(records);
+    weeklyStores.forEach((ws) => registerBaStoreLink(ws.storeName, ws.baName));
+
+    const customProfiles = loadCustomBaProfiles();
+    Object.values(customProfiles).forEach((p) => {
+      if (p.storeName) {
+        p.storeName.split(',').forEach((part) => registerBaStoreLink(part, p.baName));
+      }
+    });
+
+    for (let i = 0; i < records.length; i++) {
+      const r = records[i];
+      if (r.NAMA_STORE && r.BA) {
+        registerBaStoreLink(r.NAMA_STORE, r.BA);
+      }
+    }
+
+    const matchedStoreBas =
+      storeBasMap.get(targetStoreAlnum) ||
+      storeBasMap.get(targetStoreNorm) ||
+      [];
+
+    const byKey: Record<string, SpvMonthTargetEntry> = {};
+    let configuredSellInSum = 0;
+    let configuredSellOutSum = 0;
+    let allMonthsSellInSum = 0;
+    let allMonthsSellOutSum = 0;
+
+    for (const m of MONTH_OPTIONS_2026) {
+      const monthSellInBucket = storeSellInLookup[m.key];
+      const matchedSellInStore = findStoreSellInInLookup(monthSellInBucket, storeFilterRaw);
+      const monthTargetSellIn = matchedSellInStore ? matchedSellInStore.targetSellIn : 0;
+
+      const baNonMap = loadBaNonLavojoyTargets(m.key);
+      const baLavMap = loadBaLavojoyTargets(m.key);
+
+      const directStoreNon = findMapValueCaseInsensitive(baNonMap, storeFilterRaw);
+      const directStoreLav = findMapValueCaseInsensitive(baLavMap, storeFilterRaw);
+
+      let monthTargetSellOut = 0;
+      if (directStoreNon !== undefined || directStoreLav !== undefined) {
+        monthTargetSellOut =
+          (directStoreNon !== undefined ? directStoreNon : DEFAULT_BA_NON_LAVOJOY_TARGET) +
+          (directStoreLav !== undefined ? directStoreLav : DEFAULT_BA_LAVOJOY_TARGET);
+      } else if (matchedStoreBas.length > 0) {
+        let baSum = 0;
+        for (const bInfo of matchedStoreBas) {
+          const bNon = findMapValueCaseInsensitive(baNonMap, bInfo.baName);
+          const bLav = findMapValueCaseInsensitive(baLavMap, bInfo.baName);
+          const mNon = bNon !== undefined ? bNon : DEFAULT_BA_NON_LAVOJOY_TARGET;
+          const mLav = bLav !== undefined ? bLav : DEFAULT_BA_LAVOJOY_TARGET;
+          const shareCount = Math.max(1, baStoresMap.get(bInfo.baKey)?.size || 1);
+          baSum += (mNon + mLav) / shareCount;
+        }
+        monthTargetSellOut = Math.round(baSum);
+      } else {
+        // Non-BA store: fallback ke target toko jika tersedia
+        monthTargetSellOut = monthTargetSellIn;
+      }
+
+      const entry: SpvMonthTargetEntry = {
+        targetSellIn: monthTargetSellIn,
+        targetSellOut: monthTargetSellOut,
+        spvLabel: storeFilterRaw,
+      };
+
+      byKey[m.key] = entry;
+      byKey[m.bulanName] = entry;
+      byKey[m.shortLabel.toUpperCase()] = entry;
+      for (const alias of m.aliases) {
+        byKey[alias.toUpperCase()] = entry;
+      }
+
+      allMonthsSellInSum += monthTargetSellIn;
+      allMonthsSellOutSum += monthTargetSellOut;
+      if (configuredMonthKeys.has(m.key)) {
+        configuredSellInSum += monthTargetSellIn;
+        configuredSellOutSum += monthTargetSellOut;
+      }
+    }
+
+    byKey['YEARLY_TOTAL'] = {
+      targetSellIn: configuredMonthKeys.size > 0 ? configuredSellInSum : allMonthsSellInSum,
+      targetSellOut: configuredMonthKeys.size > 0 ? configuredSellOutSum : allMonthsSellOutSum,
+      spvLabel: storeFilterRaw,
+    };
+
+    return {
+      byKey,
+      spvScopeLabel: `Target Toko: ${storeFilterRaw}`,
+      targetMode: 'store',
+      targetEntityLabel: storeFilterRaw,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // PRIORITY 2: SPECIFIC SALES FILTER (e.g., ILHAMSYAH)
+  // ---------------------------------------------------------------------------
+  if (hasSalesFilter) {
+    const byKey: Record<string, SpvMonthTargetEntry> = {};
+    let configuredSellInSum = 0;
+    let configuredSellOutSum = 0;
+    let allMonthsSellInSum = 0;
+    let allMonthsSellOutSum = 0;
+
+    for (const m of MONTH_OPTIONS_2026) {
+      const salesInMap = loadSalesTargets(m.key);
+      const salesOutMap = loadSalesSellOutTargets(m.key);
+      const customIn = lookupSalesMapWithAliases(salesInMap, salesFilterRaw);
+      const customOut = lookupSalesMapWithAliases(salesOutMap, salesFilterRaw);
+
+      const monthTargetSellIn = customIn !== undefined ? customIn : DEFAULT_SALES_TARGET;
+      const monthTargetSellOut = customOut !== undefined ? customOut : DEFAULT_SALES_SELLOUT_TARGET;
+
+      const entry: SpvMonthTargetEntry = {
+        targetSellIn: monthTargetSellIn,
+        targetSellOut: monthTargetSellOut,
+        spvLabel: salesFilterRaw,
+      };
+
+      byKey[m.key] = entry;
+      byKey[m.bulanName] = entry;
+      byKey[m.shortLabel.toUpperCase()] = entry;
+      for (const alias of m.aliases) {
+        byKey[alias.toUpperCase()] = entry;
+      }
+
+      allMonthsSellInSum += monthTargetSellIn;
+      allMonthsSellOutSum += monthTargetSellOut;
+      if (configuredMonthKeys.has(m.key)) {
+        configuredSellInSum += monthTargetSellIn;
+        configuredSellOutSum += monthTargetSellOut;
+      }
+    }
+
+    byKey['YEARLY_TOTAL'] = {
+      targetSellIn: configuredMonthKeys.size > 0 ? configuredSellInSum : allMonthsSellInSum,
+      targetSellOut: configuredMonthKeys.size > 0 ? configuredSellOutSum : allMonthsSellOutSum,
+      spvLabel: salesFilterRaw,
+    };
+
+    return {
+      byKey,
+      spvScopeLabel: `Target ${salesFilterRaw}`,
+      targetMode: 'sales',
+      targetEntityLabel: salesFilterRaw,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // PRIORITY 3: SEMUA SALES (TARGET ALL) -> AMBIL TARGET SPV DARI KELOLA TARGET
+  // ---------------------------------------------------------------------------
   interface SpvDirEntry {
     spvName: string;
     regions: Set<string>;
@@ -3571,7 +3804,6 @@ export function buildMonthlySpvTargetsMap(
 
   const spvFilterNorm = normalizeSpvDirectoryToken(filters?.SPV);
   const regionFilterNorm = normalizeSpvDirectoryToken(filters?.REGION);
-  const storeFilterNorm = normalizeSpvDirectoryToken(filters?.NAMA_STORE);
 
   if (spvFilterNorm && spvFilterNorm !== 'ALL') {
     const exact = candidateSpvs.filter((s) => normalizeSpvDirectoryToken(s.spvName) === spvFilterNorm);
@@ -3589,19 +3821,12 @@ export function buildMonthlySpvTargetsMap(
       (s) => s.regions.has(regionFilterNorm) || s.coverAreas.has(regionFilterNorm)
     );
     if (byRegion.length > 0) candidateSpvs = byRegion;
-  } else if (storeFilterNorm && storeFilterNorm !== 'ALL') {
-    const byStore = candidateSpvs.filter((s) => s.stores.has(storeFilterNorm));
-    if (byStore.length > 0) candidateSpvs = byStore;
   }
 
   const spvNamesLabel = candidateSpvs.map((s) => s.spvName).join(', ') || 'WIDODO';
-  const spvScopeLabel =
-    candidateSpvs.length === 1
-      ? `Target SPV: ${spvNamesLabel}`
-      : `Target SPV (${spvNamesLabel})`;
+  const spvScopeLabel = `Target ALL (SPV: ${spvNamesLabel})`;
 
   const byKey: Record<string, SpvMonthTargetEntry> = {};
-  const configuredMonthKeys = new Set(getConfiguredMonthKeys());
   let configuredSellInSum = 0;
   let configuredSellOutSum = 0;
   let allMonthsSellInSum = 0;
@@ -3649,7 +3874,7 @@ export function buildMonthlySpvTargetsMap(
     const entry: SpvMonthTargetEntry = {
       targetSellIn: monthTargetSellIn,
       targetSellOut: monthTargetSellOut,
-      spvLabel: spvNamesLabel,
+      spvLabel: 'ALL',
     };
 
     byKey[m.key] = entry;
@@ -3670,12 +3895,14 @@ export function buildMonthlySpvTargetsMap(
   byKey['YEARLY_TOTAL'] = {
     targetSellIn: configuredMonthKeys.size > 0 ? configuredSellInSum : allMonthsSellInSum,
     targetSellOut: configuredMonthKeys.size > 0 ? configuredSellOutSum : allMonthsSellOutSum,
-    spvLabel: spvNamesLabel,
+    spvLabel: 'ALL',
   };
 
   return {
     byKey,
     spvScopeLabel,
+    targetMode: 'spv',
+    targetEntityLabel: 'ALL',
   };
 }
 

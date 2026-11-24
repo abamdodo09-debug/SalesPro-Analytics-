@@ -54,6 +54,7 @@ import {
   MONTH_ORDER,
 } from '../utils/analytics';
 import { TimeframeTrendChart } from './TimeframeTrendChart';
+import { SearchableStoreFilter } from './SearchableStoreFilter';
 import {
   LayoutDashboard,
   MapPin,
@@ -97,6 +98,7 @@ interface ExecutiveSalesDashboardViewProps {
     years: string[];
     regions: string[];
     sales: string[];
+    stores?: string[];
     brands: string[];
     ket: string[];
   };
@@ -4901,6 +4903,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
       TAHUN: filters.TAHUN,
       SPV: filters.SPV,
       REGION: filters.REGION,
+      SALES: filters.SALES,
       NAMA_STORE: filters.NAMA_STORE,
     });
   }, [
@@ -4909,6 +4912,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     filters.TAHUN,
     filters.SPV,
     filters.REGION,
+    filters.SALES,
     filters.NAMA_STORE,
     quartalRefreshTick,
   ]);
@@ -5473,6 +5477,14 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                   ))}
                 </select>
               </div>
+
+              <SearchableStoreFilter
+                theme="dark"
+                label="Toko"
+                value={filters.NAMA_STORE}
+                stores={cascadingOptions.stores || []}
+                onChange={(val) => onChangeFilter('NAMA_STORE', val)}
+              />
 
               <div className="flex items-center gap-1 bg-[#121926] border border-[#243147] rounded-lg px-2.5 py-1.5 text-xs">
                 <span className="text-slate-400 font-medium">Brand:</span>
@@ -6584,6 +6596,8 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                 totalFilteredRecords={snap.effectiveFilteredCount}
                 spvTargetByMonth={monthlySpvTargetsData?.byKey}
                 spvScopeLabel={monthlySpvTargetsData?.spvScopeLabel}
+                targetMode={monthlySpvTargetsData?.targetMode}
+                targetEntityLabel={monthlySpvTargetsData?.targetEntityLabel}
                 onOpenTargetMgmt={() => onNavigateTab('target_mgmt')}
               />
             </div>
@@ -7699,10 +7713,16 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                           className={`px-1.5 py-0.5 rounded-md text-[9.5px] font-sans font-bold border whitespace-nowrap ${
                             snap.targetGapSummary.mode === 'spv'
                               ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                              : snap.targetGapSummary.mode === 'store'
+                              ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
                               : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
                           }`}
                         >
-                          {snap.targetGapSummary.mode === 'spv' ? 'Target SPV' : 'Target Sales'}
+                          {snap.targetGapSummary.mode === 'spv'
+                            ? 'Target ALL (SPV)'
+                            : snap.targetGapSummary.mode === 'store'
+                            ? 'Target Toko'
+                            : 'Target Sales'}
                         </span>
                       </div>
                       <button

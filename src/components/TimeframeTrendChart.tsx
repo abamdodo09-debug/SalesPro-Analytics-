@@ -52,6 +52,8 @@ interface TimeframeTrendChartProps {
   theme?: 'light' | 'dark';
   spvTargetByMonth?: Record<string, SpvMonthTargetEntry>;
   spvScopeLabel?: string;
+  targetMode?: 'spv' | 'sales' | 'store';
+  targetEntityLabel?: string;
   onOpenTargetMgmt?: () => void;
 }
 
@@ -65,6 +67,8 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
   theme = 'light',
   spvTargetByMonth,
   spvScopeLabel,
+  targetMode = 'spv',
+  targetEntityLabel,
   onOpenTargetMgmt,
 }) => {
   const isDark = theme === 'dark';
@@ -72,6 +76,24 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
     Boolean(spvTargetByMonth) && (mode === 'bulanan' || mode === 'tahunan');
   const isKetSellOutOnly = (filters?.KET || '').trim().toUpperCase() === 'SELL OUT';
   const spvMetricModeLabel = isKetSellOutOnly ? 'Sell Out' : 'Sell In';
+  const resolvedTargetEntity = useMemo(() => {
+    if (targetEntityLabel) return targetEntityLabel;
+    if (filters?.NAMA_STORE && filters.NAMA_STORE !== 'ALL') return filters.NAMA_STORE;
+    if (filters?.SALES && filters.SALES !== 'ALL') return filters.SALES;
+    return 'ALL';
+  }, [targetEntityLabel, filters?.NAMA_STORE, filters?.SALES]);
+  const fullTargetColumnLabel = `Target ${resolvedTargetEntity} (${spvMetricModeLabel})`;
+  const shortEntityDisplay =
+    resolvedTargetEntity.length > 16
+      ? `${resolvedTargetEntity.slice(0, 15)}…`
+      : resolvedTargetEntity;
+  const compactTargetHeaderLabel = `Target ${shortEntityDisplay} (${spvMetricModeLabel})`;
+  const targetModeBadgeSuffix =
+    targetMode === 'store'
+      ? 'Target Toko'
+      : targetMode === 'sales'
+      ? 'Target Sales'
+      : 'Target SPV';
   const [metricType, setMetricType] = useState<'value' | 'qty'>('value');
   const [isForecastEnabled, setIsForecastEnabled] = useState<boolean>(false);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
@@ -511,7 +533,8 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
         notes: r.notes,
       })),
       mode,
-      activeFilterSummary
+      activeFilterSummary,
+      fullTargetColumnLabel
     );
   };
 
@@ -662,8 +685,9 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
               className={`block mt-1 text-[11px] font-mono tabular-nums ${
                 isDark ? 'text-amber-300' : 'text-emerald-800'
               }`}
+              title={fullTargetColumnLabel}
             >
-              Target SPV ({spvMetricModeLabel}): <strong>{formatRupiah(tableTotals.sumSpvTarget)}</strong>{' '}
+              {fullTargetColumnLabel}: <strong>{formatRupiah(tableTotals.sumSpvTarget)}</strong>{' '}
               ({tableTotals.achvSpvPct !== null ? `${tableTotals.achvSpvPct.toFixed(1)}%` : '-'})
             </span>
           )}
@@ -928,7 +952,7 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
               {itemsWithGrowth[hoveredIndex].spvTarget !== undefined && (
                 <div className="mt-1 pt-1 border-t border-slate-700 flex items-center gap-2 text-[11px] font-mono tabular-nums">
                   <span className="text-amber-300">
-                    Target SPV: {formatRupiah(itemsWithGrowth[hoveredIndex].spvTarget || 0)}
+                    {fullTargetColumnLabel}: {formatRupiah(itemsWithGrowth[hoveredIndex].spvTarget || 0)}
                   </span>
                   {itemsWithGrowth[hoveredIndex].spvAchvPct !== null && (
                     <span
@@ -1130,7 +1154,7 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                 >
                   <Target className="w-3 h-3" />
                   <span>
-                    {spvScopeLabel || 'Target SPV'} ({spvMetricModeLabel}) — Kelola Target
+                    {spvScopeLabel || fullTargetColumnLabel} · {spvMetricModeLabel} — Kelola Target
                   </span>
                 </span>
               )}
@@ -1138,7 +1162,7 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
             <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
               Klik tombol <strong>Edit</strong> pada baris mana pun untuk mengubah Nilai (Rp), QTY, Transaksi, atau Catatan.
               {showSpvTargetColumns
-                ? ' Kolom Target SPV otomatis tersinkron dengan pengaturan di menu Kelola Target.'
+                ? ` Kolom ${fullTargetColumnLabel} otomatis tersinkron dengan pengaturan Kelola Target.`
                 : ' Perubahan langsung memperbarui grafik & ringkasan di atas.'}
             </p>
           </div>
@@ -1203,7 +1227,7 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                 }`}
               >
                 <Target className="w-3.5 h-3.5" />
-                <span>Atur Target SPV</span>
+                <span>Atur {targetModeBadgeSuffix}</span>
                 <ExternalLink className="w-3 h-3 opacity-80" />
               </button>
             )}
@@ -1365,13 +1389,13 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
           </form>
         )}
 
-        {/* Data Table */}
+        {/* Data Table — Streamlined One-Screen Width Layout */}
         <div
           className={`overflow-x-auto border rounded-lg ${
             isDark ? 'border-[#1F293B]' : 'border-slate-200'
           }`}
         >
-          <table className="w-full text-left border-collapse text-xs">
+          <table className="w-full text-left border-collapse text-[11px]">
             <thead>
               <tr
                 className={`border-b font-bold ${
@@ -1380,39 +1404,48 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                     : 'bg-slate-50 border-slate-200 text-slate-600'
                 }`}
               >
-                <th className="py-2.5 px-3 w-10">No</th>
-                <th className="py-2.5 px-3">Periode ({activeTimeframeLabel})</th>
-                <th className="py-2.5 px-3">Detail</th>
-                <th className="py-2.5 px-3 text-right">Nilai Penjualan (Rp)</th>
+                <th className="py-2 px-1.5 w-7 text-center">No</th>
+                <th className="py-2 px-2">Periode</th>
+                <th className="py-2 px-2 text-right whitespace-nowrap">Realisasi (Rp)</th>
                 {showSpvTargetColumns && (
                   <>
-                    <th className={`py-2.5 px-3 text-right whitespace-nowrap ${isDark ? 'text-amber-300' : 'text-amber-800'}`}>
-                      Target SPV ({spvMetricModeLabel})
+                    <th
+                      className={`py-2 px-2 text-right leading-tight ${
+                        isDark ? 'text-amber-300' : 'text-amber-800'
+                      }`}
+                      title={fullTargetColumnLabel}
+                    >
+                      <span className="block whitespace-nowrap">{compactTargetHeaderLabel}</span>
                     </th>
-                    <th className={`py-2.5 px-3 text-right whitespace-nowrap ${isDark ? 'text-cyan-300' : 'text-cyan-800'}`}>
-                      Achv Target SPV
+                    <th
+                      className={`py-2 px-2 text-right leading-tight whitespace-nowrap ${
+                        isDark ? 'text-cyan-300' : 'text-cyan-800'
+                      }`}
+                    >
+                      Achv
                     </th>
                   </>
                 )}
-                <th className="py-2.5 px-3 text-right">Unit (QTY)</th>
-                <th className="py-2.5 px-3 text-right">Transaksi</th>
-                <th className="py-2.5 px-3 text-right">Share (%)</th>
-                <th className="py-2.5 px-3 text-right">Growth</th>
-                <th className="py-2.5 px-3">Catatan</th>
-                <th className="py-2.5 px-3 text-center">Sumber</th>
-                <th className="py-2.5 px-3 text-center">Aksi</th>
+                <th className="py-2 px-2 text-right whitespace-nowrap">QTY / Trx</th>
+                <th className="py-2 px-1.5 text-right whitespace-nowrap">Share</th>
+                <th className="py-2 px-1.5 text-right whitespace-nowrap">Growth</th>
+                <th className="py-2 px-2">Catatan</th>
+                <th className="py-2 px-1.5 text-center whitespace-nowrap">Sumber &amp; Aksi</th>
               </tr>
             </thead>
             <tbody className={`divide-y ${isDark ? 'divide-[#1A2334]' : 'divide-slate-100'}`}>
               {tableRows.length === 0 ? (
                 <tr>
-                  <td colSpan={showSpvTargetColumns ? 13 : 11} className="py-8 text-center text-slate-400">
+                  <td colSpan={showSpvTargetColumns ? 10 : 8} className="py-8 text-center text-slate-400">
                     Tidak ada rincian periode untuk filter atau pencarian ini.
                   </td>
                 </tr>
               ) : (
                 tableRows.map((row) => {
                   const isEditing = editingKey === row.periodKey;
+                  const hasDistinctSubLabel =
+                    Boolean(row.subLabel) &&
+                    row.subLabel.trim().toUpperCase() !== row.label.trim().toUpperCase();
                   return (
                     <tr
                       key={row.periodKey}
@@ -1426,22 +1459,34 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                           : 'hover:bg-slate-50/70 transition-colors'
                       }
                     >
-                      <td className="py-2.5 px-3 font-mono text-slate-400 tabular-nums">{row.index}</td>
-                      <td className={`py-2.5 px-3 font-bold whitespace-nowrap ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                        {row.label}
+                      <td className="py-2 px-1.5 text-center font-mono text-slate-400 tabular-nums">
+                        {row.index}
                       </td>
-                      <td className={`py-2.5 px-3 whitespace-nowrap ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
-                        {row.subLabel || '-'}
+                      <td className="py-2 px-2 whitespace-nowrap">
+                        <div className="flex flex-col leading-tight">
+                          <span className={`font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                            {row.label}
+                          </span>
+                          {hasDistinctSubLabel && (
+                            <span
+                              className={`text-[10px] ${
+                                isDark ? 'text-slate-400' : 'text-slate-500'
+                              }`}
+                            >
+                              {row.subLabel}
+                            </span>
+                          )}
+                        </div>
                       </td>
 
-                      {/* Nilai */}
-                      <td className="py-2.5 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                      {/* Realisasi Nilai */}
+                      <td className="py-2 px-2 text-right font-mono tabular-nums whitespace-nowrap">
                         {isEditing ? (
                           <input
                             type="number"
                             value={editValue}
                             onChange={(e) => setEditValue(Number(e.target.value) || 0)}
-                            className={`w-32 px-2 py-1 text-right text-xs font-mono font-bold border border-indigo-400 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
+                            className={`w-28 px-1.5 py-1 text-right text-[11px] font-mono font-bold border border-indigo-400 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
                               isDark ? 'bg-[#0B101A] text-white' : 'bg-white'
                             }`}
                           />
@@ -1452,10 +1497,10 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                         )}
                       </td>
 
-                      {/* Target SPV & Achv % (dari Kelola Target) */}
+                      {/* Target & Achv % (dari Kelola Target) */}
                       {showSpvTargetColumns && (
                         <>
-                          <td className="py-2.5 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                          <td className="py-2 px-2 text-right font-mono tabular-nums whitespace-nowrap">
                             {row.spvTarget !== undefined ? (
                               <span className={`font-bold ${isDark ? 'text-amber-300' : 'text-amber-800'}`}>
                                 {formatRupiah(row.spvTarget)}
@@ -1464,7 +1509,7 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                               <span className="text-slate-500">-</span>
                             )}
                           </td>
-                          <td className="py-2.5 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                          <td className="py-2 px-2 text-right font-mono tabular-nums whitespace-nowrap">
                             {row.spvAchvPct !== null && row.spvAchvPct !== undefined ? (
                               <div className="flex flex-col items-end leading-tight">
                                 <span
@@ -1486,7 +1531,7 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                                 </span>
                                 {row.spvGap !== null && (
                                   <span
-                                    className={`text-[10px] ${
+                                    className={`text-[9.5px] ${
                                       row.spvGap >= 0
                                         ? isDark
                                           ? 'text-emerald-400/80'
@@ -1508,46 +1553,45 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                         </>
                       )}
 
-                      {/* QTY */}
-                      <td className="py-2.5 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                      {/* QTY / Trx combined compactly */}
+                      <td className="py-2 px-2 text-right font-mono tabular-nums whitespace-nowrap">
                         {isEditing ? (
-                          <input
-                            type="number"
-                            value={editQty}
-                            onChange={(e) => setEditQty(Number(e.target.value) || 0)}
-                            className={`w-20 px-2 py-1 text-right text-xs font-mono font-bold border border-indigo-400 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
-                              isDark ? 'bg-[#0B101A] text-white' : 'bg-white'
-                            }`}
-                          />
+                          <div className="flex items-center justify-end gap-1">
+                            <input
+                              type="number"
+                              value={editQty}
+                              onChange={(e) => setEditQty(Number(e.target.value) || 0)}
+                              title="Unit (QTY)"
+                              className={`w-16 px-1.5 py-1 text-right text-[11px] font-mono font-bold border border-indigo-400 rounded focus:outline-none ${
+                                isDark ? 'bg-[#0B101A] text-white' : 'bg-white'
+                              }`}
+                            />
+                            <input
+                              type="number"
+                              min={0}
+                              value={editTxCount}
+                              onChange={(e) => setEditTxCount(Math.max(0, Number(e.target.value) || 0))}
+                              title="Jumlah Transaksi"
+                              className={`w-12 px-1.5 py-1 text-right text-[11px] font-mono font-bold border border-indigo-400 rounded focus:outline-none ${
+                                isDark ? 'bg-[#0B101A] text-white' : 'bg-white'
+                              }`}
+                            />
+                          </div>
                         ) : (
-                          <span className={isDark ? 'text-slate-200' : 'text-slate-700'}>
-                            {formatNumber(row.qty)} pcs
-                          </span>
-                        )}
-                      </td>
-
-                      {/* Transaksi */}
-                      <td className="py-2.5 px-3 text-right font-mono tabular-nums whitespace-nowrap">
-                        {isEditing ? (
-                          <input
-                            type="number"
-                            min={0}
-                            value={editTxCount}
-                            onChange={(e) => setEditTxCount(Math.max(0, Number(e.target.value) || 0))}
-                            className={`w-16 px-2 py-1 text-right text-xs font-mono font-bold border border-indigo-400 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
-                              isDark ? 'bg-[#0B101A] text-white' : 'bg-white'
-                            }`}
-                          />
-                        ) : (
-                          <span className={isDark ? 'text-slate-300' : 'text-slate-600'}>
-                            {formatNumber(row.txCount)}
-                          </span>
+                          <div className="flex flex-col items-end leading-tight">
+                            <span className={isDark ? 'text-slate-200' : 'text-slate-700'}>
+                              {formatNumber(row.qty)} pcs
+                            </span>
+                            <span className="text-[9.5px] text-slate-400">
+                              {formatNumber(row.txCount)} trx
+                            </span>
+                          </div>
                         )}
                       </td>
 
                       {/* Share % */}
                       <td
-                        className={`py-2.5 px-3 text-right font-mono tabular-nums whitespace-nowrap ${
+                        className={`py-2 px-1.5 text-right font-mono tabular-nums whitespace-nowrap ${
                           isDark ? 'text-slate-300' : 'text-slate-700'
                         }`}
                       >
@@ -1555,7 +1599,7 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                       </td>
 
                       {/* Growth */}
-                      <td className="py-2.5 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                      <td className="py-2 px-1.5 text-right font-mono tabular-nums whitespace-nowrap">
                         {row.growthPct === null ? (
                           <span className="text-slate-400">-</span>
                         ) : (
@@ -1577,14 +1621,14 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                       </td>
 
                       {/* Catatan */}
-                      <td className={`py-2.5 px-3 max-w-[160px] ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                      <td className={`py-2 px-2 max-w-[95px] ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
                         {isEditing ? (
                           <input
                             type="text"
                             value={editNotes}
                             onChange={(e) => setEditNotes(e.target.value)}
                             placeholder="Catatan..."
-                            className={`w-full px-2 py-1 text-xs border border-indigo-400 rounded focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
+                            className={`w-full px-1.5 py-1 text-[11px] border border-indigo-400 rounded focus:outline-none ${
                               isDark ? 'bg-[#0B101A] text-white' : 'bg-white'
                             }`}
                           />
@@ -1595,25 +1639,8 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                         )}
                       </td>
 
-                      {/* Sumber */}
-                      <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                        <span
-                          className={`text-[11px] font-semibold ${
-                            row.isEdited
-                              ? isDark
-                                ? 'text-indigo-300'
-                                : 'text-indigo-700'
-                              : isDark
-                              ? 'text-emerald-400'
-                              : 'text-emerald-700'
-                          }`}
-                        >
-                          {row.isEdited ? 'Edit Manual' : 'Google Sheet'}
-                        </span>
-                      </td>
-
-                      {/* Aksi */}
-                      <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                      {/* Sumber & Aksi compact */}
+                      <td className="py-2 px-1.5 text-center whitespace-nowrap">
                         {isEditing ? (
                           <div className="flex items-center justify-center gap-1">
                             <button
@@ -1637,29 +1664,43 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                           </div>
                         ) : (
                           <div className="flex items-center justify-center gap-1">
+                            <span
+                              className={`text-[9.5px] font-semibold px-1 py-0.5 rounded ${
+                                row.isEdited
+                                  ? isDark
+                                    ? 'bg-indigo-500/20 text-indigo-300'
+                                    : 'bg-indigo-50 text-indigo-700'
+                                  : isDark
+                                  ? 'bg-emerald-500/15 text-emerald-400'
+                                  : 'bg-emerald-50 text-emerald-700'
+                              }`}
+                              title={row.isEdited ? 'Edit Manual' : 'Google Sheet'}
+                            >
+                              {row.isEdited ? 'Edit' : 'Sheet'}
+                            </span>
                             <button
                               onClick={() => startRowEdit(row)}
-                              className={`inline-flex items-center gap-1 px-2 py-1 rounded border font-semibold cursor-pointer ${
+                              className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded border text-[10px] font-semibold cursor-pointer ${
                                 isDark
                                   ? 'bg-[#192234] hover:bg-[#233049] text-slate-200 border-[#2A3952]'
                                   : 'bg-slate-100 hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 border-slate-200'
                               }`}
                               title={`Edit rincian ${row.label}`}
                             >
-                              <Edit2 className="w-3 h-3" />
+                              <Edit2 className="w-2.5 h-2.5" />
                               <span>Edit</span>
                             </button>
                             {row.isEdited && (
                               <button
                                 onClick={() => handleResetSingleRow(row.periodKey)}
-                                className={`p-1 rounded border cursor-pointer ${
+                                className={`p-0.5 rounded border cursor-pointer ${
                                   isDark
                                     ? 'hover:bg-rose-500/20 text-rose-400 border-rose-500/40'
                                     : 'hover:bg-rose-50 text-rose-600 border-rose-200'
                                 }`}
                                 title={row.isAddedManual ? 'Hapus baris manual' : 'Kembalikan ke data Google Sheet'}
                               >
-                                <RotateCcw className="w-3 h-3" />
+                                <RotateCcw className="w-2.5 h-2.5" />
                               </button>
                             )}
                           </div>
@@ -1674,28 +1715,28 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
             {tableRows.length > 0 && (
               <tfoot>
                 <tr
-                  className={`border-t-2 font-bold text-xs ${
+                  className={`border-t-2 font-bold text-[11px] ${
                     isDark
                       ? 'bg-[#0E1523] border-[#243147] text-white'
                       : 'bg-slate-100 border-slate-300 text-slate-900'
                   }`}
                 >
-                  <td colSpan={3} className="py-3 px-3 uppercase tracking-wider">
-                    Total Akumulasi ({tableRows.length} Periode)
+                  <td colSpan={2} className="py-2.5 px-2 uppercase tracking-wider whitespace-nowrap">
+                    Total ({tableRows.length} Periode)
                   </td>
-                  <td className="py-3 px-3 text-right font-mono tabular-nums">
+                  <td className="py-2.5 px-2 text-right font-mono tabular-nums whitespace-nowrap">
                     {formatRupiah(tableTotals.sumVal)}
                   </td>
                   {showSpvTargetColumns && (
                     <>
                       <td
-                        className={`py-3 px-3 text-right font-mono tabular-nums ${
+                        className={`py-2.5 px-2 text-right font-mono tabular-nums whitespace-nowrap ${
                           isDark ? 'text-amber-300' : 'text-amber-800'
                         }`}
                       >
                         {tableTotals.sumSpvTarget > 0 ? formatRupiah(tableTotals.sumSpvTarget) : '-'}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono tabular-nums">
+                      <td className="py-2.5 px-2 text-right font-mono tabular-nums whitespace-nowrap">
                         {tableTotals.achvSpvPct !== null ? (
                           <div className="flex flex-col items-end leading-tight">
                             <span
@@ -1717,7 +1758,7 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                             </span>
                             {tableTotals.spvGap !== null && (
                               <span
-                                className={`text-[10px] ${
+                                className={`text-[9.5px] ${
                                   tableTotals.spvGap >= 0
                                     ? isDark
                                       ? 'text-emerald-400/80'
@@ -1738,20 +1779,24 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
                       </td>
                     </>
                   )}
-                  <td className="py-3 px-3 text-right font-mono tabular-nums">
-                    {formatNumber(tableTotals.sumQty)} pcs
+                  <td className="py-2.5 px-2 text-right font-mono tabular-nums whitespace-nowrap">
+                    <div className="flex flex-col items-end leading-tight">
+                      <span>{formatNumber(tableTotals.sumQty)} pcs</span>
+                      <span className="text-[9.5px] text-slate-400">
+                        {formatNumber(tableTotals.sumTx)} trx
+                      </span>
+                    </div>
                   </td>
-                  <td className="py-3 px-3 text-right font-mono tabular-nums">
-                    {formatNumber(tableTotals.sumTx)}
+                  <td className="py-2.5 px-1.5 text-right font-mono tabular-nums whitespace-nowrap">
+                    100.0%
                   </td>
-                  <td className="py-3 px-3 text-right font-mono tabular-nums">100.0%</td>
                   <td
-                    colSpan={4}
-                    className={`py-3 px-3 text-right font-mono tabular-nums ${
+                    colSpan={3}
+                    className={`py-2.5 px-2 text-right font-mono tabular-nums whitespace-nowrap ${
                       isDark ? 'text-slate-300' : 'text-slate-600'
                     }`}
                   >
-                    Rata-rata: {formatRupiah(tableRows.length > 0 ? tableTotals.sumVal / tableRows.length : 0)}
+                    Avg: {formatRupiah(tableRows.length > 0 ? tableTotals.sumVal / tableRows.length : 0)}
                   </td>
                 </tr>
               </tfoot>

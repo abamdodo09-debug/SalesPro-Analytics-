@@ -44,6 +44,8 @@ import {
   DEFAULT_SALES_TARGET,
   DEFAULT_BA_NON_LAVOJOY_TARGET,
   DEFAULT_BA_LAVOJOY_TARGET,
+  buildMonthlySpvTargetsMap,
+  normalizeMonthKey,
 } from './targetManagementService';
 import {
   calculateStoreBaContribution,
@@ -269,7 +271,7 @@ export interface ExecutiveCoreSnapshot {
 }
 
 export interface DashboardTargetGapSummary {
-  mode: 'spv' | 'sales';
+  mode: 'spv' | 'sales' | 'store';
   scopeLabel: string;
   entityNames: string[];
   targetSellIn: number;
@@ -1041,13 +1043,31 @@ export function buildExecutiveCoreSnapshot(
   const regionFilterNorm = normalizeEntityName(filters.REGION);
   const storeFilterNorm = normalizeEntityName(filters.NAMA_STORE);
 
-  let gapMode: 'spv' | 'sales' = 'spv';
+  let gapMode: 'spv' | 'sales' | 'store' = 'spv';
   let gapEntityNames: string[] = [];
-  let gapScopeLabel = 'Target SPV (Semua Sales)';
+  let gapScopeLabel = 'Target ALL (SPV)';
   let gapTargetSellIn = 0;
   let gapTargetSellOut = 0;
 
-  if (salesFilterNorm && salesFilterNorm !== 'ALL') {
+  if (storeFilterNorm && storeFilterNorm !== 'ALL') {
+    gapMode = 'store';
+    const storeTargets = buildMonthlySpvTargetsMap(
+      yearScopedRecords.length > 0 ? yearScopedRecords : allRecords,
+      {
+        TAHUN: filters.TAHUN,
+        NAMA_STORE: filters.NAMA_STORE,
+      }
+    );
+    const normM = normalizeMonthKey(filters.BULAN);
+    const entry =
+      normM !== 'ALL' && storeTargets.byKey[normM]
+        ? storeTargets.byKey[normM]
+        : storeTargets.byKey['YEARLY_TOTAL'];
+    gapTargetSellIn = entry ? entry.targetSellIn : 0;
+    gapTargetSellOut = entry ? entry.targetSellOut : 0;
+    gapEntityNames = [filters.NAMA_STORE];
+    gapScopeLabel = `Target Toko: ${filters.NAMA_STORE}`;
+  } else if (salesFilterNorm && salesFilterNorm !== 'ALL') {
     gapMode = 'sales';
     const allSalesTargets = targetDirectoryMatrix.sales || [];
     let matchedSales = allSalesTargets.filter(
@@ -1104,17 +1124,6 @@ export function buildExecutiveCoreSnapshot(
         );
         if (byRecords.length > 0) candidateSpvs = byRecords;
       }
-    } else if (storeFilterNorm && storeFilterNorm !== 'ALL') {
-      const storeSpvSet = new Set(
-        yearScopedRecords
-          .filter((r) => normalizeEntityName(r.NAMA_STORE) === storeFilterNorm)
-          .map((r) => normalizeEntityName(r.SPV))
-          .filter((n) => n && n !== 'UNKNOWN' && n !== '-')
-      );
-      const byStore = candidateSpvs.filter((s) =>
-        storeSpvSet.has(normalizeEntityName(s.spvName))
-      );
-      if (byStore.length > 0) candidateSpvs = byStore;
     }
 
     gapTargetSellIn = candidateSpvs.reduce((acc, s) => acc + (Number(s.targetOmzet) || 0), 0);
@@ -1122,10 +1131,10 @@ export function buildExecutiveCoreSnapshot(
     gapEntityNames = candidateSpvs.map((s) => s.spvName);
     gapScopeLabel =
       gapEntityNames.length === 1
-        ? `Target SPV: ${gapEntityNames[0]} (Semua Sales)`
+        ? `Target ALL (SPV: ${gapEntityNames[0]})`
         : gapEntityNames.length > 1
-        ? `Target SPV (${gapEntityNames.join(', ')})`
-        : 'Target SPV (Semua Sales)';
+        ? `Target ALL (SPV: ${gapEntityNames.join(', ')})`
+        : 'Target ALL (SPV)';
   }
 
   const isKetSellOutOnly = fKet === 'SELL OUT';
@@ -1182,7 +1191,13 @@ export function buildExecutiveCoreSnapshot(
     alerts.push({
       id: 'alert-gap',
       severity: 'warning',
-      title: `Gap Defisit Target (${targetGapSummary.mode === 'spv' ? 'SPV' : gapEntityNames[0] || filters.SALES}): -${Math.round(targetGapSummary.gapPercentage)}%`,
+      title: `Gap Defisit Target (${
+        targetGapSummary.mode === 'spv'
+          ? 'ALL / SPV'
+          : targetGapSummary.mode === 'store'
+          ? gapEntityNames[0] || filters.NAMA_STORE
+          : gapEntityNames[0] || filters.SALES
+      }): -${Math.round(targetGapSummary.gapPercentage)}%`,
       description: `${targetGapSummary.scopeLabel} · ${gapDiagnosis.lostStoresCount} toko pasif memengaruhi pencapaian.`,
       targetTab: 'gap',
     });

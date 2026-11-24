@@ -16,6 +16,7 @@ import {
   Package
 } from 'lucide-react';
 import { DashboardFilters } from '../types/dashboard';
+import { SearchableStoreFilter } from './SearchableStoreFilter';
 
 interface FilterBarProps {
   filters: DashboardFilters;
@@ -299,28 +300,18 @@ export const FilterBar: React.FC<FilterBarProps> = React.memo(({
               </select>
             </div>
 
-            {/* 7. NAMA STORE (Amber) */}
+            {/* 7. NAMA STORE (Amber - Searchable) */}
             <div>
               <label className="text-[11px] font-bold text-amber-900 mb-1 flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-amber-500 inline-block" />
                 NAMA STORE
               </label>
-              <select
+              <SearchableStoreFilter
+                theme="light"
                 value={filters.NAMA_STORE}
-                onChange={(e) => onChangeFilter('NAMA_STORE', e.target.value)}
-                className={`w-full px-2.5 py-1.5 text-xs rounded-lg border focus:ring-2 focus:ring-amber-500 focus:outline-none transition-colors shadow-2xs ${
-                  filters.NAMA_STORE !== 'ALL'
-                    ? 'border-amber-500 bg-amber-50 font-bold text-amber-900'
-                    : 'border-slate-200 bg-white text-slate-700'
-                }`}
-              >
-                <option value="ALL">Semua Store ({options.stores.length})</option>
-                {options.stores.map((st) => (
-                  <option key={st} value={st}>
-                    {st}
-                  </option>
-                ))}
-              </select>
+                stores={options.stores}
+                onChange={(val) => onChangeFilter('NAMA_STORE', val)}
+              />
             </div>
 
             {/* 7. REGION (Teal) */}
