@@ -79,6 +79,7 @@ import {
   resolveRecordMonthAndYear,
   MONTHS_12,
 } from './sellInSellOutService';
+import { getManualKaMgSellInBreakdown } from './manualKaMgStorage';
 
 export interface ExecutiveDayRange {
   startDay?: number;
@@ -275,6 +276,8 @@ export interface DashboardTargetGapSummary {
   targetSellOut: number;
   actualSellIn: number;
   actualSellOut: number;
+  regularSellInActual?: number;
+  kaMgSellInActual?: number;
   activeTarget: number;
   activeActual: number;
   activeMetricLabel: 'Sell In' | 'Sell Out';
@@ -451,7 +454,21 @@ export function buildExecutiveCoreSnapshot(
 
   // 1. Core Summary & Target Matrix
   const summary = calculateSummary(effectiveFilteredRecords);
-  const matrix = aggregateTargetMatrix(effectiveFilteredRecords, filters.BULAN);
+  const fKetEarly = (filters.KET || 'ALL').trim().toUpperCase();
+  const hasSpecificSubEntityFilter =
+    (filters.SALES && filters.SALES !== 'ALL') ||
+    fKetEarly === 'SELL OUT' ||
+    (filters.BRAND && filters.BRAND !== 'ALL') ||
+    (filters.SKU && filters.SKU !== 'ALL') ||
+    (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL') ||
+    Boolean(filters.KATEGORI && filters.KATEGORI !== 'ALL') ||
+    Boolean(filters.STATUS_PRODUK && filters.STATUS_PRODUK !== 'ALL') ||
+    Boolean(filters.TRAINER && filters.TRAINER !== 'ALL') ||
+    Boolean(filters.searchQuery && filters.searchQuery.trim() !== '');
+  const matrix = aggregateTargetMatrix(effectiveFilteredRecords, filters.BULAN, {
+    selectedYear,
+    excludeKaMg: hasSpecificSubEntityFilter,
+  });
 
   // Hitung Total BA Terdaftar & Trainer Aktif langsung dari transaksi Google Sheet yang terhubung
   // (mengikuti filter aktif seperti Bulan/Tahun/Area/Sales/Toko tanpa terpengaruh filter KET SELL IN/OUT atau profil lokal non-sheet)
@@ -1015,7 +1032,8 @@ export function buildExecutiveCoreSnapshot(
       : allRecords;
   const targetDirectoryMatrix = aggregateTargetMatrix(
     yearScopedRecords.length > 0 ? yearScopedRecords : allRecords,
-    filters.BULAN
+    filters.BULAN,
+    { selectedYear, excludeKaMg: true }
   );
 
   const salesFilterNorm = normalizeEntityName(filters.SALES);
@@ -1112,8 +1130,14 @@ export function buildExecutiveCoreSnapshot(
 
   const isKetSellOutOnly = fKet === 'SELL OUT';
   const activeMetricLabel: 'Sell In' | 'Sell Out' = isKetSellOutOnly ? 'Sell Out' : 'Sell In';
+  const shouldIncludeKaMgInGap =
+    gapMode === 'spv' && !isKetSellOutOnly && !hasSpecificSubEntityFilter;
+  const kaMgSellInGap = shouldIncludeKaMgInGap
+    ? getManualKaMgSellInBreakdown(filters.BULAN, selectedYear).totalSellIn
+    : 0;
+  const combinedActualSellIn = totalSellIn + kaMgSellInGap;
   const activeGapTarget = isKetSellOutOnly ? gapTargetSellOut : gapTargetSellIn;
-  const activeGapActual = isKetSellOutOnly ? totalSellOut : totalSellIn;
+  const activeGapActual = isKetSellOutOnly ? totalSellOut : combinedActualSellIn;
   const deficitAmount =
     activeGapTarget > 0 ? Math.max(0, activeGapTarget - activeGapActual) : 0;
   const surplusAmount =
@@ -1137,8 +1161,10 @@ export function buildExecutiveCoreSnapshot(
     entityNames: gapEntityNames,
     targetSellIn: gapTargetSellIn,
     targetSellOut: gapTargetSellOut,
-    actualSellIn: totalSellIn,
+    actualSellIn: combinedActualSellIn,
     actualSellOut: totalSellOut,
+    regularSellInActual: totalSellIn,
+    kaMgSellInActual: kaMgSellInGap,
     activeTarget: activeGapTarget,
     activeActual: activeGapActual,
     activeMetricLabel,

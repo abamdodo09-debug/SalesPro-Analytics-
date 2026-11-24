@@ -10,6 +10,7 @@ import {
   getMonthDisplayLabel,
 } from '../services/targetManagementService';
 import { loadSpvConsolidatedConfig } from '../services/spvSellInSellOutService';
+import { getManualKaMgSellInBreakdown } from '../services/manualKaMgStorage';
 
 interface SpvAnalysisProps {
   records: TransactionRecord[];
@@ -40,7 +41,27 @@ export const SpvAnalysis: React.FC<SpvAnalysisProps> = ({ records, filters }) =>
 
   const spvData = useMemo(() => {
     const raw = aggregateByDimension(records, 'SPV');
-    return raw.map((spv) => {
+    const yearNum = Number(filters?.TAHUN) || 2026;
+    const fKet = (filters?.KET || 'ALL').trim().toUpperCase();
+    const canIncludeKaMg =
+      fKet !== 'SELL OUT' &&
+      (!filters ||
+        (filters.SALES === 'ALL' &&
+          filters.BRAND === 'ALL' &&
+          filters.SKU === 'ALL' &&
+          filters.NAMA_STORE === 'ALL' &&
+          (!filters.KATEGORI || filters.KATEGORI === 'ALL')));
+    const kaMgTotal = canIncludeKaMg
+      ? getManualKaMgSellInBreakdown(activeMonth, yearNum).totalSellIn
+      : 0;
+
+    let primaryIdx = raw.findIndex((s) => s.name.toUpperCase().trim() === 'WIDODO');
+    if (primaryIdx === -1 && raw.length > 0) primaryIdx = 0;
+
+    const merged = raw.map((spv, idx) => {
+      const addKaMg = idx === primaryIdx ? kaMgTotal : 0;
+      const regularVal = spv.totalValue;
+      const totalValue = regularVal + addKaMg;
       const upperName = spv.name.toUpperCase().trim();
       const matchedKey = Object.keys(spvTargetsMap).find((k) => k.toUpperCase().trim() === upperName);
       const customTarget = matchedKey !== undefined ? spvTargetsMap[matchedKey] : undefined;
@@ -50,14 +71,23 @@ export const SpvAnalysis: React.FC<SpvAnalysisProps> = ({ records, filters }) =>
           : upperName === 'WIDODO'
           ? spvConsolidated.target
           : DEFAULT_SPV_TARGET;
-      const achievementPct = targetVal > 0 ? (spv.totalValue / targetVal) * 100 : 0;
+      const achievementPct = targetVal > 0 ? (totalValue / targetVal) * 100 : 0;
       return {
         ...spv,
+        regularValue: regularVal,
+        kaMgValue: addKaMg,
+        totalValue,
         target: targetVal,
         achievementPercent: achievementPct,
       };
     });
-  }, [records, spvTargetsMap, spvConsolidated]);
+
+    const grandTotal = merged.reduce((acc, s) => acc + s.totalValue, 0);
+    return merged.map((s) => ({
+      ...s,
+      contributionPercent: grandTotal > 0 ? (s.totalValue / grandTotal) * 100 : s.contributionPercent,
+    }));
+  }, [records, spvTargetsMap, spvConsolidated, activeMonth, filters]);
 
   // Compute team members & regions per SPV
   const spvTeamMap: Record<string, { sales: Set<string>; regions: Set<string>; stores: Set<string> }> = {};
@@ -143,6 +173,11 @@ export const SpvAnalysis: React.FC<SpvAnalysisProps> = ({ records, filters }) =>
                   <div className="text-2xl font-black font-mono text-purple-950 tabular-nums">
                     {formatRupiah(spv.totalValue)}
                   </div>
+                  {(spv.kaMgValue || 0) > 0 && (
+                    <div className="text-[11px] font-mono font-semibold text-indigo-700 mt-1">
+                      Reguler {formatRupiah(spv.regularValue ?? 0, true)} + KA &amp; MG {formatRupiah(spv.kaMgValue ?? 0, true)}
+                    </div>
+                  )}
                   <div className="text-xs text-purple-800 font-mono font-medium mt-1">
                     {formatNumber(spv.totalQty)} pcs terjual ({spv.transactionCount} nota)
                   </div>

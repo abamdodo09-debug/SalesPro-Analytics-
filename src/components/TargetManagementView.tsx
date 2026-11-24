@@ -269,11 +269,19 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
   const [storePoolInput, setStorePoolInput] = useState<number>(0);
   const [storePoolApplyAllMonths, setStorePoolApplyAllMonths] = useState<boolean>(false);
 
+  const effectiveYear = useMemo(() => {
+    if (filters.TAHUN && filters.TAHUN !== 'ALL') {
+      const y = Number(filters.TAHUN);
+      if (!isNaN(y) && y > 1900) return y;
+    }
+    return 2026;
+  }, [filters.TAHUN]);
+
   // Aggregate target matrix data respecting selectedMonth (using full sourceRecords)
   const matrixData = useMemo(() => {
-    return aggregateTargetMatrix(sourceRecords, selectedMonth);
+    return aggregateTargetMatrix(sourceRecords, selectedMonth, { selectedYear: effectiveYear });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceRecords, selectedMonth, refreshKey]);
+  }, [sourceRecords, selectedMonth, effectiveYear, refreshKey]);
 
   // Store Sell In Matrix (Rumus otomatis % kontribusi 3 bulan sebelumnya x Target Sales + Manual Edit)
   const storeSellInMatrix = useMemo(() => {
@@ -288,9 +296,9 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
 
   // Automatic accumulation across ALL months that have configured targets
   const allConfiguredMatrix = useMemo(() => {
-    return selectedMonth === 'ALL' ? matrixData : aggregateTargetMatrix(sourceRecords, 'ALL');
+    return selectedMonth === 'ALL' ? matrixData : aggregateTargetMatrix(sourceRecords, 'ALL', { selectedYear: effectiveYear });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceRecords, selectedMonth, matrixData, refreshKey]);
+  }, [sourceRecords, selectedMonth, effectiveYear, matrixData, refreshKey]);
 
   const monthCustomCounts = useMemo(() => {
     return getMonthCustomizationSummary();
@@ -1877,7 +1885,13 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                               {formatRupiah(item.targetOmzet)}
                             </td>
                             <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-slate-900 whitespace-nowrap">
-                              {formatRupiah(item.actualSellIn)}
+                              <div>{formatRupiah(item.actualSellIn)}</div>
+                              {(item.kaMgSellIn || 0) > 0 && (
+                                <div className="text-[10px] font-medium text-indigo-700 mt-0.5">
+                                  Reg {formatRupiah(item.regularSellIn ?? 0, true)} + KA &amp; MG{' '}
+                                  {formatRupiah(item.kaMgSellIn ?? 0, true)}
+                                </div>
+                              )}
                             </td>
                             <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold whitespace-nowrap">
                               {item.gapOmzet >= 0 ? (
@@ -2091,7 +2105,13 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                               {formatRupiah(item.targetOmzet)}
                             </td>
                             <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-slate-900 whitespace-nowrap">
-                              {formatRupiah(item.actualSellIn)}
+                              <div>{formatRupiah(item.actualSellIn)}</div>
+                              {(item.kaMgSellIn || 0) > 0 && (
+                                <div className="text-[10px] font-medium text-purple-700 mt-0.5">
+                                  Reg {formatRupiah(item.regularSellIn ?? 0, true)} + KA &amp; MG{' '}
+                                  {formatRupiah(item.kaMgSellIn ?? 0, true)}
+                                </div>
+                              )}
                             </td>
                             <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold whitespace-nowrap">
                               {item.gapOmzet >= 0 ? (

@@ -19,6 +19,7 @@ import {
   calculateFocusProductIncentivePenalty,
   DEFAULT_FOCUS_TARGET_PCS,
 } from './focusProductService';
+import { getManualKaMgSellInBreakdown } from './manualKaMgStorage';
 
 export const TARGETS_UPDATED_EVENT = 'salespro-targets-updated';
 
@@ -1373,6 +1374,8 @@ export interface TargetMatrixData {
 
 export interface AggregateTargetMatrixOptions {
   singleMonthBaselineOnly?: boolean;
+  selectedYear?: number;
+  excludeKaMg?: boolean;
 }
 
 /**
@@ -1395,6 +1398,31 @@ export function aggregateTargetMatrix(
   const isMultiMonthAccumulated =
     normMonth === 'ALL' && !options?.singleMonthBaselineOnly && configuredMonthKeys.length > 0;
   const targetMonthsToResolve = isMultiMonthAccumulated ? configuredMonthKeys : [normMonth];
+
+  let effectiveYear =
+    options?.selectedYear && options.selectedYear > 1900 ? options.selectedYear : 0;
+  if (!effectiveYear && normMonth !== 'ALL') {
+    const mYear = Number(normMonth.split('-')[0]);
+    if (mYear > 1900) effectiveYear = mYear;
+  }
+  if (!effectiveYear && records.length > 0) {
+    let maxY = 0;
+    for (let i = 0; i < records.length; i++) {
+      const ds = String(records[i].TANGGAL || records[i].BULAN || '');
+      const yMatch = ds.match(/(20\d{2})/);
+      if (yMatch) {
+        const y = Number(yMatch[1]);
+        if (y > maxY) maxY = y;
+      }
+    }
+    if (maxY > 0) effectiveYear = maxY;
+  }
+  if (!effectiveYear) effectiveYear = 2026;
+
+  const kaMgBreakdown = options?.excludeKaMg
+    ? { totalSellIn: 0, kaSellIn: 0, mgSellIn: 0, filledMonthsCount: 0 }
+    : getManualKaMgSellInBreakdown(normMonth, effectiveYear);
+  const kaMgSellInTotal = kaMgBreakdown.totalSellIn;
 
   const focusOverrides = loadFocusOverrides();
   const customBaProfiles = loadCustomBaProfiles();
@@ -1788,7 +1816,7 @@ export function aggregateTargetMatrix(
   }).sort((a, b) => b.actualSellIn - a.actualSellIn);
 
   // 2. Array Area Targets (respect explicit custom target if set, else auto-rollup from Area's Sales targets)
-  const areas: AreaTargetItem[] = Object.values(areaMap).map((a) => {
+  const rawAreas: AreaTargetItem[] = Object.values(areaMap).map((a) => {
     let targetOmzet = 0;
     let targetSellOut = 0;
     let isCustom = false;
@@ -1832,7 +1860,8 @@ export function aggregateTargetMatrix(
       isCustomSellOut = true;
     }
 
-    const actualSellIn = a.actualSellIn > 0 ? a.actualSellIn : a.actualSellOut;
+    const regularSellIn = a.actualSellIn > 0 ? a.actualSellIn : a.actualSellOut;
+    const actualSellIn = regularSellIn;
     const gapOmzet = actualSellIn - targetOmzet;
     const achievementPct = targetOmzet > 0 ? (actualSellIn / targetOmzet) * 100 : 0;
     const gapSellOut = a.actualSellOut - targetSellOut;
@@ -1845,6 +1874,8 @@ export function aggregateTargetMatrix(
       region: a.region,
       targetOmzet,
       actualSellIn,
+      regularSellIn,
+      kaMgSellIn: 0,
       actualSellOut: a.actualSellOut,
       gapOmzet,
       achievementPct,
@@ -1858,10 +1889,57 @@ export function aggregateTargetMatrix(
       storeCount: a.storeSet.size,
       isCustom,
     };
-  }).sort((a, b) => b.actualSellIn - a.actualSellIn);
+  });
+
+  // Merge manual KA & DAZZLE ME MG Sell In into a single primary Cover Area (avoid double-counting in totalAreaActual)
+  if (kaMgSellInTotal > 0 && rawAreas.length > 0) {
+    const preferredAreaOrder = ['AREA BARU', 'RIAU', 'PEKANBARU', 'PEKAN BARU'];
+    let primaryAreaIdx = -1;
+    for (const token of preferredAreaOrder) {
+      const idx = rawAreas.findIndex((ar) => {
+        const up = ar.coverArea.trim().toUpperCase();
+        return up === token || up.includes(token);
+      });
+      if (idx !== -1) {
+        primaryAreaIdx = idx;
+        break;
+      }
+    }
+    if (primaryAreaIdx === -1) {
+      let bestVal = -1;
+      rawAreas.forEach((ar, idx) => {
+        const isKnown = ar.coverArea.trim().toUpperCase() !== 'UNKNOWN';
+        const score = (ar.regularSellIn || 0) + (isKnown ? 1 : 0);
+        if (score > bestVal) {
+          bestVal = score;
+          primaryAreaIdx = idx;
+        }
+      });
+      if (primaryAreaIdx === -1) primaryAreaIdx = 0;
+    }
+
+    const targetArea = rawAreas[primaryAreaIdx];
+    const baseReg = targetArea.regularSellIn ?? targetArea.actualSellIn;
+    const combinedSellIn = baseReg + kaMgSellInTotal;
+    const gapOmzet = combinedSellIn - targetArea.targetOmzet;
+    const achievementPct = targetArea.targetOmzet > 0 ? (combinedSellIn / targetArea.targetOmzet) * 100 : 0;
+    const status: 'achieved' | 'on_track' | 'lagging' =
+      achievementPct >= 100 ? 'achieved' : achievementPct >= 80 ? 'on_track' : 'lagging';
+
+    rawAreas[primaryAreaIdx] = {
+      ...targetArea,
+      regularSellIn: baseReg,
+      kaMgSellIn: kaMgSellInTotal,
+      actualSellIn: combinedSellIn,
+      gapOmzet,
+      achievementPct,
+      status,
+    };
+  }
+  const areas: AreaTargetItem[] = rawAreas.sort((a, b) => b.actualSellIn - a.actualSellIn);
 
   // 3. Array SPV Targets (respect explicit custom target if set, else auto-rollup from SPV's Sales targets)
-  const spvs: SpvTargetItem[] = Object.values(spvMap).map((s) => {
+  const rawSpvs: SpvTargetItem[] = Object.values(spvMap).map((s) => {
     let targetOmzet = 0;
     let targetSellOut = 0;
     let isCustom = false;
@@ -1905,7 +1983,8 @@ export function aggregateTargetMatrix(
       isCustomSellOut = true;
     }
 
-    const actualSellIn = s.actualSellIn > 0 ? s.actualSellIn : s.actualSellOut;
+    const regularSellIn = s.actualSellIn > 0 ? s.actualSellIn : s.actualSellOut;
+    const actualSellIn = regularSellIn;
     const gapOmzet = actualSellIn - targetOmzet;
     const achievementPct = targetOmzet > 0 ? (actualSellIn / targetOmzet) * 100 : 0;
     const gapSellOut = s.actualSellOut - targetSellOut;
@@ -1919,6 +1998,8 @@ export function aggregateTargetMatrix(
       coverAreas: Array.from(s.coverAreas),
       targetOmzet,
       actualSellIn,
+      regularSellIn,
+      kaMgSellIn: 0,
       actualSellOut: s.actualSellOut,
       gapOmzet,
       achievementPct,
@@ -1931,7 +2012,43 @@ export function aggregateTargetMatrix(
       storeCount: s.storeSet.size,
       isCustom,
     };
-  }).sort((a, b) => b.actualSellIn - a.actualSellIn);
+  });
+
+  // Merge manual KA & DAZZLE ME MG Sell In into SPV Sell In (prefer WIDODO) without double-counting
+  if (kaMgSellInTotal > 0 && rawSpvs.length > 0) {
+    let primarySpvIdx = rawSpvs.findIndex((sp) => sp.spvName.trim().toUpperCase() === 'WIDODO');
+    if (primarySpvIdx === -1) {
+      let bestVal = -1;
+      rawSpvs.forEach((sp, idx) => {
+        const isKnown = sp.spvName.trim().toUpperCase() !== 'UNKNOWN';
+        const score = (sp.regularSellIn || 0) + (isKnown ? 1 : 0);
+        if (score > bestVal) {
+          bestVal = score;
+          primarySpvIdx = idx;
+        }
+      });
+      if (primarySpvIdx === -1) primarySpvIdx = 0;
+    }
+
+    const targetSpv = rawSpvs[primarySpvIdx];
+    const baseReg = targetSpv.regularSellIn ?? targetSpv.actualSellIn;
+    const combinedSellIn = baseReg + kaMgSellInTotal;
+    const gapOmzet = combinedSellIn - targetSpv.targetOmzet;
+    const achievementPct = targetSpv.targetOmzet > 0 ? (combinedSellIn / targetSpv.targetOmzet) * 100 : 0;
+    const status: 'achieved' | 'on_track' | 'lagging' =
+      achievementPct >= 100 ? 'achieved' : achievementPct >= 80 ? 'on_track' : 'lagging';
+
+    rawSpvs[primarySpvIdx] = {
+      ...targetSpv,
+      regularSellIn: baseReg,
+      kaMgSellIn: kaMgSellInTotal,
+      actualSellIn: combinedSellIn,
+      gapOmzet,
+      achievementPct,
+      status,
+    };
+  }
+  const spvs: SpvTargetItem[] = rawSpvs.sort((a, b) => b.actualSellIn - a.actualSellIn);
 
   // 4. Array BA Targets (1 target per BA name; stores with the same BA are merged)
   const bas: BaTargetItem[] = Object.values(baMap).map((b) => {
@@ -3341,4 +3458,225 @@ export function computeStoreSellInMatrix(
     isMultiMonthAccumulated: true,
   };
 }
+
+export interface SpvMonthTargetEntry {
+  targetSellIn: number;
+  targetSellOut: number;
+  spvLabel: string;
+}
+
+export interface MonthlySpvTargetsResult {
+  byKey: Record<string, SpvMonthTargetEntry>;
+  spvScopeLabel: string;
+}
+
+function normalizeSpvDirectoryToken(val?: string): string {
+  return (val || '').trim().toUpperCase().replace(/\s+/g, ' ');
+}
+
+/**
+ * Resolves per-month Target SPV (Sell In & Sell Out) configured in Kelola Target
+ * with the same SPV/Sales rollup & entity filtering logic used in Dashboard Gap Summary.
+ */
+export function buildMonthlySpvTargetsMap(
+  records: TransactionRecord[],
+  filters?: {
+    TAHUN?: string;
+    SPV?: string;
+    REGION?: string;
+    NAMA_STORE?: string;
+  }
+): MonthlySpvTargetsResult {
+  const yearFilter = filters?.TAHUN && filters.TAHUN !== 'ALL' ? String(filters.TAHUN).trim() : '';
+
+  interface SpvDirEntry {
+    spvName: string;
+    regions: Set<string>;
+    coverAreas: Set<string>;
+    stores: Set<string>;
+    salesNames: Set<string>;
+  }
+
+  const spvDirAll = new Map<string, SpvDirEntry>();
+  const spvDirYear = new Map<string, SpvDirEntry>();
+
+  const pushRecordToDir = (dir: Map<string, SpvDirEntry>, r: TransactionRecord) => {
+    const spvRaw = (r.SPV || 'UNKNOWN').trim() || 'UNKNOWN';
+    const spvNorm = normalizeSpvDirectoryToken(spvRaw);
+    let entry = dir.get(spvNorm);
+    if (!entry) {
+      entry = {
+        spvName: spvRaw,
+        regions: new Set<string>(),
+        coverAreas: new Set<string>(),
+        stores: new Set<string>(),
+        salesNames: new Set<string>(),
+      };
+      dir.set(spvNorm, entry);
+    }
+    if (r.REGION) entry.regions.add(normalizeSpvDirectoryToken(r.REGION));
+    if (r.COVER_AREA) entry.coverAreas.add(normalizeSpvDirectoryToken(r.COVER_AREA));
+    if (r.NAMA_STORE) entry.stores.add(normalizeSpvDirectoryToken(r.NAMA_STORE));
+    if (r.SALES) {
+      const sClean = r.SALES.trim();
+      const sNorm = normalizeSpvDirectoryToken(sClean);
+      if (sNorm && sNorm !== 'UNKNOWN' && sNorm !== '-') {
+        entry.salesNames.add(sClean);
+      }
+    }
+  };
+
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i];
+    pushRecordToDir(spvDirAll, r);
+    if (yearFilter) {
+      const ds = String(r.TANGGAL || r.BULAN || '');
+      if (ds.includes(yearFilter)) {
+        pushRecordToDir(spvDirYear, r);
+      }
+    }
+  }
+
+  const activeDir = yearFilter && spvDirYear.size > 0 ? spvDirYear : spvDirAll;
+  let allSpvs = Array.from(activeDir.values());
+
+  if (allSpvs.length === 0) {
+    const baseSpvKeys = Object.keys(readGlobalMap(STORAGE_KEY_SPV_TARGETS));
+    if (baseSpvKeys.length > 0) {
+      allSpvs = baseSpvKeys.map((name) => ({
+        spvName: name,
+        regions: new Set<string>(),
+        coverAreas: new Set<string>(),
+        stores: new Set<string>(),
+        salesNames: new Set<string>(),
+      }));
+    } else {
+      allSpvs = [
+        {
+          spvName: 'WIDODO',
+          regions: new Set<string>(),
+          coverAreas: new Set<string>(),
+          stores: new Set<string>(),
+          salesNames: new Set<string>(),
+        },
+      ];
+    }
+  }
+
+  const realSpvs = allSpvs.filter((s) => {
+    const n = normalizeSpvDirectoryToken(s.spvName);
+    return n && n !== 'UNKNOWN' && n !== '-' && n !== 'TIDAK DIKETAHUI';
+  });
+  let candidateSpvs = realSpvs.length > 0 ? realSpvs : allSpvs;
+
+  const spvFilterNorm = normalizeSpvDirectoryToken(filters?.SPV);
+  const regionFilterNorm = normalizeSpvDirectoryToken(filters?.REGION);
+  const storeFilterNorm = normalizeSpvDirectoryToken(filters?.NAMA_STORE);
+
+  if (spvFilterNorm && spvFilterNorm !== 'ALL') {
+    const exact = candidateSpvs.filter((s) => normalizeSpvDirectoryToken(s.spvName) === spvFilterNorm);
+    if (exact.length > 0) {
+      candidateSpvs = exact;
+    } else {
+      const partial = candidateSpvs.filter((s) => {
+        const sn = normalizeSpvDirectoryToken(s.spvName);
+        return sn.includes(spvFilterNorm) || spvFilterNorm.includes(sn);
+      });
+      if (partial.length > 0) candidateSpvs = partial;
+    }
+  } else if (regionFilterNorm && regionFilterNorm !== 'ALL') {
+    const byRegion = candidateSpvs.filter(
+      (s) => s.regions.has(regionFilterNorm) || s.coverAreas.has(regionFilterNorm)
+    );
+    if (byRegion.length > 0) candidateSpvs = byRegion;
+  } else if (storeFilterNorm && storeFilterNorm !== 'ALL') {
+    const byStore = candidateSpvs.filter((s) => s.stores.has(storeFilterNorm));
+    if (byStore.length > 0) candidateSpvs = byStore;
+  }
+
+  const spvNamesLabel = candidateSpvs.map((s) => s.spvName).join(', ') || 'WIDODO';
+  const spvScopeLabel =
+    candidateSpvs.length === 1
+      ? `Target SPV: ${spvNamesLabel}`
+      : `Target SPV (${spvNamesLabel})`;
+
+  const byKey: Record<string, SpvMonthTargetEntry> = {};
+  const configuredMonthKeys = new Set(getConfiguredMonthKeys());
+  let configuredSellInSum = 0;
+  let configuredSellOutSum = 0;
+  let allMonthsSellInSum = 0;
+  let allMonthsSellOutSum = 0;
+
+  for (const m of MONTH_OPTIONS_2026) {
+    const spvInMap = loadSpvTargets(m.key);
+    const spvOutMap = loadSpvSellOutTargets(m.key);
+    const salesInMap = loadSalesTargets(m.key);
+    const salesOutMap = loadSalesSellOutTargets(m.key);
+
+    let monthTargetSellIn = 0;
+    let monthTargetSellOut = 0;
+
+    for (const spv of candidateSpvs) {
+      const customIn = findMapValueCaseInsensitive(spvInMap, spv.spvName);
+      if (customIn !== undefined) {
+        monthTargetSellIn += customIn;
+      } else if (spv.salesNames.size > 0) {
+        let salesRollupIn = 0;
+        spv.salesNames.forEach((sl) => {
+          const sVal = findMapValueCaseInsensitive(salesInMap, sl);
+          salesRollupIn += sVal !== undefined ? sVal : DEFAULT_SALES_TARGET;
+        });
+        monthTargetSellIn += salesRollupIn > 0 ? salesRollupIn : DEFAULT_SPV_TARGET;
+      } else {
+        monthTargetSellIn += DEFAULT_SPV_TARGET;
+      }
+
+      const customOut = findMapValueCaseInsensitive(spvOutMap, spv.spvName);
+      if (customOut !== undefined) {
+        monthTargetSellOut += customOut;
+      } else if (spv.salesNames.size > 0) {
+        let salesRollupOut = 0;
+        spv.salesNames.forEach((sl) => {
+          const sVal = findMapValueCaseInsensitive(salesOutMap, sl);
+          salesRollupOut += sVal !== undefined ? sVal : DEFAULT_SALES_SELLOUT_TARGET;
+        });
+        monthTargetSellOut += salesRollupOut > 0 ? salesRollupOut : DEFAULT_SPV_SELLOUT_TARGET;
+      } else {
+        monthTargetSellOut += DEFAULT_SPV_SELLOUT_TARGET;
+      }
+    }
+
+    const entry: SpvMonthTargetEntry = {
+      targetSellIn: monthTargetSellIn,
+      targetSellOut: monthTargetSellOut,
+      spvLabel: spvNamesLabel,
+    };
+
+    byKey[m.key] = entry;
+    byKey[m.bulanName] = entry;
+    byKey[m.shortLabel.toUpperCase()] = entry;
+    for (const alias of m.aliases) {
+      byKey[alias.toUpperCase()] = entry;
+    }
+
+    allMonthsSellInSum += monthTargetSellIn;
+    allMonthsSellOutSum += monthTargetSellOut;
+    if (configuredMonthKeys.has(m.key)) {
+      configuredSellInSum += monthTargetSellIn;
+      configuredSellOutSum += monthTargetSellOut;
+    }
+  }
+
+  byKey['YEARLY_TOTAL'] = {
+    targetSellIn: configuredMonthKeys.size > 0 ? configuredSellInSum : allMonthsSellInSum,
+    targetSellOut: configuredMonthKeys.size > 0 ? configuredSellOutSum : allMonthsSellOutSum,
+    spvLabel: spvNamesLabel,
+  };
+
+  return {
+    byKey,
+    spvScopeLabel,
+  };
+}
+
 

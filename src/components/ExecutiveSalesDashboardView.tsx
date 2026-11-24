@@ -13,6 +13,7 @@ import {
   SpvTargetItem,
   KpiSalesScorecardItem,
   KpiTrainerScorecardItem,
+  TimeframeMode,
 } from '../types/dashboard';
 import {
   buildExecutiveCoreSnapshot,
@@ -40,6 +41,7 @@ import {
   loadTrainerConfigs,
   loadTrainerTargets,
   syncQuarterBaSellInToStores,
+  buildMonthlySpvTargetsMap,
 } from '../services/targetManagementService';
 import { MonthlyOnlinePromoRecapRow } from '../services/onlinePromoService';
 import { aggregatePerStoreMgRecap } from '../services/missGlamMarketShareService';
@@ -48,8 +50,10 @@ import {
   formatNumber,
   formatPercent,
   filterRecords,
+  aggregateTimeframe,
   MONTH_ORDER,
 } from '../utils/analytics';
+import { TimeframeTrendChart } from './TimeframeTrendChart';
 import {
   LayoutDashboard,
   MapPin,
@@ -108,6 +112,7 @@ interface ExecutiveSalesDashboardViewProps {
 
 type SidebarLens =
   | 'overview'
+  | 'tren_bulanan'
   | 'regional'
   | 'market_share'
   | 'product_mix'
@@ -286,7 +291,8 @@ const TrajectoryChartCard: React.FC<{
   monthlyTrajectory: MonthlyTrajectoryPoint[];
   avgMonthlyRevenue: number;
   selectedYear: number;
-}> = React.memo(({ monthlyTrajectory, avgMonthlyRevenue, selectedYear }) => {
+  onOpenTrendView?: () => void;
+}> = React.memo(({ monthlyTrajectory, avgMonthlyRevenue, selectedYear, onOpenTrendView }) => {
   const [hoveredTrajIdx, setHoveredTrajIdx] = useState<number | null>(null);
 
   const trajectoryChart = useMemo(() => {
@@ -342,12 +348,23 @@ const TrajectoryChartCard: React.FC<{
         <h2 className="text-[11px] font-extrabold uppercase tracking-wider text-slate-100">
           TRAJEKTORI OMSET BULANAN {selectedYear}
         </h2>
-        <span
-          className="text-[10.5px] font-bold font-mono tabular-nums text-emerald-400 whitespace-nowrap"
-          title={`Rata-rata: ${formatRupiah(avgMonthlyRevenue)} / bulan`}
-        >
-          Avg: {formatCompactIdr(avgMonthlyRevenue)}/bln
-        </span>
+        <div className="flex items-center gap-2">
+          <span
+            className="text-[10.5px] font-bold font-mono tabular-nums text-emerald-400 whitespace-nowrap"
+            title={`Rata-rata: ${formatRupiah(avgMonthlyRevenue)} / bulan`}
+          >
+            Avg: {formatCompactIdr(avgMonthlyRevenue)}/bln
+          </span>
+          {onOpenTrendView && (
+            <button
+              type="button"
+              onClick={onOpenTrendView}
+              className="px-2 py-0.5 rounded bg-[#FF6B00]/15 hover:bg-[#FF6B00]/25 text-[#FFB067] border border-[#FF6B00]/30 text-[10px] font-bold whitespace-nowrap cursor-pointer transition-colors"
+            >
+              Tren &amp; Rincian →
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="relative my-auto">
@@ -2081,6 +2098,11 @@ const RegionalSalesPanel: React.FC<{
                         <span>Aktual: {formatCompactIdr(act)}</span>
                         <span>Target: {formatCompactIdr(tgt)}</span>
                       </div>
+                      {effectiveChartMetric !== 'sell_out' && (a.kaMgSellIn || 0) > 0 && (
+                        <div className="text-[9.5px] font-mono tabular-nums text-cyan-300/90">
+                          Reg {formatCompactIdr(a.regularSellIn ?? 0)} + KA &amp; MG {formatCompactIdr(a.kaMgSellIn ?? 0)}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -2375,6 +2397,40 @@ const RegionalSalesPanel: React.FC<{
             </span>
           </div>
 
+          {!isSellOutOnly && spvs.length > 0 && (
+            <div className="px-4 py-2.5 border-b border-[#1E293B] bg-[#0B101A] flex flex-wrap items-center justify-between gap-3 text-xs">
+              {spvs.map((sp) => (
+                <div key={sp.spvName} className="flex flex-wrap items-center gap-3 font-mono tabular-nums">
+                  <span className="font-sans text-[10.5px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                    SPV {sp.spvName}
+                  </span>
+                  <span className="text-slate-400 text-[11px]">
+                    Target Sell In: <strong className="text-slate-200">{formatRupiah(sp.targetOmzet)}</strong>
+                  </span>
+                  <span className="text-slate-300 text-[11px]">
+                    Aktual Sell In: <strong className="text-[#FF6B00]">{formatRupiah(sp.actualSellIn)}</strong>
+                    {(sp.kaMgSellIn || 0) > 0 && (
+                      <span className="text-cyan-300 ml-1.5 text-[10px]">
+                        (Reg {formatCompactIdr(sp.regularSellIn ?? 0)} + KA &amp; MG {formatCompactIdr(sp.kaMgSellIn ?? 0)})
+                      </span>
+                    )}
+                  </span>
+                  <span
+                    className={`font-black text-[11px] ${
+                      sp.achievementPct >= 100
+                        ? 'text-emerald-400'
+                        : sp.achievementPct >= 75
+                        ? 'text-cyan-400'
+                        : 'text-amber-400'
+                    }`}
+                  >
+                    {sp.achievementPct.toFixed(1)}%
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="w-full overflow-x-auto">
             <table className="w-full text-xs text-left border-collapse">
               <thead className="bg-[#0B101A]">
@@ -2430,7 +2486,12 @@ const RegionalSalesPanel: React.FC<{
                             {formatRupiah(a.tIn)}
                           </td>
                           <td className="py-2.5 px-3 text-right font-bold text-white whitespace-nowrap">
-                            {formatRupiah(a.aIn)}
+                            <div>{formatRupiah(a.aIn)}</div>
+                            {(a.kaMgSellIn || 0) > 0 && (
+                              <div className="text-[10px] font-normal text-cyan-300/90 mt-0.5">
+                                Reg {formatCompactIdr(a.regularSellIn ?? 0)} + KA &amp; MG {formatCompactIdr(a.kaMgSellIn ?? 0)}
+                              </div>
+                            )}
                           </td>
                           <td
                             className={`py-2.5 px-3 text-right font-extrabold whitespace-nowrap ${
@@ -4821,6 +4882,37 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     return buildExecutiveCoreSnapshot(allRecords, filteredRecords, filters, deferredDayRange);
   }, [allRecords, filteredRecords, filters, deferredDayRange, quartalRefreshTick]);
 
+  // Tren Pencapaian Bulanan & Rincian Data state & memo (computed only when active)
+  const [trendTimeframeMode, setTrendTimeframeMode] = useState<TimeframeMode>('bulanan');
+  const trendRecords = useMemo(() => {
+    if (activeLens !== 'tren_bulanan') return [];
+    return deferredDayRange
+      ? filterRecordsByDayRange(filteredRecords, deferredDayRange)
+      : filteredRecords;
+  }, [activeLens, filteredRecords, deferredDayRange]);
+  const trendChartData = useMemo(() => {
+    if (activeLens !== 'tren_bulanan') return [];
+    return aggregateTimeframe(trendRecords, trendTimeframeMode);
+  }, [activeLens, trendRecords, trendTimeframeMode]);
+  const monthlySpvTargetsData = useMemo(() => {
+    void quartalRefreshTick;
+    if (activeLens !== 'tren_bulanan') return null;
+    return buildMonthlySpvTargetsMap(allRecords, {
+      TAHUN: filters.TAHUN,
+      SPV: filters.SPV,
+      REGION: filters.REGION,
+      NAMA_STORE: filters.NAMA_STORE,
+    });
+  }, [
+    activeLens,
+    allRecords,
+    filters.TAHUN,
+    filters.SPV,
+    filters.REGION,
+    filters.NAMA_STORE,
+    quartalRefreshTick,
+  ]);
+
   // Lazy Sub-Lens Data (ONLY computed when that specific sub-menu is active!)
   const marketShareData = useMemo(() => {
     if (activeLens !== 'market_share') return null;
@@ -5135,6 +5227,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     icon: React.ReactNode;
   }> = [
     { id: 'overview', label: 'Overview Dashboard', icon: <LayoutDashboard className="w-3.5 h-3.5" /> },
+    { id: 'tren_bulanan', label: 'Tren Bulanan & Rincian', icon: <Calendar className="w-3.5 h-3.5" /> },
     { id: 'regional', label: 'Area & Tim Sales', icon: <MapPin className="w-3.5 h-3.5" /> },
     { id: 'market_share', label: 'Market Share MG', icon: <PieChartIcon className="w-3.5 h-3.5" /> },
     { id: 'product_mix', label: 'Brand, Kategori & SKU', icon: <Layers className="w-3.5 h-3.5" /> },
@@ -6221,6 +6314,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                   monthlyTrajectory={snap.monthlyTrajectory}
                   avgMonthlyRevenue={snap.avgMonthlyRevenue}
                   selectedYear={snap.selectedYear}
+                  onOpenTrendView={() => handleSelectLens('tren_bulanan')}
                 />
 
                 <div className="lg:col-span-5 bg-[#121926] border border-[#1F293B] rounded-xl p-3 flex flex-col justify-between gap-2.5">
@@ -6454,6 +6548,44 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                   </div>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* SUB-LENS: TREN PENCAPAIAN BULANAN & RINCIAN DATA */}
+          {activeLens === 'tren_bulanan' && (
+            <div className="flex-1 flex flex-col gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
+                    Tren Pencapaian Bulanan &amp; Rincian Data
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    Indikator Growth (Bulanan) serta Rincian Data Bulanan sesuai Filter Terintegrasi
+                  </p>
+                </div>
+                {filters.BULAN !== 'ALL' && (
+                  <button
+                    type="button"
+                    onClick={() => onChangeFilter('BULAN', 'ALL')}
+                    className="px-3 py-1.5 rounded-lg bg-[#FF6B00]/15 hover:bg-[#FF6B00]/25 border border-[#FF6B00]/40 text-[#FFB067] text-xs font-bold cursor-pointer transition-colors"
+                  >
+                    Tampilkan Semua Bulan (Jan–Des)
+                  </button>
+                )}
+              </div>
+
+              <TimeframeTrendChart
+                theme="dark"
+                data={trendChartData}
+                mode={trendTimeframeMode}
+                onModeChange={setTrendTimeframeMode}
+                selectedMonth={filters.BULAN}
+                filters={filters}
+                totalFilteredRecords={snap.effectiveFilteredCount}
+                spvTargetByMonth={monthlySpvTargetsData?.byKey}
+                spvScopeLabel={monthlySpvTargetsData?.spvScopeLabel}
+                onOpenTargetMgmt={() => onNavigateTab('target_mgmt')}
+              />
             </div>
           )}
 
@@ -7625,6 +7757,16 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                           {formatRupiah(snap.targetGapSummary.activeActual)}
                         </span>
                       </div>
+                      {(snap.targetGapSummary.kaMgSellInActual || 0) > 0 &&
+                        snap.targetGapSummary.activeMetricLabel === 'Sell In' && (
+                          <div className="flex items-center justify-between gap-2 text-[10px] text-cyan-300/90">
+                            <span className="font-sans">Komposisi Sell In SPV:</span>
+                            <span className="whitespace-nowrap">
+                              Reg {formatCompactIdr(snap.targetGapSummary.regularSellInActual ?? 0)} + KA &amp; MG{' '}
+                              {formatCompactIdr(snap.targetGapSummary.kaMgSellInActual ?? 0)}
+                            </span>
+                          </div>
+                        )}
                       {filters.KET === 'ALL' && snap.targetGapSummary.targetSellOut > 0 && (
                         <div className="flex items-center justify-between gap-2 pt-0.5 border-t border-[#182234] text-[10px]">
                           <span className="font-sans text-slate-400">

@@ -151,6 +151,8 @@ export interface AreaTargetItem {
   region: string;
   targetOmzet: number;
   actualSellIn: number;
+  regularSellIn?: number;
+  kaMgSellIn?: number;
   actualSellOut: number;
   gapOmzet: number;
   achievementPct: number;
@@ -171,6 +173,8 @@ export interface SpvTargetItem {
   coverAreas: string[];
   targetOmzet: number;
   actualSellIn: number;
+  regularSellIn?: number;
+  kaMgSellIn?: number;
   actualSellOut: number;
   gapOmzet: number;
   achievementPct: number;

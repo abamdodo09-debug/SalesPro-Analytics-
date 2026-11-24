@@ -5,6 +5,22 @@ import {
   setSingleTargetOverride,
   notifyTargetsUpdated,
 } from './targetManagementService';
+import {
+  MANUAL_KA_MG_STORAGE_KEY,
+  ManualKaMgMonthData,
+  loadAllManualKaMgRecords,
+  saveAllManualKaMgRecords,
+  loadManualKaMgMonthData,
+  getManualKaMgSellInBreakdown,
+} from './manualKaMgStorage';
+export {
+  MANUAL_KA_MG_STORAGE_KEY,
+  loadAllManualKaMgRecords,
+  saveAllManualKaMgRecords,
+  loadManualKaMgMonthData,
+  getManualKaMgSellInBreakdown,
+};
+export type { ManualKaMgMonthData };
 
 export const SPV_CONSOLIDATED_STORAGE_KEY = 'salespro_spv_consolidated_monthly_v5';
 
@@ -451,105 +467,7 @@ export function resetAllSpvConfigs(): void {
   } catch {}
 }
 
-// ============================================================================
-// 100% MANUAL STORAGE FOR "Kelola & Riwayat Sell In KA & DAZZLE ME MG"
-// Tidak mengambil angka default hardcoded maupun kalkulasi otomatis sheet.
-// Semua bulan dimulai dari 0 (Belum Diisi) sampai user input manual.
-// ============================================================================
-export const MANUAL_KA_MG_STORAGE_KEY = 'salespro_manual_ka_mg_monthly_v1';
-
-export interface ManualKaMgMonthData {
-  periodMonth: string;
-  periodYear: number;
-  spvRegularSellIn: number;
-  kaSellInValue: number;
-  dazzleMeMgSellInValue: number;
-  totalSellIn: number;
-  isCustomTotal?: boolean;
-  growthPercent: number;
-  isCustomGrowth?: boolean;
-  totalSellOut: number;
-  target: number;
-  achievementPercent: number;
-  notes: string;
-  isFilled: boolean;
-  updatedAt?: string;
-}
-
-export function loadAllManualKaMgRecords(): Record<string, ManualKaMgMonthData> {
-  try {
-    const raw = localStorage.getItem(MANUAL_KA_MG_STORAGE_KEY);
-    if (raw) {
-      return JSON.parse(raw);
-    }
-  } catch (e) {
-    console.warn('Gagal membaca data manual KA & MG dari localStorage', e);
-  }
-  return {};
-}
-
-export function saveAllManualKaMgRecords(map: Record<string, ManualKaMgMonthData>): void {
-  try {
-    localStorage.setItem(MANUAL_KA_MG_STORAGE_KEY, JSON.stringify(map));
-  } catch (e) {
-    console.warn('Gagal menyimpan data manual KA & MG ke localStorage', e);
-  }
-}
-
-export function loadManualKaMgMonthData(month: string, year: number): ManualKaMgMonthData {
-  const normMonth = (month || 'JANUARI').toUpperCase().trim();
-  const normYear = year || 2026;
-  const key = getMonthStorageKey(normMonth, normYear);
-  const all = loadAllManualKaMgRecords();
-  const saved = all[key];
-
-  if (!saved) {
-    return {
-      periodMonth: normMonth,
-      periodYear: normYear,
-      spvRegularSellIn: 0,
-      kaSellInValue: 0,
-      dazzleMeMgSellInValue: 0,
-      totalSellIn: 0,
-      isCustomTotal: false,
-      growthPercent: 0,
-      isCustomGrowth: false,
-      totalSellOut: 0,
-      target: 0,
-      achievementPercent: 0,
-      notes: '',
-      isFilled: false,
-    };
-  }
-
-  const ka = Number(saved.kaSellInValue) || 0;
-  const mg = Number(saved.dazzleMeMgSellInValue) || 0;
-  const hasCustomTotal = Boolean(saved.isCustomTotal);
-  const totalSellIn = hasCustomTotal
-    ? Math.max(0, Number(saved.totalSellIn) || 0)
-    : saved.totalSellIn !== undefined && saved.totalSellIn !== ka + mg && saved.isCustomTotal !== false
-    ? Math.max(0, Number(saved.totalSellIn) || 0)
-    : ka + mg;
-  const growthPercent = Number(saved.growthPercent) || 0;
-
-  return {
-    periodMonth: normMonth,
-    periodYear: normYear,
-    spvRegularSellIn: 0,
-    kaSellInValue: ka,
-    dazzleMeMgSellInValue: mg,
-    totalSellIn,
-    isCustomTotal: hasCustomTotal || totalSellIn !== ka + mg,
-    growthPercent,
-    isCustomGrowth: Boolean(saved.isCustomGrowth),
-    totalSellOut: Number(saved.totalSellOut) || 0,
-    target: Number(saved.target) || 0,
-    achievementPercent: 0,
-    notes: saved.notes || '',
-    isFilled: true,
-    updatedAt: saved.updatedAt,
-  };
-}
+// Manual KA & MG storage functions are re-exported from ./manualKaMgStorage above
 
 export function saveManualKaMgMonthData(data: {
   periodMonth: string;
