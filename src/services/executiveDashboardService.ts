@@ -262,8 +262,28 @@ export interface ExecutiveCoreSnapshot {
     bas: BaTargetItem[];
     trainers: TrainerTargetItem[];
   };
+  targetGapSummary: DashboardTargetGapSummary;
   gapDiagnosis: SalesGapDiagnosis;
   alerts: ExecutiveAlertItem[];
+}
+
+export interface DashboardTargetGapSummary {
+  mode: 'spv' | 'sales';
+  scopeLabel: string;
+  entityNames: string[];
+  targetSellIn: number;
+  targetSellOut: number;
+  actualSellIn: number;
+  actualSellOut: number;
+  activeTarget: number;
+  activeActual: number;
+  activeMetricLabel: 'Sell In' | 'Sell Out';
+  deficitAmount: number;
+  surplusAmount: number;
+  gapPercentage: number;
+  achievementPct: number;
+  sellOutDeficitAmount: number;
+  sellOutSurplusAmount: number;
 }
 
 export interface SlowMovingSkuItem {
@@ -979,12 +999,168 @@ export function buildExecutiveCoreSnapshot(
   const salesVisitsCount = loadSalesVisits().length;
   const trainerVisitsCount = loadTrainerVisits().length;
 
-  // 15. Gap Diagnosis (single call; storeGapDetails is lazy-loaded in Targets & Gap lens)
+  // 15. Gap Diagnosis & Kelola Target-Synced Defisit Gap Summary
+  // Rule: Jika filter terintegrasi = Semua Sales -> tampilkan Target SPV dari Kelola Target.
+  //       Jika filter terintegrasi = Nama Sales tertentu -> tampilkan Target Sales masing-masing dari Kelola Target.
   const gapDiagnosis = diagnoseSalesGap(allRecords, effectiveFilteredRecords, filters);
+
+  const normalizeEntityName = (v?: string) =>
+    (v || '').trim().replace(/\s+/g, ' ').toUpperCase();
+  const yearScopedRecords =
+    filters.TAHUN && filters.TAHUN !== 'ALL'
+      ? allRecords.filter((r) => {
+          const y = resolveRecordMonthAndYear(r).year;
+          return y === 0 || y === selectedYear;
+        })
+      : allRecords;
+  const targetDirectoryMatrix = aggregateTargetMatrix(
+    yearScopedRecords.length > 0 ? yearScopedRecords : allRecords,
+    filters.BULAN
+  );
+
+  const salesFilterNorm = normalizeEntityName(filters.SALES);
+  const spvFilterNorm = normalizeEntityName(filters.SPV);
+  const regionFilterNorm = normalizeEntityName(filters.REGION);
+  const storeFilterNorm = normalizeEntityName(filters.NAMA_STORE);
+
+  let gapMode: 'spv' | 'sales' = 'spv';
+  let gapEntityNames: string[] = [];
+  let gapScopeLabel = 'Target SPV (Semua Sales)';
+  let gapTargetSellIn = 0;
+  let gapTargetSellOut = 0;
+
+  if (salesFilterNorm && salesFilterNorm !== 'ALL') {
+    gapMode = 'sales';
+    const allSalesTargets = targetDirectoryMatrix.sales || [];
+    let matchedSales = allSalesTargets.filter(
+      (s) => normalizeEntityName(s.salesName) === salesFilterNorm
+    );
+    if (matchedSales.length === 0) {
+      matchedSales = allSalesTargets.filter((s) => {
+        const sNorm = normalizeEntityName(s.salesName);
+        return (
+          sNorm.startsWith(salesFilterNorm) ||
+          salesFilterNorm.startsWith(sNorm) ||
+          sNorm.includes(salesFilterNorm) ||
+          salesFilterNorm.includes(sNorm)
+        );
+      });
+    }
+    gapTargetSellIn = matchedSales.reduce((acc, s) => acc + (Number(s.targetSellIn) || 0), 0);
+    gapTargetSellOut = matchedSales.reduce((acc, s) => acc + (Number(s.targetSellOut) || 0), 0);
+    gapEntityNames =
+      matchedSales.length > 0
+        ? matchedSales.map((s) => s.salesName)
+        : [filters.SALES];
+    gapScopeLabel = `Target Sales: ${gapEntityNames.join(', ')}`;
+  } else {
+    gapMode = 'spv';
+    const rawSpvs = targetDirectoryMatrix.spvs || [];
+    const realSpvs = rawSpvs.filter((s) => {
+      const n = normalizeEntityName(s.spvName);
+      return n && n !== 'UNKNOWN' && n !== '-' && n !== 'TIDAK DIKETAHUI';
+    });
+    let candidateSpvs = realSpvs.length > 0 ? realSpvs : rawSpvs;
+
+    if (spvFilterNorm && spvFilterNorm !== 'ALL') {
+      const bySpv = candidateSpvs.filter(
+        (s) => normalizeEntityName(s.spvName) === spvFilterNorm
+      );
+      if (bySpv.length > 0) candidateSpvs = bySpv;
+    } else if (regionFilterNorm && regionFilterNorm !== 'ALL') {
+      const byRegion = candidateSpvs.filter(
+        (s) =>
+          s.regions.some((rg) => normalizeEntityName(rg) === regionFilterNorm) ||
+          s.coverAreas.some((ca) => normalizeEntityName(ca) === regionFilterNorm)
+      );
+      if (byRegion.length > 0) {
+        candidateSpvs = byRegion;
+      } else {
+        const activeSpvsInScope = new Set(
+          effectiveFilteredRecords
+            .map((r) => normalizeEntityName(r.SPV))
+            .filter((n) => n && n !== 'UNKNOWN' && n !== '-')
+        );
+        const byRecords = candidateSpvs.filter((s) =>
+          activeSpvsInScope.has(normalizeEntityName(s.spvName))
+        );
+        if (byRecords.length > 0) candidateSpvs = byRecords;
+      }
+    } else if (storeFilterNorm && storeFilterNorm !== 'ALL') {
+      const storeSpvSet = new Set(
+        yearScopedRecords
+          .filter((r) => normalizeEntityName(r.NAMA_STORE) === storeFilterNorm)
+          .map((r) => normalizeEntityName(r.SPV))
+          .filter((n) => n && n !== 'UNKNOWN' && n !== '-')
+      );
+      const byStore = candidateSpvs.filter((s) =>
+        storeSpvSet.has(normalizeEntityName(s.spvName))
+      );
+      if (byStore.length > 0) candidateSpvs = byStore;
+    }
+
+    gapTargetSellIn = candidateSpvs.reduce((acc, s) => acc + (Number(s.targetOmzet) || 0), 0);
+    gapTargetSellOut = candidateSpvs.reduce((acc, s) => acc + (Number(s.targetSellOut) || 0), 0);
+    gapEntityNames = candidateSpvs.map((s) => s.spvName);
+    gapScopeLabel =
+      gapEntityNames.length === 1
+        ? `Target SPV: ${gapEntityNames[0]} (Semua Sales)`
+        : gapEntityNames.length > 1
+        ? `Target SPV (${gapEntityNames.join(', ')})`
+        : 'Target SPV (Semua Sales)';
+  }
+
+  const isKetSellOutOnly = fKet === 'SELL OUT';
+  const activeMetricLabel: 'Sell In' | 'Sell Out' = isKetSellOutOnly ? 'Sell Out' : 'Sell In';
+  const activeGapTarget = isKetSellOutOnly ? gapTargetSellOut : gapTargetSellIn;
+  const activeGapActual = isKetSellOutOnly ? totalSellOut : totalSellIn;
+  const deficitAmount =
+    activeGapTarget > 0 ? Math.max(0, activeGapTarget - activeGapActual) : 0;
+  const surplusAmount =
+    activeGapTarget > 0 ? Math.max(0, activeGapActual - activeGapTarget) : 0;
+  const gapTargetPct =
+    activeGapTarget > 0
+      ? Math.round((deficitAmount / activeGapTarget) * 1000) / 10
+      : 0;
+  const gapAchievementPct =
+    activeGapTarget > 0
+      ? Math.round((activeGapActual / activeGapTarget) * 1000) / 10
+      : 0;
+  const sellOutDeficitAmount =
+    gapTargetSellOut > 0 ? Math.max(0, gapTargetSellOut - totalSellOut) : 0;
+  const sellOutSurplusAmount =
+    gapTargetSellOut > 0 ? Math.max(0, totalSellOut - gapTargetSellOut) : 0;
+
+  const targetGapSummary: DashboardTargetGapSummary = {
+    mode: gapMode,
+    scopeLabel: gapScopeLabel,
+    entityNames: gapEntityNames,
+    targetSellIn: gapTargetSellIn,
+    targetSellOut: gapTargetSellOut,
+    actualSellIn: totalSellIn,
+    actualSellOut: totalSellOut,
+    activeTarget: activeGapTarget,
+    activeActual: activeGapActual,
+    activeMetricLabel,
+    deficitAmount,
+    surplusAmount,
+    gapPercentage: gapTargetPct,
+    achievementPct: gapAchievementPct,
+    sellOutDeficitAmount,
+    sellOutSurplusAmount,
+  };
 
   // 16. Intelligence Alerts
   const alerts: ExecutiveAlertItem[] = [];
-  if (gapDiagnosis.gapDeficit > 0) {
+  if (targetGapSummary.deficitAmount > 0) {
+    alerts.push({
+      id: 'alert-gap',
+      severity: 'warning',
+      title: `Gap Defisit Target (${targetGapSummary.mode === 'spv' ? 'SPV' : gapEntityNames[0] || filters.SALES}): -${Math.round(targetGapSummary.gapPercentage)}%`,
+      description: `${targetGapSummary.scopeLabel} · ${gapDiagnosis.lostStoresCount} toko pasif memengaruhi pencapaian.`,
+      targetTab: 'gap',
+    });
+  } else if (gapDiagnosis.gapDeficit > 0) {
     alerts.push({
       id: 'alert-gap',
       severity: 'warning',
@@ -1106,6 +1282,7 @@ export function buildExecutiveCoreSnapshot(
       bas: matrix.bas,
       trainers: matrix.trainers,
     },
+    targetGapSummary,
     gapDiagnosis,
     alerts,
   };

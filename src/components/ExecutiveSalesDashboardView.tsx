@@ -4803,10 +4803,23 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     });
   };
 
+  const [quartalRefreshTick, setQuartalRefreshTick] = useState<number>(0);
+
+  useEffect(() => {
+    const onTargetsChanged = () => setQuartalRefreshTick((t) => t + 1);
+    window.addEventListener(TARGETS_UPDATED_EVENT, onTargetsChanged);
+    window.addEventListener('storage', onTargetsChanged);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, onTargetsChanged);
+      window.removeEventListener('storage', onTargetsChanged);
+    };
+  }, []);
+
   // Fast Core & Overview Snapshot (NO 12x P&L, NO 2nd gap pass, NO unused dimension scans)
   const snap = useMemo(() => {
+    void quartalRefreshTick;
     return buildExecutiveCoreSnapshot(allRecords, filteredRecords, filters, deferredDayRange);
-  }, [allRecords, filteredRecords, filters, deferredDayRange]);
+  }, [allRecords, filteredRecords, filters, deferredDayRange, quartalRefreshTick]);
 
   // Lazy Sub-Lens Data (ONLY computed when that specific sub-menu is active!)
   const marketShareData = useMemo(() => {
@@ -4879,19 +4892,8 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
   const [selectedQuarter, setSelectedQuarter] = useState<QuarterPeriodKey>('Q4');
   const [hallOfFameTab, setHallOfFameTab] = useState<'sales' | 'ba' | 'trainer'>('sales');
   const [quartalSearch, setQuartalSearch] = useState<string>('');
-  const [quartalRefreshTick, setQuartalRefreshTick] = useState<number>(0);
   const [editingBaSellInName, setEditingBaSellInName] = useState<string | null>(null);
   const [editingBaSellInDraft, setEditingBaSellInDraft] = useState<string>('');
-
-  useEffect(() => {
-    const onTargetsChanged = () => setQuartalRefreshTick((t) => t + 1);
-    window.addEventListener(TARGETS_UPDATED_EVENT, onTargetsChanged);
-    window.addEventListener('storage', onTargetsChanged);
-    return () => {
-      window.removeEventListener(TARGETS_UPDATED_EVENT, onTargetsChanged);
-      window.removeEventListener('storage', onTargetsChanged);
-    };
-  }, []);
 
   useEffect(() => {
     if (filters.BULAN && filters.BULAN !== 'ALL') {
@@ -7557,35 +7559,103 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                 <div className="bg-[#121926] border border-[#1F293B] hover:border-rose-500/40 transition-colors rounded-xl p-3 flex flex-col justify-between gap-2.5">
                   <div>
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[10px] font-sans font-bold uppercase text-slate-400">Defisit Gap Target</span>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-[10px] font-sans font-bold uppercase text-slate-400">
+                          Defisit Gap Target
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded-md text-[9.5px] font-sans font-bold border whitespace-nowrap ${
+                            snap.targetGapSummary.mode === 'spv'
+                              ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                              : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                          }`}
+                        >
+                          {snap.targetGapSummary.mode === 'spv' ? 'Target SPV' : 'Target Sales'}
+                        </span>
+                      </div>
                       <button
                         type="button"
-                        onClick={() => onNavigateTab('gap')}
-                        title="Buka & Edit Kuota Target Gap di Menu Awal"
-                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-sans font-bold transition-colors cursor-pointer"
+                        onClick={() => onNavigateTab('target_mgmt')}
+                        title="Edit Target SPV & Sales di Menu Kelola Target"
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-sans font-bold transition-colors cursor-pointer shrink-0"
                       >
                         <Edit3 className="w-2.5 h-2.5" />
                         <span>Edit</span>
                       </button>
                     </div>
-                    <span className="text-base xl:text-lg font-black text-rose-400 mt-1 block whitespace-nowrap">-{formatRupiah(snap.gapDiagnosis.gapDeficit)}</span>
-                    <span className="text-[11px] text-slate-400 whitespace-nowrap">{snap.gapDiagnosis.lostStoresCount} Toko Pasif</span>
+
+                    {snap.targetGapSummary.activeTarget <= 0 ? (
+                      <span className="text-base xl:text-lg font-black text-slate-400 mt-1 block whitespace-nowrap">
+                        Rp 0
+                      </span>
+                    ) : snap.targetGapSummary.deficitAmount > 0 ? (
+                      <div className="flex items-baseline gap-2 mt-1 flex-wrap">
+                        <span className="text-base xl:text-lg font-black text-rose-400 whitespace-nowrap">
+                          -{formatRupiah(snap.targetGapSummary.deficitAmount)}
+                        </span>
+                        <span className="text-[10.5px] font-bold text-rose-300 whitespace-nowrap">
+                          (-{snap.targetGapSummary.gapPercentage.toFixed(1)}%)
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex items-baseline gap-2 mt-1 flex-wrap">
+                        <span className="text-base xl:text-lg font-black text-emerald-400 whitespace-nowrap">
+                          +{formatRupiah(snap.targetGapSummary.surplusAmount)}
+                        </span>
+                        <span className="text-[10.5px] font-bold text-emerald-300 whitespace-nowrap">
+                          (Target Tercapai)
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="mt-1.5 space-y-0.5 text-[11px] bg-[#0D131F] border border-[#1B2538] rounded-lg px-2.5 py-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-sans text-slate-400 truncate" title={snap.targetGapSummary.scopeLabel}>
+                          {snap.targetGapSummary.scopeLabel}
+                        </span>
+                        <span className="font-bold text-white whitespace-nowrap">
+                          {formatRupiah(snap.targetGapSummary.activeTarget)}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-sans text-slate-400">
+                          Realisasi {snap.targetGapSummary.activeMetricLabel} ({snap.targetGapSummary.achievementPct.toFixed(1)}%)
+                        </span>
+                        <span className="font-bold text-[#00D2FF] whitespace-nowrap">
+                          {formatRupiah(snap.targetGapSummary.activeActual)}
+                        </span>
+                      </div>
+                      {filters.KET === 'ALL' && snap.targetGapSummary.targetSellOut > 0 && (
+                        <div className="flex items-center justify-between gap-2 pt-0.5 border-t border-[#182234] text-[10px]">
+                          <span className="font-sans text-slate-400">
+                            Target Sell Out ({snap.targetGapSummary.sellOutDeficitAmount > 0 ? `Defisit -${formatCompactIdr(snap.targetGapSummary.sellOutDeficitAmount)}` : `Surplus +${formatCompactIdr(snap.targetGapSummary.sellOutSurplusAmount)}`})
+                          </span>
+                          <span className="text-slate-300 whitespace-nowrap">
+                            {formatCompactIdr(snap.targetGapSummary.actualSellOut)} / {formatCompactIdr(snap.targetGapSummary.targetSellOut)}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    <span className="text-[10.5px] text-slate-400 mt-1.5 block whitespace-nowrap">
+                      {snap.gapDiagnosis.lostStoresCount} Toko Pasif · Sumber: Kelola Target
+                    </span>
                   </div>
                   <div className="pt-2 border-t border-[#1F293B] flex flex-wrap items-center gap-1.5 font-sans">
                     <button
                       type="button"
-                      onClick={() => onNavigateTab('gap')}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 border border-rose-500/30 text-[11px] font-bold transition-colors cursor-pointer"
+                      onClick={() => onNavigateTab('target_mgmt')}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#FF6B00]/15 hover:bg-[#FF6B00]/25 text-[#FFB067] border border-[#FF6B00]/30 text-[11px] font-bold transition-colors cursor-pointer"
                     >
-                      <span>Edit Kuota &amp; Gap</span>
+                      <span>Edit Target di Kelola Target</span>
                       <ArrowUpRight className="w-3 h-3" />
                     </button>
                     <button
                       type="button"
-                      onClick={() => onNavigateTab('target_mgmt')}
+                      onClick={() => onNavigateTab('gap')}
                       className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#192234] hover:bg-[#233049] text-slate-200 border border-[#2A3952] text-[11px] font-bold transition-colors cursor-pointer"
                     >
-                      <span>Edit Target</span>
+                      <span>Analisa Gap</span>
                       <ChevronRight className="w-3 h-3" />
                     </button>
                   </div>
