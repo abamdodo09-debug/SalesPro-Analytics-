@@ -319,7 +319,23 @@ export default function App() {
   // Dynamic Target & Achievement calculation for executive KpiCards
   const kpiTargetMetrics = useMemo(() => {
     if (isExecutiveDashboard) return { targetTotal: 0, achievementPercent: 0 };
-    const matrix = aggregateTargetMatrix(filteredRecords, deferredFilters.BULAN);
+    const matrix = aggregateTargetMatrix(filteredRecords, deferredFilters.BULAN, {
+      baYear:
+        deferredFilters.TAHUN && deferredFilters.TAHUN !== 'ALL'
+          ? Number(deferredFilters.TAHUN) || 0
+          : 0,
+      baKetFilter:
+        deferredFilters.KET === 'SELL OUT'
+          ? 'SELL OUT'
+          : deferredFilters.KET === 'SELL IN'
+          ? 'SELL IN'
+          : 'ALL',
+      baScopeFilters: {
+        sales: deferredFilters.SALES,
+        store: deferredFilters.NAMA_STORE,
+        region: deferredFilters.REGION,
+      },
+    });
     let targetTotal = 0;
     if (deferredFilters.KET === 'SELL OUT') {
       if (deferredFilters.NAMA_STORE !== 'ALL') {

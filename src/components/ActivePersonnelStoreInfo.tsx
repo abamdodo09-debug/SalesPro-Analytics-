@@ -24,40 +24,26 @@ import {
   Filter,
 } from 'lucide-react';
 import { TransactionRecord, DashboardFilters } from '../types/dashboard';
-import { formatRupiah, formatNumber, getTrainerForRecord } from '../utils/analytics';
+import { formatRupiah, formatNumber } from '../utils/analytics';
 import { resolveRecordMonthAndYear } from '../services/sellInSellOutService';
-import { isPlaceholderBaName } from '../services/masterStoreService';
+import {
+  MonthKeaktifanOverride,
+  CustomKeaktifanEntity,
+  STORAGE_KEY_KEAKTIFAN_MONTH_OVERRIDES,
+  STORAGE_KEY_KEAKTIFAN_CUSTOM_ENTITIES,
+  KEAKTIFAN_UPDATED_EVENT,
+  loadKeaktifanCustomEntities,
+  saveKeaktifanCustomEntities,
+  notifyKeaktifanUpdated,
+  filterRecordsForKeaktifan,
+  extractActiveKeaktifanData,
+} from '../services/keaktifanDataService';
 import * as XLSX from 'xlsx';
 
-export interface MonthKeaktifanOverride {
-  tokoCount?: number;
-  baCount?: number;
-  salesCount?: number;
-  trainerCount?: number;
-  txCount?: number;
-  totalValue?: number;
-  isManual?: boolean;
-}
+export type { MonthKeaktifanOverride, CustomKeaktifanEntity };
 
-export interface CustomKeaktifanEntity {
-  id: string;
-  monthKey: string;
-  type: 'toko' | 'ba' | 'sales' | 'trainer';
-  name: string;
-  area: string;
-  region: string;
-  salesName?: string;
-  baName?: string;
-  hasBa?: boolean;
-  stores?: string[];
-  bas?: string[];
-  totalValue: number;
-  totalQty: number;
-  txCount: number;
-}
-
-const STORAGE_KEY_MONTH_OVERRIDES = 'salespro_keaktifan_monthly_overrides_v2';
-const STORAGE_KEY_CUSTOM_ENTITIES = 'salespro_keaktifan_entities_v2';
+const STORAGE_KEY_MONTH_OVERRIDES = STORAGE_KEY_KEAKTIFAN_MONTH_OVERRIDES;
+const STORAGE_KEY_CUSTOM_ENTITIES = STORAGE_KEY_KEAKTIFAN_CUSTOM_ENTITIES;
 
 interface ActivePersonnelStoreInfoProps {
   records: TransactionRecord[];
@@ -101,15 +87,15 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
   });
 
   // Custom added/edited entities (stores, ba, sales, trainer)
-  const [customEntities, setCustomEntities] = useState<CustomKeaktifanEntity[]>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY_CUSTOM_ENTITIES);
-      if (raw) return JSON.parse(raw);
-    } catch (e) {
-      console.warn('Failed to load customEntities', e);
-    }
-    return [];
-  });
+  const [customEntities, setCustomEntities] = useState<CustomKeaktifanEntity[]>(() =>
+    loadKeaktifanCustomEntities()
+  );
+
+  useEffect(() => {
+    const syncCustomEntities = () => setCustomEntities(loadKeaktifanCustomEntities());
+    window.addEventListener(KEAKTIFAN_UPDATED_EVENT, syncCustomEntities);
+    return () => window.removeEventListener(KEAKTIFAN_UPDATED_EVENT, syncCustomEntities);
+  }, []);
 
   // Modal Editing Month Metrics
   const [editingMonthKey, setEditingMonthKey] = useState<string | null>(null);
@@ -203,308 +189,16 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
 
   // Records filtered by TAHUN + selected KET (SELL IN / SELL OUT / ALL)
   const ketFilteredRecords = useMemo(() => {
-    const fYear = filters.TAHUN && filters.TAHUN !== 'ALL' ? Number(filters.TAHUN) : 0;
-    return records.filter((r) => {
-      if (fYear > 0) {
-        const { year: recYear } = resolveRecordMonthAndYear(r);
-        if (recYear > 0 && recYear !== fYear) return false;
-      }
-      if (selectedKet === 'ALL') return true;
-      const k = (r.KET || '').toUpperCase().trim();
-      if (selectedKet === 'SELL IN') {
-        return k.includes('SELL IN') || k.includes('SELL-IN') || k === 'SI' || k.includes('TAKING ORDER');
-      }
-      if (selectedKet === 'SELL OUT') {
-        if (k.includes('RETURN') || k.includes('RETUR')) return false;
-        return !k || k.includes('SELL OUT') || k.includes('SELL-OUT') || k === 'SO';
-      }
-      return true;
+    return filterRecordsForKeaktifan(records, {
+      year: filters.TAHUN,
+      ket: selectedKet,
+      monthKey: 'ALL',
     });
   }, [records, selectedKet, filters.TAHUN]);
 
-  const normalizeEntityKey = (raw?: string): string =>
-    (raw || '').trim().replace(/\s+/g, ' ').toUpperCase();
-
-  const isInvalidGenericEntity = (normKey: string): boolean =>
-    !normKey ||
-    normKey === '-' ||
-    normKey === 'UNKNOWN' ||
-    normKey === 'N/A' ||
-    normKey === 'NULL' ||
-    normKey === 'UNDEFINED' ||
-    normKey === 'NONE' ||
-    normKey === 'TIDAK DIKETAHUI' ||
-    normKey === 'TIDAK ADA';
-
-  const isValidBaTransactionName = (rawBa?: string, rawStore?: string): boolean => {
-    const norm = normalizeEntityKey(rawBa);
-    if (isInvalidGenericEntity(norm)) return false;
-    if (norm === 'TIDAK ADA BA' || norm === 'NO BA') return false;
-    return !isPlaceholderBaName(rawBa, rawStore);
-  };
-
-  // Helper to extract active entities strictly from Google Sheet transaction records
+  // Helper to extract active entities strictly from Google Sheet transaction records + manual customEntities
   const extractActiveData = (recList: TransactionRecord[], monthKey: string) => {
-    const storeMap = new Map<
-      string,
-      {
-        id: string;
-        storeName: string;
-        coverArea: string;
-        region: string;
-        salesName: string;
-        baName: string;
-        baSet: Set<string>;
-        hasBa: boolean;
-        totalValue: number;
-        totalQty: number;
-        txCount: number;
-      }
-    >();
-
-    const baMap = new Map<
-      string,
-      {
-        id: string;
-        baName: string;
-        stores: Set<string>;
-        sales: Set<string>;
-        areas: Set<string>;
-        totalValue: number;
-        totalQty: number;
-        txCount: number;
-      }
-    >();
-
-    const salesMap = new Map<
-      string,
-      {
-        id: string;
-        salesName: string;
-        coverArea: string;
-        region: string;
-        stores: Set<string>;
-        bas: Set<string>;
-        totalValue: number;
-        totalQty: number;
-        txCount: number;
-      }
-    >();
-
-    const trainerMap = new Map<
-      string,
-      {
-        id: string;
-        trainerName: string;
-        areas: Set<string>;
-        stores: Set<string>;
-        bas: Set<string>;
-        totalValue: number;
-        totalQty: number;
-        txCount: number;
-      }
-    >();
-
-    let validTxCount = 0;
-    let totalValueSum = 0;
-    let totalQtySum = 0;
-
-    recList.forEach((r) => {
-      const val = Number(r.VALUE) || 0;
-      const qty = Number(r.QTY) || 0;
-      // Hanya hitung baris Google Sheet yang benar-benar memiliki transaksi (qty atau value != 0)
-      if (val === 0 && qty === 0) return;
-
-      validTxCount += 1;
-      totalValueSum += val;
-      totalQtySum += qty;
-
-      const sName = (r.NAMA_STORE || '').trim().replace(/\s+/g, ' ');
-      const sKey = normalizeEntityKey(sName);
-      const bName = (r.BA || '').trim().replace(/\s+/g, ' ');
-      const bKey = normalizeEntityKey(bName);
-      const slName = (r.SALES || '').trim().replace(/\s+/g, ' ');
-      const slKey = normalizeEntityKey(slName);
-      const trName = getTrainerForRecord(r).trim().replace(/\s+/g, ' ');
-      const trKey = normalizeEntityKey(trName);
-      const area = (r.COVER_AREA || '-').trim();
-      const region = (r.REGION || 'PEKAN BARU').trim();
-
-      const validStore = !isInvalidGenericEntity(sKey);
-      const validBa = isValidBaTransactionName(bName, sName);
-      const validSales = !isInvalidGenericEntity(slKey);
-      const validTrainer = !isInvalidGenericEntity(trKey);
-
-      // Toko Aktif (berdasarkan transaksi Google Sheet)
-      if (validStore) {
-        if (!storeMap.has(sKey)) {
-          storeMap.set(sKey, {
-            id: `store-${sKey}`,
-            storeName: sName,
-            coverArea: area,
-            region,
-            salesName: validSales ? slName : '-',
-            baName: validBa ? bName : '-',
-            baSet: new Set(validBa ? [bName] : []),
-            hasBa: validBa,
-            totalValue: 0,
-            totalQty: 0,
-            txCount: 0,
-          });
-        }
-        const st = storeMap.get(sKey)!;
-        if (validBa) {
-          st.hasBa = true;
-          const alreadyHasBa = Array.from(st.baSet).some((x) => normalizeEntityKey(x) === bKey);
-          if (!alreadyHasBa) st.baSet.add(bName);
-          st.baName = Array.from(st.baSet).join(', ');
-        }
-        if (validSales && (st.salesName === '-' || !st.salesName)) {
-          st.salesName = slName;
-        }
-        if ((st.coverArea === '-' || !st.coverArea) && area && area !== '-') {
-          st.coverArea = area;
-        }
-        st.totalValue += val;
-        st.totalQty += qty;
-        st.txCount += 1;
-      }
-
-      // BA Aktif (berdasarkan transaksi Google Sheet)
-      if (validBa) {
-        if (!baMap.has(bKey)) {
-          baMap.set(bKey, {
-            id: `ba-${bKey}`,
-            baName: bName,
-            stores: new Set(),
-            sales: new Set(),
-            areas: new Set(),
-            totalValue: 0,
-            totalQty: 0,
-            txCount: 0,
-          });
-        }
-        const b = baMap.get(bKey)!;
-        if (validStore) b.stores.add(sName);
-        if (validSales) b.sales.add(slName);
-        if (area && area !== '-') b.areas.add(area);
-        b.totalValue += val;
-        b.totalQty += qty;
-        b.txCount += 1;
-      }
-
-      // Sales Aktif
-      if (validSales) {
-        if (!salesMap.has(slKey)) {
-          salesMap.set(slKey, {
-            id: `sales-${slKey}`,
-            salesName: slName,
-            coverArea: area,
-            region,
-            stores: new Set(),
-            bas: new Set(),
-            totalValue: 0,
-            totalQty: 0,
-            txCount: 0,
-          });
-        }
-        const sl = salesMap.get(slKey)!;
-        if (validStore) sl.stores.add(sName);
-        if (validBa) sl.bas.add(bKey);
-        sl.totalValue += val;
-        sl.totalQty += qty;
-        sl.txCount += 1;
-      }
-
-      // Trainer Aktif
-      if (validTrainer) {
-        if (!trainerMap.has(trKey)) {
-          trainerMap.set(trKey, {
-            id: `trainer-${trKey}`,
-            trainerName: trName,
-            areas: new Set(),
-            stores: new Set(),
-            bas: new Set(),
-            totalValue: 0,
-            totalQty: 0,
-            txCount: 0,
-          });
-        }
-        const tr = trainerMap.get(trKey)!;
-        if (area && area !== '-') tr.areas.add(area);
-        if (validStore) tr.stores.add(sKey);
-        if (validBa) tr.bas.add(bKey);
-        tr.totalValue += val;
-        tr.totalQty += qty;
-        tr.txCount += 1;
-      }
-    });
-
-    // Merge custom entities for this month (jika user menambahkan entitas manual)
-    const monthCustom = customEntities.filter((c) => c.monthKey === monthKey || monthKey === 'ALL');
-    monthCustom.forEach((c) => {
-      const cKey = normalizeEntityKey(c.name);
-      if (!cKey) return;
-      if (c.type === 'toko') {
-        storeMap.set(cKey, {
-          id: c.id,
-          storeName: c.name,
-          coverArea: c.area || '-',
-          region: c.region || 'PEKAN BARU',
-          salesName: c.salesName || '-',
-          baName: c.baName || '-',
-          baSet: new Set(c.baName && c.baName !== '-' ? [c.baName] : []),
-          hasBa: Boolean(c.hasBa),
-          totalValue: c.totalValue || 0,
-          totalQty: c.totalQty || 0,
-          txCount: c.txCount || 1,
-        });
-      } else if (c.type === 'ba') {
-        baMap.set(cKey, {
-          id: c.id,
-          baName: c.name,
-          stores: new Set(c.stores || []),
-          sales: new Set(c.salesName ? [c.salesName] : []),
-          areas: new Set(c.area ? [c.area] : []),
-          totalValue: c.totalValue || 0,
-          totalQty: c.totalQty || 0,
-          txCount: c.txCount || 1,
-        });
-      } else if (c.type === 'sales') {
-        salesMap.set(cKey, {
-          id: c.id,
-          salesName: c.name,
-          coverArea: c.area || '-',
-          region: c.region || 'PEKAN BARU',
-          stores: new Set(c.stores || []),
-          bas: new Set(c.bas || []),
-          totalValue: c.totalValue || 0,
-          totalQty: c.totalQty || 0,
-          txCount: c.txCount || 1,
-        });
-      } else if (c.type === 'trainer') {
-        trainerMap.set(cKey, {
-          id: c.id,
-          trainerName: c.name,
-          areas: new Set(c.area ? [c.area] : []),
-          stores: new Set(c.stores || []),
-          bas: new Set(c.bas || []),
-          totalValue: c.totalValue || 0,
-          totalQty: c.totalQty || 0,
-          txCount: c.txCount || 1,
-        });
-      }
-    });
-
-    return {
-      storeList: Array.from(storeMap.values()).sort((a, b) => b.totalValue - a.totalValue),
-      baList: Array.from(baMap.values()).sort((a, b) => b.totalValue - a.totalValue),
-      salesList: Array.from(salesMap.values()).sort((a, b) => b.totalValue - a.totalValue),
-      trainerList: Array.from(trainerMap.values()).sort((a, b) => b.totalValue - a.totalValue),
-      totalValue: totalValueSum,
-      totalQty: totalQtySum,
-      txCount: validTxCount,
-    };
+    return extractActiveKeaktifanData(recList, monthKey, customEntities);
   };
 
   // 12-Month Matrix computation strictly from Google Sheet transactions + optional manual override
@@ -790,12 +484,7 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
     const filtered = customEntities.filter((c) => c.id !== newEntity.id);
     const updated = [...filtered, newEntity];
     setCustomEntities(updated);
-
-    try {
-      localStorage.setItem(STORAGE_KEY_CUSTOM_ENTITIES, JSON.stringify(updated));
-    } catch (e) {
-      console.warn(e);
-    }
+    saveKeaktifanCustomEntities(updated);
 
     setModalEntity({ isOpen: false, mode: 'add', type: 'toko' });
     showToast(`Data ${modalEntity.type.toUpperCase()} "${newEntity.name}" berhasil disimpan!`);
@@ -805,11 +494,7 @@ export const ActivePersonnelStoreInfo: React.FC<ActivePersonnelStoreInfoProps> =
   const handleDeleteEntity = (id: string, name: string) => {
     const updated = customEntities.filter((c) => c.id !== id && c.name !== name);
     setCustomEntities(updated);
-    try {
-      localStorage.setItem(STORAGE_KEY_CUSTOM_ENTITIES, JSON.stringify(updated));
-    } catch (e) {
-      console.warn(e);
-    }
+    saveKeaktifanCustomEntities(updated);
     showToast(`Data "${name}" berhasil dihapus dari daftar.`);
   };
 

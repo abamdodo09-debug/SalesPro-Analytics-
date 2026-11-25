@@ -11,7 +11,7 @@ import {
   QuarterPeriodKey,
 } from '../types/dashboard';
 import { calculateSalesSalary } from '../utils/costCalculations';
-import { isFocusProduct, getTrainerForRecord } from '../utils/analytics';
+import { getTrainerForRecord } from '../utils/analytics';
 import { normalizeStoreAlnum, resolveWeeklyBaStores } from '../utils/weeklyBaRegistry';
 import {
   loadFocusOverrides,
@@ -20,6 +20,11 @@ import {
   DEFAULT_FOCUS_TARGET_PCS,
 } from './focusProductService';
 import { getManualKaMgSellInBreakdown } from './manualKaMgStorage';
+import {
+  extractActiveKeaktifanData,
+  filterRecordsForKeaktifan,
+  normalizeKeaktifanMonthUpper,
+} from './keaktifanDataService';
 
 export const TARGETS_UPDATED_EVENT = 'salespro-targets-updated';
 
@@ -1293,18 +1298,6 @@ function isGenericBaPlaceholder(normKey: string): boolean {
   );
 }
 
-function addUniqueTokenToSet(set: Set<string>, rawValue?: string): void {
-  const clean = (rawValue || '').trim();
-  if (!clean || clean === '-' || clean.toUpperCase() === 'UNKNOWN') return;
-  for (const part of clean.split(',')) {
-    const p = part.trim();
-    if (!p || p === '-' || p.toUpperCase() === 'UNKNOWN') continue;
-    const upper = p.toUpperCase();
-    const exists = Array.from(set).some((x) => x.trim().toUpperCase() === upper);
-    if (!exists) set.add(p);
-  }
-}
-
 function lookupBaMapValue<T>(
   map: Record<string, T> | undefined,
   baName: string,
@@ -1376,6 +1369,9 @@ export interface AggregateTargetMatrixOptions {
   singleMonthBaselineOnly?: boolean;
   selectedYear?: number;
   excludeKaMg?: boolean;
+  baYear?: number;
+  baKetFilter?: 'ALL' | 'SELL IN' | 'SELL OUT';
+  baScopeFilters?: { sales?: string; store?: string; region?: string };
 }
 
 /**
@@ -1490,9 +1486,8 @@ export function aggregateTargetMatrix(
     }
   > = {};
 
-  // Helper index for customBaProfiles by store name (including renamed stores) & BA name
+  // Helper index for customBaProfiles by store name (for Area/SPV/Sales store mapping)
   const customProfileByStoreUpper = new Map<string, CustomBaProfile>();
-  const customProfileByBaUpper = new Map<string, CustomBaProfile>();
   Object.values(customBaProfiles).forEach((p) => {
     if (p.originalStoreName) {
       customProfileByStoreUpper.set(p.originalStoreName.trim().toUpperCase(), p);
@@ -1503,10 +1498,6 @@ export function aggregateTargetMatrix(
         if (s) customProfileByStoreUpper.set(s, p);
       });
     }
-    const baUp = normalizeBaGroupKey(p.baName);
-    if (!isGenericBaPlaceholder(baUp)) {
-      customProfileByBaUpper.set(baUp, p);
-    }
   });
 
   // First ensure directory entries exist from all records, then accumulate actuals ONLY for records matching selectedMonth
@@ -1516,27 +1507,11 @@ export function aggregateTargetMatrix(
     const salesKey = r.SALES || 'UNKNOWN';
     const rawStoreKey = r.NAMA_STORE || 'UNKNOWN';
 
-    // Check if store or BA has been renamed/updated via customBaProfiles
     const storeProfileMatch = customProfileByStoreUpper.get(rawStoreKey.trim().toUpperCase());
-    const baProfileMatch = !storeProfileMatch
-      ? customProfileByBaUpper.get(normalizeBaGroupKey(r.BA))
-      : undefined;
-
     const storeKey =
       storeProfileMatch && storeProfileMatch.originalStoreName && storeProfileMatch.originalStoreName.toUpperCase() === rawStoreKey.toUpperCase()
         ? storeProfileMatch.storeName
         : rawStoreKey;
-    const resolvedBaName = storeProfileMatch
-      ? storeProfileMatch.baName
-      : baProfileMatch
-      ? baProfileMatch.baName
-      : (customBaProfiles[storeKey]?.baName || r.BA || '');
-    const resolvedSalesName = storeProfileMatch
-      ? storeProfileMatch.salesName
-      : (customBaProfiles[storeKey]?.salesName || salesKey);
-    const resolvedArea = (storeProfileMatch?.coverArea && storeProfileMatch.coverArea !== '-' ? storeProfileMatch.coverArea : '') || areaKey;
-    const resolvedRegion = (storeProfileMatch?.region && storeProfileMatch.region !== '-' ? storeProfileMatch.region : '') || r.REGION || '-';
-    const resolvedSpv = (storeProfileMatch?.spv && storeProfileMatch.spv !== '-' ? storeProfileMatch.spv : '') || spvKey;
 
     if (!areaMap[areaKey]) {
       areaMap[areaKey] = {
@@ -1582,57 +1557,13 @@ export function aggregateTargetMatrix(
     }
     if (storeKey) salesMap[salesKey].coveredStores.add(storeKey);
 
-    // Group BA entries strictly by normalized BA Name so the same BA across different stores gets 1 combined entry & 1 target
-    const baGroupKey = normalizeBaGroupKey(resolvedBaName);
-    const hasValidBa = !isGenericBaPlaceholder(baGroupKey);
-
-    if (hasValidBa) {
-      if (!baMap[baGroupKey]) {
-        baMap[baGroupKey] = {
-          storeName: storeKey,
-          storesSet: new Set<string>(),
-          baName: resolvedBaName.trim(),
-          baNumber:
-            storeProfileMatch?.baNumber ||
-            baProfileMatch?.baNumber ||
-            r.BA_Number ||
-            'BA-' + storeKey.slice(0, 3).toUpperCase(),
-          coverArea: resolvedArea,
-          areasSet: new Set<string>(),
-          region: resolvedRegion,
-          regionsSet: new Set<string>(),
-          salesName: resolvedSalesName,
-          salesSet: new Set<string>(),
-          spv: resolvedSpv,
-          spvsSet: new Set<string>(),
-          sellOutNonLavojoy: 0,
-          sellOutLavojoy: 0,
-          focusActualPcs: 0,
-        };
-      }
-      const baAcc = baMap[baGroupKey];
-      addUniqueTokenToSet(baAcc.storesSet, storeKey);
-      addUniqueTokenToSet(baAcc.areasSet, resolvedArea);
-      addUniqueTokenToSet(baAcc.regionsSet, resolvedRegion);
-      addUniqueTokenToSet(baAcc.salesSet, resolvedSalesName);
-      addUniqueTokenToSet(baAcc.spvsSet, resolvedSpv);
-      if (baAcc.storesSet.size > 0) baAcc.storeName = Array.from(baAcc.storesSet).join(', ');
-      if (baAcc.areasSet.size > 0) baAcc.coverArea = Array.from(baAcc.areasSet).join(', ');
-      if (baAcc.regionsSet.size > 0) baAcc.region = Array.from(baAcc.regionsSet).join(', ');
-      if (baAcc.salesSet.size > 0) baAcc.salesName = Array.from(baAcc.salesSet).join(', ');
-      if (baAcc.spvsSet.size > 0) baAcc.spv = Array.from(baAcc.spvsSet).join(', ');
-    }
-
     // Only accumulate financial/qty actuals when the record falls in the selected month
     if (!recordMatchesMonth(r, normMonth)) continue;
 
     const val = r.VALUE || 0;
-    const qty = Math.max(0, r.QTY || 0);
     const ket = (r.KET || '').toUpperCase().trim();
     const isSellIn = ket === 'SELL IN';
     const isSellOut = ket === 'SELL OUT' || !ket || ket === '';
-    const isFocus = isFocusProduct(r.PRODUK_FOCUS || r);
-    const isLavojoy = (r.BRAND || '').toLowerCase().includes('lavojoy');
 
     if (isSellIn) areaMap[areaKey].actualSellIn += val;
     if (isSellOut) areaMap[areaKey].actualSellOut += val;
@@ -1642,72 +1573,75 @@ export function aggregateTargetMatrix(
 
     if (isSellIn) salesMap[salesKey].actualSellIn += val;
     if (isSellOut) salesMap[salesKey].actualSellOut += val;
-
-    if (hasValidBa && baMap[baGroupKey]) {
-      if (isSellOut) {
-        if (isLavojoy) {
-          baMap[baGroupKey].sellOutLavojoy += val;
-        } else {
-          baMap[baGroupKey].sellOutNonLavojoy += val;
-        }
-      }
-      if (isFocus && (isSellOut || isSellIn)) {
-        baMap[baGroupKey].focusActualPcs += qty;
-      }
-    }
   }
 
-  // Merge any newly added or edited custom BA profiles by BA Name (never duplicating existing BA)
-  Object.values(customBaProfiles).forEach((profile) => {
-    const pBaKey = normalizeBaGroupKey(profile.baName);
-    if (isGenericBaPlaceholder(pBaKey)) return;
+  // Build BA & Gabungan Toko strictly from Info Keaktifan (Real Team) -> Rincian Detail Keaktifan Periode
+  const keaktifanMonthUpper = normalizeKeaktifanMonthUpper(normMonth);
+  const keaktifanYear =
+    options?.baYear !== undefined
+      ? options.baYear
+      : options?.selectedYear && options.selectedYear > 0
+      ? options.selectedYear
+      : 0;
+  const keaktifanKet = options?.baKetFilter || 'ALL';
+  const keaktifanPeriodRecords = filterRecordsForKeaktifan(records, {
+    monthKey: keaktifanMonthUpper,
+    year: keaktifanYear > 0 ? keaktifanYear : 'ALL',
+    ket: keaktifanKet,
+  });
+  const keaktifanSnapshot = extractActiveKeaktifanData(
+    keaktifanPeriodRecords,
+    keaktifanMonthUpper,
+    undefined,
+    options?.baScopeFilters
+  );
 
-    if (!baMap[pBaKey]) {
-      const storesSet = new Set<string>();
-      const areasSet = new Set<string>();
-      const regionsSet = new Set<string>();
-      const salesSet = new Set<string>();
-      const spvsSet = new Set<string>();
-      addUniqueTokenToSet(storesSet, profile.storeName);
-      addUniqueTokenToSet(areasSet, profile.coverArea || 'PEKANBARU');
-      addUniqueTokenToSet(regionsSet, profile.region || 'PEKAN BARU');
-      addUniqueTokenToSet(salesSet, profile.salesName || 'ILHAMSYAH');
-      addUniqueTokenToSet(spvsSet, profile.spv || 'WIDODO');
+  keaktifanSnapshot.baList.forEach((entry) => {
+    const baGroupKey = normalizeBaGroupKey(entry.baName);
+    if (!baGroupKey) return;
+    const storesSet = new Set<string>(Array.from(entry.stores));
+    const areasSet = new Set<string>(Array.from(entry.areas));
+    const regionsSet = new Set<string>(Array.from(entry.regions));
+    const salesSet = new Set<string>(Array.from(entry.sales));
+    const spvsSet = new Set<string>(Array.from(entry.spvs));
 
-      baMap[pBaKey] = {
-        storeName: Array.from(storesSet).join(', ') || profile.storeName,
-        storesSet,
-        baName: profile.baName.trim(),
-        baNumber: profile.baNumber || 'BA-NEW',
-        coverArea: Array.from(areasSet).join(', ') || 'PEKANBARU',
-        areasSet,
-        region: Array.from(regionsSet).join(', ') || 'PEKAN BARU',
-        regionsSet,
-        salesName: Array.from(salesSet).join(', ') || 'ILHAMSYAH',
-        salesSet,
-        spv: Array.from(spvsSet).join(', ') || 'WIDODO',
-        spvsSet,
-        sellOutNonLavojoy: 0,
-        sellOutLavojoy: 0,
-        focusActualPcs: 0,
-      };
-    } else {
-      const existing = baMap[pBaKey];
-      existing.baName = profile.baName.trim() || existing.baName;
-      addUniqueTokenToSet(existing.storesSet, profile.storeName);
-      if (profile.coverArea) addUniqueTokenToSet(existing.areasSet, profile.coverArea);
-      if (profile.salesName) addUniqueTokenToSet(existing.salesSet, profile.salesName);
-      if (existing.storesSet.size > 0) existing.storeName = Array.from(existing.storesSet).join(', ');
-      if (existing.areasSet.size > 0) existing.coverArea = Array.from(existing.areasSet).join(', ');
-      if (existing.salesSet.size > 0) existing.salesName = Array.from(existing.salesSet).join(', ');
-    }
+    const mergedStores = Array.from(storesSet).join(', ') || '-';
+    const firstStore = Array.from(storesSet)[0] || entry.baName;
+    const mergedAreas = Array.from(areasSet).join(', ') || '-';
+    const mergedRegions = Array.from(regionsSet).join(', ') || 'PEKAN BARU';
+    const mergedSales = Array.from(salesSet).join(', ') || '-';
+    const mergedSpvs = Array.from(spvsSet).join(', ') || 'WIDODO';
+
+    baMap[baGroupKey] = {
+      storeName: mergedStores,
+      storesSet,
+      baName: entry.baName,
+      baNumber: entry.baNumber || 'BA-' + firstStore.slice(0, 3).toUpperCase(),
+      coverArea: mergedAreas,
+      areasSet,
+      region: mergedRegions,
+      regionsSet,
+      salesName: mergedSales,
+      salesSet,
+      spv: mergedSpvs,
+      spvsSet,
+      sellOutNonLavojoy: entry.sellOutNonLavojoy,
+      sellOutLavojoy: entry.sellOutLavojoy,
+      focusActualPcs: entry.focusActualPcs,
+    };
   });
 
   // Populate coveredBaList for sales productivity evaluation (1 entry per BA)
+  const salesMapByUpper = new Map<string, (typeof salesMap)[string]>();
+  Object.values(salesMap).forEach((sl) => {
+    salesMapByUpper.set(sl.salesName.trim().toUpperCase(), sl);
+  });
   Object.values(baMap).forEach((b) => {
     const primarySales = Array.from(b.salesSet)[0] || b.salesName;
-    if (salesMap[primarySales]) {
-      salesMap[primarySales].coveredBaList.push({
+    const matchedSales =
+      salesMap[primarySales] || salesMapByUpper.get((primarySales || '').trim().toUpperCase());
+    if (matchedSales) {
+      matchedSales.coveredBaList.push({
         storeName: b.storeName,
         baName: b.baName,
         sellOut: b.sellOutNonLavojoy + b.sellOutLavojoy,

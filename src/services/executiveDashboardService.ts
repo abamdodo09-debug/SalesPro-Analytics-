@@ -470,6 +470,13 @@ export function buildExecutiveCoreSnapshot(
   const matrix = aggregateTargetMatrix(effectiveFilteredRecords, filters.BULAN, {
     selectedYear,
     excludeKaMg: hasSpecificSubEntityFilter,
+    baYear: filters.TAHUN && filters.TAHUN !== 'ALL' ? selectedYear : 0,
+    baKetFilter: fKetEarly === 'SELL OUT' ? 'SELL OUT' : fKetEarly === 'SELL IN' ? 'SELL IN' : 'ALL',
+    baScopeFilters: {
+      sales: filters.SALES,
+      store: filters.NAMA_STORE,
+      region: filters.REGION,
+    },
   });
 
   // Hitung Total BA Terdaftar & Trainer Aktif langsung dari transaksi Google Sheet yang terhubung
@@ -1035,7 +1042,11 @@ export function buildExecutiveCoreSnapshot(
   const targetDirectoryMatrix = aggregateTargetMatrix(
     yearScopedRecords.length > 0 ? yearScopedRecords : allRecords,
     filters.BULAN,
-    { selectedYear, excludeKaMg: true }
+    {
+      selectedYear,
+      excludeKaMg: true,
+      baYear: filters.TAHUN && filters.TAHUN !== 'ALL' ? selectedYear : 0,
+    }
   );
 
   const salesFilterNorm = normalizeEntityName(filters.SALES);

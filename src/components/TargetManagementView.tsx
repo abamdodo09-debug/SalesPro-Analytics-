@@ -90,6 +90,14 @@ import {
 import {
   DEFAULT_FOCUS_TARGET_PCS,
 } from '../services/focusProductService';
+import {
+  KEAKTIFAN_UPDATED_EVENT,
+  loadKeaktifanCustomEntities,
+  saveKeaktifanCustomEntities,
+  normalizeKeaktifanMonthUpper,
+  normalizeEntityKey,
+  CustomKeaktifanEntity,
+} from '../services/keaktifanDataService';
 import { formatRupiah } from '../utils/analytics';
 import * as XLSX from 'xlsx';
 
@@ -139,7 +147,11 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
   useEffect(() => {
     const handler = () => setRefreshKey((k) => k + 1);
     window.addEventListener(TARGETS_UPDATED_EVENT, handler);
-    return () => window.removeEventListener(TARGETS_UPDATED_EVENT, handler);
+    window.addEventListener(KEAKTIFAN_UPDATED_EVENT, handler);
+    return () => {
+      window.removeEventListener(TARGETS_UPDATED_EVENT, handler);
+      window.removeEventListener(KEAKTIFAN_UPDATED_EVENT, handler);
+    };
   }, []);
 
   // Search & Status filters
@@ -243,6 +255,14 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     return 'ALL';
   });
 
+  useEffect(() => {
+    if (!filters.KET || filters.KET === 'ALL') {
+      setKetFilter('ALL');
+    } else if (filters.KET === 'SELL IN' || filters.KET === 'SELL OUT') {
+      setKetFilter(filters.KET);
+    }
+  }, [filters.KET]);
+
   // 6. Batch Target Modal
   const [isBatchOpen, setIsBatchOpen] = useState(false);
   const [batchTargetType, setBatchTargetType] = useState<
@@ -277,11 +297,29 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     return 2026;
   }, [filters.TAHUN]);
 
+  const baYearFilter = useMemo(() => {
+    if (filters.TAHUN && filters.TAHUN !== 'ALL') {
+      const y = Number(filters.TAHUN);
+      if (!isNaN(y) && y > 1900) return y;
+    }
+    return 0;
+  }, [filters.TAHUN]);
+
+  const effectiveBaKet = useMemo<'ALL' | 'SELL IN' | 'SELL OUT'>(() => {
+    if (filters.KET === 'SELL IN') return 'SELL IN';
+    if (ketFilter === 'SELL OUT') return 'SELL OUT';
+    return 'ALL';
+  }, [filters.KET, ketFilter]);
+
   // Aggregate target matrix data respecting selectedMonth (using full sourceRecords)
   const matrixData = useMemo(() => {
-    return aggregateTargetMatrix(sourceRecords, selectedMonth, { selectedYear: effectiveYear });
+    return aggregateTargetMatrix(sourceRecords, selectedMonth, {
+      selectedYear: effectiveYear,
+      baYear: baYearFilter,
+      baKetFilter: effectiveBaKet,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceRecords, selectedMonth, effectiveYear, refreshKey]);
+  }, [sourceRecords, selectedMonth, effectiveYear, baYearFilter, effectiveBaKet, refreshKey]);
 
   // Store Sell In Matrix (Rumus otomatis % kontribusi 3 bulan sebelumnya x Target Sales + Manual Edit)
   const storeSellInMatrix = useMemo(() => {
@@ -296,9 +334,15 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
 
   // Automatic accumulation across ALL months that have configured targets
   const allConfiguredMatrix = useMemo(() => {
-    return selectedMonth === 'ALL' ? matrixData : aggregateTargetMatrix(sourceRecords, 'ALL', { selectedYear: effectiveYear });
+    return selectedMonth === 'ALL'
+      ? matrixData
+      : aggregateTargetMatrix(sourceRecords, 'ALL', {
+          selectedYear: effectiveYear,
+          baYear: baYearFilter,
+          baKetFilter: effectiveBaKet,
+        });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceRecords, selectedMonth, effectiveYear, matrixData, refreshKey]);
+  }, [sourceRecords, selectedMonth, effectiveYear, baYearFilter, effectiveBaKet, matrixData, refreshKey]);
 
   const monthCustomCounts = useMemo(() => {
     return getMonthCustomizationSummary();
@@ -319,14 +363,19 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
 
   const baSourceMonthPreview = useMemo(() => {
     if (!isBaAllMonthsOpen) return null;
-    const srcMatrix = aggregateTargetMatrix(sourceRecords, baAllMonthsSourceMonth, { singleMonthBaselineOnly: true });
+    const srcMatrix = aggregateTargetMatrix(sourceRecords, baAllMonthsSourceMonth, {
+      singleMonthBaselineOnly: true,
+      selectedYear: effectiveYear,
+      baYear: baYearFilter,
+      baKetFilter: effectiveBaKet,
+    });
     return {
       baCount: srcMatrix.bas.length,
       totalNonLav: srcMatrix.bas.reduce((acc, b) => acc + b.targetNonLavojoy, 0),
       totalLav: srcMatrix.bas.reduce((acc, b) => acc + b.targetLavojoy, 0),
       totalFocusPcs: srcMatrix.bas.reduce((acc, b) => acc + b.targetFocusPcs, 0),
     };
-  }, [isBaAllMonthsOpen, sourceRecords, baAllMonthsSourceMonth, refreshKey]);
+  }, [isBaAllMonthsOpen, sourceRecords, baAllMonthsSourceMonth, effectiveYear, baYearFilter, effectiveBaKet, refreshKey]);
 
   const salesSourceMonthPreview = useMemo(() => {
     if (!isSalesAllMonthsOpen) return null;
@@ -465,6 +514,40 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
     };
     saveCustomBaProfiles(profiles);
 
+    // Sinkronkan perubahan Nama BA & Gabungan Toko ke Info Keaktifan (Real Team) jika diubah
+    const profileChanged =
+      updatedBaName !== normalizeEntityKey(editingBa.baName) ||
+      targetStoreKey !== normalizeEntityKey(editingBa.storeName) ||
+      updatedSalesName !== normalizeEntityKey(editingBa.salesName);
+
+    if (profileChanged) {
+      const keaktifanMonthKey = normalizeKeaktifanMonthUpper(selectedMonth);
+      const existingCustom = loadKeaktifanCustomEntities();
+      const oldBaNorm = normalizeEntityKey(editingBa.baName);
+      const newBaNorm = normalizeEntityKey(updatedBaName);
+      const filteredCustom = existingCustom.filter((c) => {
+        if (c.type !== 'ba') return true;
+        const cMonth = normalizeKeaktifanMonthUpper(c.monthKey);
+        if (cMonth !== keaktifanMonthKey && keaktifanMonthKey !== 'ALL') return true;
+        const cNameNorm = normalizeEntityKey(c.name);
+        return cNameNorm !== oldBaNorm && cNameNorm !== newBaNorm;
+      });
+      const updatedEntity: CustomKeaktifanEntity = {
+        id: `ba-${newBaNorm}`,
+        monthKey: keaktifanMonthKey,
+        type: 'ba',
+        name: updatedBaName,
+        area: editingBa.coverArea || '-',
+        region: editingBa.region || 'PEKAN BARU',
+        salesName: updatedSalesName,
+        stores: storeParts,
+        totalValue: editingBa.actualNonLavojoy + editingBa.actualLavojoy,
+        totalQty: editingBa.actualFocusPcs,
+        txCount: 1,
+      };
+      saveKeaktifanCustomEntities([...filteredCustom, updatedEntity]);
+    }
+
     // Save BA targets strictly by BA Name (1 BA = 1 target across all covered stores)
     if (baApplyAllMonths) {
       applySingleBaTargetToAllMonths(updatedBaName, {
@@ -507,6 +590,36 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
       spv: 'WIDODO',
     };
     saveCustomBaProfiles(profiles);
+
+    // Sinkronkan BA & Toko baru ke Info Keaktifan (Real Team)
+    const storeParts = storeName.split(',').map((s) => s.trim()).filter(Boolean);
+    const targetKeaktifanMonths = newBaApplyAllMonths
+      ? MONTH_OPTIONS_2026.map((m) => m.bulanName)
+      : [normalizeKeaktifanMonthUpper(selectedMonth)];
+    const existingCustom = loadKeaktifanCustomEntities();
+    const baNorm = normalizeEntityKey(baName);
+    const filteredCustom = existingCustom.filter(
+      (c) =>
+        !(
+          c.type === 'ba' &&
+          normalizeEntityKey(c.name) === baNorm &&
+          targetKeaktifanMonths.includes(normalizeKeaktifanMonthUpper(c.monthKey))
+        )
+    );
+    const addedEntities: CustomKeaktifanEntity[] = targetKeaktifanMonths.map((mk) => ({
+      id: `custom-ba-${baNorm}-${mk}`,
+      monthKey: mk,
+      type: 'ba',
+      name: baName,
+      area: areaName,
+      region: areaName,
+      salesName,
+      stores: storeParts,
+      totalValue: 0,
+      totalQty: 0,
+      txCount: 1,
+    }));
+    saveKeaktifanCustomEntities([...filteredCustom, ...addedEntities]);
 
     const baTargetKey = baName || storeName;
     if (newBaApplyAllMonths) {
@@ -2424,7 +2537,9 @@ export const TargetManagementView: React.FC<TargetManagementViewProps> = ({
                 Daftar Target Beauty Advisor (Non-Lavojoy, Lavojoy &amp; Produk Fokus Pcs)
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Target berbasis <strong>Nama BA</strong> (toko berbeda dengan Nama BA sama digabung otomatis agar target BA hanya 1): Non-Lavojoy (30 Jt), Lavojoy 4% (5 Jt), &amp; Produk Fokus (120 pcs).
+                Acuan <strong>Nama BA &amp; Gabungan Toko</strong> tersinkron langsung dengan{' '}
+                <strong>Nama Beauty Advisor (BA) &amp; Toko / Outlet Binaan</strong> di menu{' '}
+                <strong>Info Keaktifan (Real Team) — Rincian Detail Keaktifan Periode ({activeMonthLabel})</strong>.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2.5">
