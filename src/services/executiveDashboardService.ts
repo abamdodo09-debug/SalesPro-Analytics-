@@ -1067,7 +1067,13 @@ export function buildExecutiveCoreSnapshot(
   // 15. Gap Diagnosis & Kelola Target-Synced Defisit Gap Summary
   // Rule: Jika filter terintegrasi = Semua Sales -> tampilkan Target SPV dari Kelola Target.
   //       Jika filter terintegrasi = Nama Sales tertentu -> tampilkan Target Sales masing-masing dari Kelola Target.
-  const gapDiagnosis = diagnoseSalesGap(allRecords, effectiveFilteredRecords, filters);
+  const gapDiagnosis = diagnoseSalesGap(
+    allRecords,
+    effectiveFilteredRecords,
+    filters,
+    undefined,
+    dayRange
+  );
 
   const normalizeEntityName = (v?: string) =>
     (v || '').trim().replace(/\s+/g, ' ').toUpperCase();
@@ -1957,9 +1963,8 @@ export function buildTargetsAlertsLensData(
 ): TargetsAlertsLensData {
   const effective = filterRecordsByDayRange(filteredRecords, dayRange);
   const storeGapDiagnosis =
-    (filters.KET || 'ALL').trim().toUpperCase() === 'ALL' && coreGapDiagnosis
-      ? coreGapDiagnosis
-      : diagnoseSalesGap(allRecords, [], { ...filters, KET: 'ALL' });
+    coreGapDiagnosis ||
+    diagnoseSalesGap(allRecords, effective, filters, undefined, dayRange);
   const productStatusSummary = calculateProductStatusAnalysis(effective);
 
   return {

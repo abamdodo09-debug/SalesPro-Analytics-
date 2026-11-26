@@ -2261,8 +2261,17 @@ const TargetsGapPanel: React.FC<{
   totalStoreGapDeficit: number;
   gapPreviousPeriodName: string;
   gapCurrentPeriodName: string;
+  ketFilter?: string;
+  onChangeKet?: (ket: string) => void;
 }> = React.memo(
-  ({ storeGapDetails, totalStoreGapDeficit, gapPreviousPeriodName, gapCurrentPeriodName }) => {
+  ({
+    storeGapDetails,
+    totalStoreGapDeficit,
+    gapPreviousPeriodName,
+    gapCurrentPeriodName,
+    ketFilter = 'ALL',
+    onChangeKet,
+  }) => {
     const [storeGapSearch, setStoreGapSearch] = useState<string>('');
     const deferredSearch = useDeferredValue(storeGapSearch);
     const [storeGapCategory, setStoreGapCategory] = useState<
@@ -2270,7 +2279,35 @@ const TargetsGapPanel: React.FC<{
     >('ALL');
     const [showAllRows, setShowAllRows] = useState<boolean>(false);
 
+    const activeKet = (ketFilter || 'ALL').trim().toUpperCase();
+    const isSellOutFocus = activeKet === 'SELL OUT';
+    const isSellInFocus = activeKet === 'SELL IN';
+    const effectiveStoreGapCategory =
+      (isSellOutFocus || isSellInFocus) && storeGapCategory === 'return_impact'
+        ? 'ALL'
+        : storeGapCategory;
+
     const storeGapStats = useMemo(() => {
+      const scopedRows = isSellOutFocus
+        ? storeGapDetails
+            .filter((st) => st.sellOutCurrent - st.sellOutPrevious < 0)
+            .sort(
+              (a, b) =>
+                a.sellOutCurrent -
+                a.sellOutPrevious -
+                (b.sellOutCurrent - b.sellOutPrevious)
+            )
+        : isSellInFocus
+        ? storeGapDetails
+            .filter((st) => st.sellInCurrent - st.sellInPrevious < 0)
+            .sort(
+              (a, b) =>
+                a.sellInCurrent -
+                a.sellInPrevious -
+                (b.sellInCurrent - b.sellInPrevious)
+            )
+        : storeGapDetails;
+
       let lostCount = 0;
       let volCount = 0;
       let retCount = 0;
@@ -2279,24 +2316,30 @@ const TargetsGapPanel: React.FC<{
       let totalSellInDeficit = 0;
       let totalSellOutDeficit = 0;
 
-      for (let i = 0; i < storeGapDetails.length; i++) {
-        const st = storeGapDetails[i];
+      for (let i = 0; i < scopedRows.length; i++) {
+        const st = scopedRows[i];
+        const focusedDeficit = isSellOutFocus
+          ? Math.max(0, st.sellOutPrevious - st.sellOutCurrent)
+          : isSellInFocus
+          ? Math.max(0, st.sellInPrevious - st.sellInCurrent)
+          : st.deficitValue || 0;
+
         if (st.gapCategory === 'lost_outlet') {
           lostCount += 1;
-          lostSum += st.deficitValue || 0;
+          lostSum += focusedDeficit;
         } else if (st.gapCategory === 'return_impact') {
           retCount += 1;
         } else {
           volCount += 1;
-          volSum += st.deficitValue || 0;
+          volSum += focusedDeficit;
         }
         totalSellInDeficit += Math.max(0, st.sellInPrevious - st.sellInCurrent);
         totalSellOutDeficit += Math.max(0, st.sellOutPrevious - st.sellOutCurrent);
       }
 
       const q = deferredSearch.trim().toLowerCase();
-      const filtered = storeGapDetails.filter((st) => {
-        if (storeGapCategory !== 'ALL' && st.gapCategory !== storeGapCategory) return false;
+      const filtered = scopedRows.filter((st) => {
+        if (effectiveStoreGapCategory !== 'ALL' && st.gapCategory !== effectiveStoreGapCategory) return false;
         if (q) {
           return (
             st.storeName.toLowerCase().includes(q) ||
@@ -2309,8 +2352,20 @@ const TargetsGapPanel: React.FC<{
         return true;
       });
 
+      const filteredTotals = filtered.reduce(
+        (acc, st) => {
+          acc.inPrev += st.sellInPrevious;
+          acc.inCur += st.sellInCurrent;
+          acc.outPrev += st.sellOutPrevious;
+          acc.outCur += st.sellOutCurrent;
+          acc.deficit += st.deficitValue;
+          return acc;
+        },
+        { inPrev: 0, inCur: 0, outPrev: 0, outCur: 0, deficit: 0 }
+      );
+
       return {
-        allCount: storeGapDetails.length,
+        allCount: scopedRows.length,
         lostCount,
         volCount,
         retCount,
@@ -2319,8 +2374,9 @@ const TargetsGapPanel: React.FC<{
         totalSellInDeficit,
         totalSellOutDeficit,
         filtered,
+        filteredTotals,
       };
-    }, [storeGapDetails, deferredSearch, storeGapCategory]);
+    }, [storeGapDetails, deferredSearch, effectiveStoreGapCategory, isSellOutFocus, isSellInFocus]);
 
     const visibleRows = showAllRows
       ? storeGapStats.filtered
@@ -2335,17 +2391,68 @@ const TargetsGapPanel: React.FC<{
                 <Building2 className="w-4 h-4 text-[#FF6B00]" />
                 <span>Rincian Sumber Data Gap Penjualan per Toko</span>
               </h3>
+              <span
+                className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold border ${
+                  isSellOutFocus
+                    ? 'bg-[#00D2FF]/15 text-[#00D2FF] border-[#00D2FF]/40'
+                    : isSellInFocus
+                    ? 'bg-[#FF6B00]/15 text-[#FFB067] border-[#FF6B00]/40'
+                    : 'bg-slate-800 text-slate-300 border-slate-700'
+                }`}
+              >
+                {isSellOutFocus
+                  ? 'FOKUS: SELL OUT (GAP OUT MINUS TERBESAR)'
+                  : isSellInFocus
+                  ? 'FOKUS: SELL IN (GAP IN MINUS TERBESAR)'
+                  : 'SEMUA TIPE (SELL IN & SELL OUT)'}
+              </span>
               <span className="text-[10px] font-bold text-[#00D2FF] font-mono">
                 {gapPreviousPeriodName} vs {gapCurrentPeriodName}
               </span>
             </div>
             <p className="text-[11px] text-slate-400 mt-0.5">
-              Seluruh kolom Sell In/Out (Lalu &amp; Skg), Gap, Defisit, Growth &amp; Porsi ditampilkan penuh agar langsung terlihat di layar
+              {isSellOutFocus
+                ? 'Menampilkan Gap Out mulai dari minus paling tinggi sesuai data Google Sheet yang terhubung'
+                : isSellInFocus
+                ? 'Menampilkan Gap In mulai dari minus paling tinggi sesuai data Google Sheet yang terhubung'
+                : 'Seluruh kolom Sell In/Out (Lalu & Skg), Gap, Defisit, Growth & Porsi sesuai data Google Sheet yang terhubung'}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <div className="relative min-w-[190px]">
+            {onChangeKet && (
+              <div className="flex items-center gap-0.5 p-0.5 bg-[#0D121D] rounded-lg border border-[#243147] text-[10px] font-bold">
+                {(
+                  [
+                    { value: 'ALL', label: 'Semua' },
+                    { value: 'SELL IN', label: 'Sell In' },
+                    { value: 'SELL OUT', label: 'Sell Out' },
+                  ] as const
+                ).map((opt) => {
+                  const isActive = activeKet === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => onChangeKet(opt.value)}
+                      className={`px-2 py-1 rounded-md cursor-pointer transition-colors ${
+                        isActive
+                          ? opt.value === 'SELL OUT'
+                            ? 'bg-[#00D2FF] text-slate-950'
+                            : opt.value === 'SELL IN'
+                            ? 'bg-[#FF6B00] text-white'
+                            : 'bg-slate-700 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="relative min-w-[180px]">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
@@ -2370,7 +2477,7 @@ const TargetsGapPanel: React.FC<{
                 type="button"
                 onClick={() => setStoreGapCategory('ALL')}
                 className={`px-2 py-1 rounded-md cursor-pointer transition-colors ${
-                  storeGapCategory === 'ALL'
+                  effectiveStoreGapCategory === 'ALL'
                     ? 'bg-[#FF6B00] text-white'
                     : 'text-slate-400 hover:text-white'
                 }`}
@@ -2381,7 +2488,7 @@ const TargetsGapPanel: React.FC<{
                 type="button"
                 onClick={() => setStoreGapCategory('lost_outlet')}
                 className={`px-2 py-1 rounded-md cursor-pointer transition-colors ${
-                  storeGapCategory === 'lost_outlet'
+                  effectiveStoreGapCategory === 'lost_outlet'
                     ? 'bg-rose-600 text-white'
                     : 'text-slate-400 hover:text-rose-300'
                 }`}
@@ -2392,24 +2499,26 @@ const TargetsGapPanel: React.FC<{
                 type="button"
                 onClick={() => setStoreGapCategory('volume_drop')}
                 className={`px-2 py-1 rounded-md cursor-pointer transition-colors ${
-                  storeGapCategory === 'volume_drop'
+                  effectiveStoreGapCategory === 'volume_drop'
                     ? 'bg-amber-600 text-white'
                     : 'text-slate-400 hover:text-amber-300'
                 }`}
               >
                 Turun Order ({storeGapStats.volCount})
               </button>
-              <button
-                type="button"
-                onClick={() => setStoreGapCategory('return_impact')}
-                className={`px-2 py-1 rounded-md cursor-pointer transition-colors ${
-                  storeGapCategory === 'return_impact'
-                    ? 'bg-purple-600 text-white'
-                    : 'text-slate-400 hover:text-purple-300'
-                }`}
-              >
-                Retur ({storeGapStats.retCount})
-              </button>
+              {!isSellOutFocus && !isSellInFocus && (
+                <button
+                  type="button"
+                  onClick={() => setStoreGapCategory('return_impact')}
+                  className={`px-2 py-1 rounded-md cursor-pointer transition-colors ${
+                    effectiveStoreGapCategory === 'return_impact'
+                      ? 'bg-purple-600 text-white'
+                      : 'text-slate-400 hover:text-purple-300'
+                  }`}
+                >
+                  Retur ({storeGapStats.retCount})
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -2417,7 +2526,11 @@ const TargetsGapPanel: React.FC<{
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs font-mono tabular-nums">
           <div className="px-3 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/30 flex items-center justify-between gap-2">
             <span className="font-sans font-bold text-rose-300 text-[11px]">
-              Toko Pasif ({storeGapStats.lostCount})
+              {isSellOutFocus
+                ? `Nihil Sell Out (${storeGapStats.lostCount})`
+                : isSellInFocus
+                ? `Nihil Sell In (${storeGapStats.lostCount})`
+                : `Toko Pasif (${storeGapStats.lostCount})`}
             </span>
             <span className="font-black text-rose-400 whitespace-nowrap">
               -{formatRupiah(storeGapStats.lostSum)}
@@ -2425,7 +2538,11 @@ const TargetsGapPanel: React.FC<{
           </div>
           <div className="px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-2">
             <span className="font-sans font-bold text-amber-300 text-[11px]">
-              Turun Order ({storeGapStats.volCount})
+              {isSellOutFocus
+                ? `Turun Sell Out (${storeGapStats.volCount})`
+                : isSellInFocus
+                ? `Turun Sell In (${storeGapStats.volCount})`
+                : `Turun Order (${storeGapStats.volCount})`}
             </span>
             <span className="font-black text-amber-400 whitespace-nowrap">
               -{formatRupiah(storeGapStats.volSum)}
@@ -2433,10 +2550,25 @@ const TargetsGapPanel: React.FC<{
           </div>
           <div className="px-3 py-1.5 rounded-lg bg-[#0D121D] border border-[#243147] flex items-center justify-between gap-2">
             <span className="font-sans font-bold text-slate-300 text-[11px]">
-              Total Defisit Toko ({storeGapStats.allCount})
+              {isSellOutFocus
+                ? `Total Gap Out Minus (${storeGapStats.allCount} Toko)`
+                : isSellInFocus
+                ? `Total Gap In Minus (${storeGapStats.allCount} Toko)`
+                : `Total Defisit Toko (${storeGapStats.allCount})`}
             </span>
-            <span className="font-black text-[#FF6B00] whitespace-nowrap">
-              -{formatRupiah(totalStoreGapDeficit)}
+            <span
+              className={`font-black whitespace-nowrap ${
+                isSellOutFocus ? 'text-[#00D2FF]' : 'text-[#FF6B00]'
+              }`}
+            >
+              -
+              {formatRupiah(
+                isSellOutFocus
+                  ? storeGapStats.totalSellOutDeficit
+                  : isSellInFocus
+                  ? storeGapStats.totalSellInDeficit
+                  : totalStoreGapDeficit
+              )}
             </span>
           </div>
         </div>
@@ -2445,27 +2577,64 @@ const TargetsGapPanel: React.FC<{
           <table className="w-full table-fixed text-[10px] text-left border-collapse">
             <thead className="sticky top-0 z-10 bg-[#0D121D]">
               <tr className="text-[9px] uppercase text-slate-400 border-b border-[#1E293B] leading-tight">
-                <th className="py-2 px-1 text-center w-[3%]">No</th>
-                <th className="py-2 px-1.5 w-[15%]">Nama Toko &amp; Area</th>
-                <th className="py-2 px-1 w-[9%]">Sales / SPV</th>
-                <th className="py-2 px-1.5 w-[15%]">Penyebab Gap</th>
-                <th className="py-2 px-1 text-right w-[6%] text-slate-400">In Lalu</th>
-                <th className="py-2 px-1 text-right w-[6%] text-[#FF6B00]">In Skg</th>
-                <th className="py-2 px-1 text-right w-[6.5%] text-[#FF6B00]">Gap In</th>
-                <th className="py-2 px-1 text-right w-[6%] text-slate-400">Out Lalu</th>
-                <th className="py-2 px-1 text-right w-[6%] text-[#00D2FF]">Out Skg</th>
-                <th className="py-2 px-1 text-right w-[6.5%] text-[#00D2FF]">Gap Out</th>
-                <th className="py-2 px-1 text-right w-[6.5%] text-rose-300">Defisit</th>
-                <th className="py-2 px-1 text-right w-[5.5%]">Growth</th>
-                <th className="py-2 px-1 text-right w-[4.5%]">P. In</th>
-                <th className="py-2 px-1 text-right w-[4.5%]">P. Out</th>
+                <th className="py-2 px-1 text-center w-[3.5%]">No</th>
+                <th className="py-2 px-1.5 w-[18%]">Nama Toko &amp; Area</th>
+                <th className="py-2 px-1 w-[11%]">Sales / SPV</th>
+                <th className="py-2 px-1.5 w-[21%]">
+                  {isSellOutFocus
+                    ? 'Penyebab Gap Out'
+                    : isSellInFocus
+                    ? 'Penyebab Gap In'
+                    : 'Penyebab Gap'}
+                </th>
+                {isSellOutFocus ? (
+                  <>
+                    <th className="py-2 px-1.5 text-right w-[10%] text-slate-400">Out Lalu</th>
+                    <th className="py-2 px-1.5 text-right w-[10%] text-[#00D2FF]">Out Skg</th>
+                    <th className="py-2 px-1.5 text-right w-[12%] text-rose-300">
+                      Gap Out (Minus ↓)
+                    </th>
+                    <th className="py-2 px-1.5 text-right w-[7.5%]">Growth</th>
+                    <th className="py-2 px-1.5 text-right w-[7%] text-[#00D2FF]">Porsi Out</th>
+                  </>
+                ) : isSellInFocus ? (
+                  <>
+                    <th className="py-2 px-1.5 text-right w-[10%] text-slate-400">In Lalu</th>
+                    <th className="py-2 px-1.5 text-right w-[10%] text-[#FF6B00]">In Skg</th>
+                    <th className="py-2 px-1.5 text-right w-[12%] text-rose-300">
+                      Gap In (Minus ↓)
+                    </th>
+                    <th className="py-2 px-1.5 text-right w-[7.5%]">Growth</th>
+                    <th className="py-2 px-1.5 text-right w-[7%] text-[#FF6B00]">Porsi In</th>
+                  </>
+                ) : (
+                  <>
+                    <th className="py-2 px-1 text-right w-[6%] text-slate-400">In Lalu</th>
+                    <th className="py-2 px-1 text-right w-[6%] text-[#FF6B00]">In Skg</th>
+                    <th className="py-2 px-1 text-right w-[6.5%] text-[#FF6B00]">Gap In</th>
+                    <th className="py-2 px-1 text-right w-[6%] text-slate-400">Out Lalu</th>
+                    <th className="py-2 px-1 text-right w-[6%] text-[#00D2FF]">Out Skg</th>
+                    <th className="py-2 px-1 text-right w-[6.5%] text-[#00D2FF]">Gap Out</th>
+                    <th className="py-2 px-1 text-right w-[6.5%] text-rose-300">Defisit</th>
+                    <th className="py-2 px-1 text-right w-[5.5%]">Growth</th>
+                    <th className="py-2 px-1 text-right w-[4.5%]">P. In</th>
+                    <th className="py-2 px-1 text-right w-[4.5%]">P. Out</th>
+                  </>
+                )}
               </tr>
             </thead>
             <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
               {visibleRows.length === 0 ? (
                 <tr>
-                  <td colSpan={14} className="py-8 text-center font-sans text-slate-500">
-                    Tidak ada toko penyumbang gap yang cocok dengan filter saat ini.
+                  <td
+                    colSpan={isSellOutFocus || isSellInFocus ? 9 : 14}
+                    className="py-8 text-center font-sans text-slate-500"
+                  >
+                    {isSellOutFocus
+                      ? 'Tidak ada toko dengan Gap Out minus pada filter saat ini.'
+                      : isSellInFocus
+                      ? 'Tidak ada toko dengan Gap In minus pada filter saat ini.'
+                      : 'Tidak ada toko penyumbang gap yang cocok dengan filter saat ini.'}
                   </td>
                 </tr>
               ) : (
@@ -2513,96 +2682,244 @@ const TargetsGapPanel: React.FC<{
                           }`}
                         >
                           {st.gapCategory === 'lost_outlet'
-                            ? 'Toko Pasif (0 Order)'
+                            ? isSellOutFocus
+                              ? 'Nihil Sell Out (0)'
+                              : isSellInFocus
+                              ? 'Nihil Sell In (0 PO)'
+                              : 'Toko Pasif (0 Order)'
                             : st.gapCategory === 'return_impact'
                             ? 'Dampak Retur'
+                            : isSellOutFocus
+                            ? 'Turun Sell Out'
+                            : isSellInFocus
+                            ? 'Turun Sell In'
                             : 'Turun Order'}
                         </span>
                         <div className="text-[9px] text-slate-400 truncate">
                           {st.primaryReason}
                         </div>
                       </td>
-                      <td
-                        className="py-1.5 px-1 text-right text-slate-400 whitespace-nowrap"
-                        title={formatRupiah(st.sellInPrevious)}
-                      >
-                        {formatCompactIdr(st.sellInPrevious)}
-                      </td>
-                      <td
-                        className="py-1.5 px-1 text-right font-bold text-white whitespace-nowrap"
-                        title={formatRupiah(st.sellInCurrent)}
-                      >
-                        {formatCompactIdr(st.sellInCurrent)}
-                      </td>
-                      <td
-                        className={`py-1.5 px-1 text-right font-bold whitespace-nowrap ${
-                          sellInGap < 0
-                            ? 'text-rose-400'
-                            : sellInGap > 0
-                            ? 'text-emerald-400'
-                            : 'text-slate-500'
-                        }`}
-                        title={formatRupiah(sellInGap)}
-                      >
-                        {sellInGap < 0
-                          ? `-${formatCompactIdr(Math.abs(sellInGap))}`
-                          : sellInGap > 0
-                          ? `+${formatCompactIdr(sellInGap)}`
-                          : '0'}
-                      </td>
-                      <td
-                        className="py-1.5 px-1 text-right text-slate-400 whitespace-nowrap"
-                        title={formatRupiah(st.sellOutPrevious)}
-                      >
-                        {formatCompactIdr(st.sellOutPrevious)}
-                      </td>
-                      <td
-                        className="py-1.5 px-1 text-right font-bold text-[#00D2FF] whitespace-nowrap"
-                        title={formatRupiah(st.sellOutCurrent)}
-                      >
-                        {formatCompactIdr(st.sellOutCurrent)}
-                      </td>
-                      <td
-                        className={`py-1.5 px-1 text-right font-bold whitespace-nowrap ${
-                          sellOutGap < 0
-                            ? 'text-rose-400'
-                            : sellOutGap > 0
-                            ? 'text-emerald-400'
-                            : 'text-slate-500'
-                        }`}
-                        title={formatRupiah(sellOutGap)}
-                      >
-                        {sellOutGap < 0
-                          ? `-${formatCompactIdr(Math.abs(sellOutGap))}`
-                          : sellOutGap > 0
-                          ? `+${formatCompactIdr(sellOutGap)}`
-                          : '0'}
-                      </td>
-                      <td
-                        className="py-1.5 px-1 text-right font-extrabold text-rose-400 whitespace-nowrap"
-                        title={formatRupiah(st.deficitValue)}
-                      >
-                        -{formatCompactIdr(st.deficitValue)}
-                      </td>
-                      <td
-                        className={`py-1.5 px-1 text-right font-bold whitespace-nowrap ${
-                          st.growthPercent < 0 ? 'text-rose-400' : 'text-emerald-400'
-                        }`}
-                      >
-                        {st.growthPercent > 0 ? '+' : ''}
-                        {st.growthPercent.toFixed(0)}%
-                      </td>
-                      <td className="py-1.5 px-1 text-right font-bold text-[#FF6B00] whitespace-nowrap">
-                        {porsiIn.toFixed(1)}%
-                      </td>
-                      <td className="py-1.5 px-1 text-right font-bold text-[#00D2FF] whitespace-nowrap">
-                        {porsiOut.toFixed(1)}%
-                      </td>
+                      {isSellOutFocus ? (
+                        <>
+                          <td
+                            className="py-1.5 px-1.5 text-right text-slate-400 whitespace-nowrap"
+                            title={formatRupiah(st.sellOutPrevious)}
+                          >
+                            {formatRupiah(st.sellOutPrevious, true)}
+                          </td>
+                          <td
+                            className="py-1.5 px-1.5 text-right font-bold text-[#00D2FF] whitespace-nowrap"
+                            title={formatRupiah(st.sellOutCurrent)}
+                          >
+                            {formatRupiah(st.sellOutCurrent, true)}
+                          </td>
+                          <td
+                            className="py-1.5 px-1.5 text-right font-extrabold text-rose-400 whitespace-nowrap"
+                            title={formatRupiah(sellOutGap)}
+                          >
+                            -{formatRupiah(Math.abs(sellOutGap))}
+                          </td>
+                          <td className="py-1.5 px-1.5 text-right font-bold text-rose-400 whitespace-nowrap">
+                            {st.growthPercent.toFixed(1)}%
+                          </td>
+                          <td className="py-1.5 px-1.5 text-right font-bold text-[#00D2FF] whitespace-nowrap">
+                            {porsiOut.toFixed(1)}%
+                          </td>
+                        </>
+                      ) : isSellInFocus ? (
+                        <>
+                          <td
+                            className="py-1.5 px-1.5 text-right text-slate-400 whitespace-nowrap"
+                            title={formatRupiah(st.sellInPrevious)}
+                          >
+                            {formatRupiah(st.sellInPrevious, true)}
+                          </td>
+                          <td
+                            className="py-1.5 px-1.5 text-right font-bold text-[#FF6B00] whitespace-nowrap"
+                            title={formatRupiah(st.sellInCurrent)}
+                          >
+                            {formatRupiah(st.sellInCurrent, true)}
+                          </td>
+                          <td
+                            className="py-1.5 px-1.5 text-right font-extrabold text-rose-400 whitespace-nowrap"
+                            title={formatRupiah(sellInGap)}
+                          >
+                            -{formatRupiah(Math.abs(sellInGap))}
+                          </td>
+                          <td className="py-1.5 px-1.5 text-right font-bold text-rose-400 whitespace-nowrap">
+                            {st.growthPercent.toFixed(1)}%
+                          </td>
+                          <td className="py-1.5 px-1.5 text-right font-bold text-[#FF6B00] whitespace-nowrap">
+                            {porsiIn.toFixed(1)}%
+                          </td>
+                        </>
+                      ) : (
+                        <>
+                          <td
+                            className="py-1.5 px-1 text-right text-slate-400 whitespace-nowrap"
+                            title={formatRupiah(st.sellInPrevious)}
+                          >
+                            {formatCompactIdr(st.sellInPrevious)}
+                          </td>
+                          <td
+                            className="py-1.5 px-1 text-right font-bold text-white whitespace-nowrap"
+                            title={formatRupiah(st.sellInCurrent)}
+                          >
+                            {formatCompactIdr(st.sellInCurrent)}
+                          </td>
+                          <td
+                            className={`py-1.5 px-1 text-right font-bold whitespace-nowrap ${
+                              sellInGap < 0
+                                ? 'text-rose-400'
+                                : sellInGap > 0
+                                ? 'text-emerald-400'
+                                : 'text-slate-500'
+                            }`}
+                            title={formatRupiah(sellInGap)}
+                          >
+                            {sellInGap < 0
+                              ? `-${formatCompactIdr(Math.abs(sellInGap))}`
+                              : sellInGap > 0
+                              ? `+${formatCompactIdr(sellInGap)}`
+                              : '0'}
+                          </td>
+                          <td
+                            className="py-1.5 px-1 text-right text-slate-400 whitespace-nowrap"
+                            title={formatRupiah(st.sellOutPrevious)}
+                          >
+                            {formatCompactIdr(st.sellOutPrevious)}
+                          </td>
+                          <td
+                            className="py-1.5 px-1 text-right font-bold text-[#00D2FF] whitespace-nowrap"
+                            title={formatRupiah(st.sellOutCurrent)}
+                          >
+                            {formatCompactIdr(st.sellOutCurrent)}
+                          </td>
+                          <td
+                            className={`py-1.5 px-1 text-right font-bold whitespace-nowrap ${
+                              sellOutGap < 0
+                                ? 'text-rose-400'
+                                : sellOutGap > 0
+                                ? 'text-emerald-400'
+                                : 'text-slate-500'
+                            }`}
+                            title={formatRupiah(sellOutGap)}
+                          >
+                            {sellOutGap < 0
+                              ? `-${formatCompactIdr(Math.abs(sellOutGap))}`
+                              : sellOutGap > 0
+                              ? `+${formatCompactIdr(sellOutGap)}`
+                              : '0'}
+                          </td>
+                          <td
+                            className="py-1.5 px-1 text-right font-extrabold text-rose-400 whitespace-nowrap"
+                            title={formatRupiah(st.deficitValue)}
+                          >
+                            -{formatCompactIdr(st.deficitValue)}
+                          </td>
+                          <td
+                            className={`py-1.5 px-1 text-right font-bold whitespace-nowrap ${
+                              st.growthPercent < 0 ? 'text-rose-400' : 'text-emerald-400'
+                            }`}
+                          >
+                            {st.growthPercent > 0 ? '+' : ''}
+                            {st.growthPercent.toFixed(0)}%
+                          </td>
+                          <td className="py-1.5 px-1 text-right font-bold text-[#FF6B00] whitespace-nowrap">
+                            {porsiIn.toFixed(1)}%
+                          </td>
+                          <td className="py-1.5 px-1 text-right font-bold text-[#00D2FF] whitespace-nowrap">
+                            {porsiOut.toFixed(1)}%
+                          </td>
+                        </>
+                      )}
                     </tr>
                   );
                 })
               )}
             </tbody>
+            {storeGapStats.filtered.length > 0 && (() => {
+              const ft = storeGapStats.filteredTotals;
+              const totGapIn = ft.inCur - ft.inPrev;
+              const totGapOut = ft.outCur - ft.outPrev;
+              return (
+                <tfoot className="sticky bottom-0 z-10 bg-[#0D121D] border-t-2 border-[#2A3952] font-mono tabular-nums text-[10px] font-black text-white">
+                  <tr>
+                    <td colSpan={4} className="py-2 px-2 text-right font-sans uppercase text-slate-300">
+                      Total ({storeGapStats.filtered.length} Toko)
+                    </td>
+                    {isSellOutFocus ? (
+                      <>
+                        <td className="py-2 px-1.5 text-right text-slate-400 whitespace-nowrap">
+                          {formatRupiah(ft.outPrev, true)}
+                        </td>
+                        <td className="py-2 px-1.5 text-right text-[#00D2FF] whitespace-nowrap">
+                          {formatRupiah(ft.outCur, true)}
+                        </td>
+                        <td className="py-2 px-1.5 text-right text-rose-400 whitespace-nowrap">
+                          {totGapOut < 0 ? `-${formatRupiah(Math.abs(totGapOut))}` : formatRupiah(totGapOut)}
+                        </td>
+                        <td className="py-2 px-1.5 text-right text-rose-400 whitespace-nowrap">
+                          {ft.outPrev > 0 ? `${((totGapOut / ft.outPrev) * 100).toFixed(1)}%` : '-'}
+                        </td>
+                        <td className="py-2 px-1.5 text-right text-[#00D2FF] whitespace-nowrap">
+                          100.0%
+                        </td>
+                      </>
+                    ) : isSellInFocus ? (
+                      <>
+                        <td className="py-2 px-1.5 text-right text-slate-400 whitespace-nowrap">
+                          {formatRupiah(ft.inPrev, true)}
+                        </td>
+                        <td className="py-2 px-1.5 text-right text-[#FF6B00] whitespace-nowrap">
+                          {formatRupiah(ft.inCur, true)}
+                        </td>
+                        <td className="py-2 px-1.5 text-right text-rose-400 whitespace-nowrap">
+                          {totGapIn < 0 ? `-${formatRupiah(Math.abs(totGapIn))}` : formatRupiah(totGapIn)}
+                        </td>
+                        <td className="py-2 px-1.5 text-right text-rose-400 whitespace-nowrap">
+                          {ft.inPrev > 0 ? `${((totGapIn / ft.inPrev) * 100).toFixed(1)}%` : '-'}
+                        </td>
+                        <td className="py-2 px-1.5 text-right text-[#FF6B00] whitespace-nowrap">
+                          100.0%
+                        </td>
+                      </>
+                    ) : (
+                      <>
+                        <td className="py-2 px-1 text-right text-slate-400 whitespace-nowrap">
+                          {formatCompactIdr(ft.inPrev)}
+                        </td>
+                        <td className="py-2 px-1 text-right text-white whitespace-nowrap">
+                          {formatCompactIdr(ft.inCur)}
+                        </td>
+                        <td className={`py-2 px-1 text-right whitespace-nowrap ${totGapIn < 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
+                          {totGapIn < 0 ? `-${formatCompactIdr(Math.abs(totGapIn))}` : `+${formatCompactIdr(totGapIn)}`}
+                        </td>
+                        <td className="py-2 px-1 text-right text-slate-400 whitespace-nowrap">
+                          {formatCompactIdr(ft.outPrev)}
+                        </td>
+                        <td className="py-2 px-1 text-right text-[#00D2FF] whitespace-nowrap">
+                          {formatCompactIdr(ft.outCur)}
+                        </td>
+                        <td className={`py-2 px-1 text-right whitespace-nowrap ${totGapOut < 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
+                          {totGapOut < 0 ? `-${formatCompactIdr(Math.abs(totGapOut))}` : `+${formatCompactIdr(totGapOut)}`}
+                        </td>
+                        <td className="py-2 px-1 text-right text-rose-400 whitespace-nowrap">
+                          -{formatCompactIdr(ft.deficit)}
+                        </td>
+                        <td className="py-2 px-1 text-right text-slate-400">-</td>
+                        <td className="py-2 px-1 text-right text-[#FF6B00] whitespace-nowrap">
+                          100%
+                        </td>
+                        <td className="py-2 px-1 text-right text-[#00D2FF] whitespace-nowrap">
+                          100%
+                        </td>
+                      </>
+                    )}
+                  </tr>
+                </tfoot>
+              );
+            })()}
           </table>
         </div>
 
@@ -4705,6 +5022,7 @@ const TargetsAlertsDashboardPanel: React.FC<{
   registeredSheetBaCount: number;
   registeredSheetTrainerCount: number;
   ketFilter: string;
+  onChangeKet: (ket: string) => void;
   onNavigateTab: (tab: ActiveTab) => void;
 }> = React.memo(
   ({
@@ -4714,6 +5032,7 @@ const TargetsAlertsDashboardPanel: React.FC<{
     registeredSheetBaCount,
     registeredSheetTrainerCount,
     ketFilter,
+    onChangeKet,
     onNavigateTab,
   }) => (
     <div className="flex-1 flex flex-col gap-3">
@@ -4731,6 +5050,8 @@ const TargetsAlertsDashboardPanel: React.FC<{
         totalStoreGapDeficit={targetsAlertsData.totalStoreGapDeficit}
         gapPreviousPeriodName={targetsAlertsData.gapPreviousPeriodName}
         gapCurrentPeriodName={targetsAlertsData.gapCurrentPeriodName}
+        ketFilter={ketFilter}
+        onChangeKet={onChangeKet}
       />
     </div>
   )
@@ -5574,6 +5895,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
               registeredSheetBaCount={snap.registeredSheetBaCount}
               registeredSheetTrainerCount={snap.registeredSheetTrainerCount}
               ketFilter={filters.KET}
+              onChangeKet={handleChangeKet}
               onNavigateTab={onNavigateTab}
             />
           )}

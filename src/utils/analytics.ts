@@ -419,6 +419,69 @@ export const MONTH_NAMES_ID = [
   'JULI', 'AGUSTUS', 'SEPTEMBER', 'OKTOBER', 'NOVEMBER', 'DESEMBER'
 ];
 
+const MONTH_ALIASES_MAP: Record<string, string> = {
+  JANUARI: 'JANUARI',
+  JANUARY: 'JANUARI',
+  JAN: 'JANUARI',
+  FEBRUARI: 'FEBRUARI',
+  FEBRUARY: 'FEBRUARI',
+  FEB: 'FEBRUARI',
+  MARET: 'MARET',
+  MARCH: 'MARET',
+  MAR: 'MARET',
+  APRIL: 'APRIL',
+  APR: 'APRIL',
+  MEI: 'MEI',
+  MAY: 'MEI',
+  JUNI: 'JUNI',
+  JUNE: 'JUNI',
+  JUN: 'JUNI',
+  JULI: 'JULI',
+  JULY: 'JULI',
+  JUL: 'JULI',
+  AGUSTUS: 'AGUSTUS',
+  AUGUST: 'AGUSTUS',
+  AGU: 'AGUSTUS',
+  AUG: 'AGUSTUS',
+  SEPTEMBER: 'SEPTEMBER',
+  SEP: 'SEPTEMBER',
+  SEPT: 'SEPTEMBER',
+  OKTOBER: 'OKTOBER',
+  OCTOBER: 'OKTOBER',
+  OKT: 'OKTOBER',
+  OCT: 'OKTOBER',
+  NOVEMBER: 'NOVEMBER',
+  NOV: 'NOVEMBER',
+  DESEMBER: 'DESEMBER',
+  DECEMBER: 'DESEMBER',
+  DES: 'DESEMBER',
+  DEC: 'DESEMBER',
+};
+
+function normalizeKetType(ket?: string): 'SELL IN' | 'SELL OUT' | 'RETURN' | string {
+  const upper = (ket || '').trim().toUpperCase();
+  if (!upper) return '';
+  if (upper.includes('RETURN') || upper.includes('RETUR')) return 'RETURN';
+  if (
+    upper === 'SELL IN' ||
+    upper.includes('SELL IN') ||
+    upper.includes('SELL-IN') ||
+    upper === 'SELLIN' ||
+    upper.includes('TAKING ORDER')
+  ) {
+    return 'SELL IN';
+  }
+  if (
+    upper === 'SELL OUT' ||
+    upper.includes('SELL OUT') ||
+    upper.includes('SELL-OUT') ||
+    upper === 'SELLOUT'
+  ) {
+    return 'SELL OUT';
+  }
+  return upper;
+}
+
 // Indonesian Rupiah formatter
 export function formatRupiah(amount: number, compact: boolean = false): string {
   if (amount === undefined || amount === null || isNaN(amount)) return 'Rp 0';
@@ -510,7 +573,15 @@ export function filterRecords(
     if (fStatus && resolveProductStatus(r) !== fStatus) continue;
     if (fStore && (r.NAMA_STORE || '').trim().toUpperCase() !== fStore) continue;
     if (fRegion && (r.REGION || '').trim().toUpperCase() !== fRegion) continue;
-    if (fKet && (r.KET || '').trim().toUpperCase() !== fKet) continue;
+    if (fKet) {
+      const recKet = (r.KET || '').trim().toUpperCase();
+      const normFilterKet = normalizeKetType(fKet);
+      if (normFilterKet === 'SELL IN' || normFilterKet === 'SELL OUT') {
+        if (normalizeKetType(recKet) !== normFilterKet) continue;
+      } else if (recKet !== fKet) {
+        continue;
+      }
+    }
 
     if (fSku) {
       const matchSku =
@@ -2145,13 +2216,32 @@ export function diagnoseSalesGap(
   customTargetQuotaOverride?: number | GapMonthlyQuotaConfig,
   dateRange?: { startDay?: number; endDay?: number }
 ): SalesGapDiagnosis {
-  const isSellInRecord = (r: TransactionRecord) => {
-    const k = (r.KET || '').trim().toUpperCase();
-    return k === 'SELL IN' || k.includes('SELL IN');
-  };
-  const isSellOutRecord = (r: TransactionRecord) => {
-    const k = (r.KET || '').trim().toUpperCase();
-    return k === 'SELL OUT' || k.includes('SELL OUT');
+  const isSellInRecord = (r: TransactionRecord) => normalizeKetType(r.KET) === 'SELL IN';
+  const isSellOutRecord = (r: TransactionRecord) => normalizeKetType(r.KET) === 'SELL OUT';
+
+  const resolveRecordPeriod = (r: TransactionRecord): { month: string; year: number } => {
+    const dt = parseTransactionDate(r);
+    const rawBulan = (r.BULAN || '').trim().toUpperCase();
+    let month = '';
+    if (rawBulan) {
+      if (MONTH_ALIASES_MAP[rawBulan]) {
+        month = MONTH_ALIASES_MAP[rawBulan];
+      } else {
+        const matched = MONTH_NAMES_ID.find((m) => rawBulan.includes(m));
+        if (matched) month = matched;
+      }
+    }
+    if (!month && dt) {
+      month = MONTH_NAMES_ID[dt.getMonth()] || '';
+    }
+    const parsedYear = Number(r.TAHUN);
+    const year =
+      !isNaN(parsedYear) && parsedYear > 1900
+        ? parsedYear
+        : dt
+        ? dt.getFullYear()
+        : 0;
+    return { month, year };
   };
 
   // Apply all non-period filters (including KET, SALES, SPV, BRAND, REGION, etc.) to allRecords
@@ -2162,7 +2252,19 @@ export function diagnoseSalesGap(
   });
   const basePool = scopedRecords;
   const dataset = filteredRecords.length > 0 ? filteredRecords : scopedRecords;
-  const activeYear = filters.TAHUN !== 'ALL' ? Number(filters.TAHUN) : 2026;
+
+  let activeYear = 2026;
+  if (filters.TAHUN !== 'ALL' && Number(filters.TAHUN) > 1900) {
+    activeYear = Number(filters.TAHUN);
+  } else {
+    const yearSource = basePool.length > 0 ? basePool : allRecords;
+    let maxYear = 0;
+    for (let i = 0; i < yearSource.length; i++) {
+      const y = resolveRecordPeriod(yearSource[i]).year;
+      if (y > 1900 && y > maxYear) maxYear = y;
+    }
+    if (maxYear > 0) activeYear = maxYear;
+  }
 
   // Determine current period vs comparison period
   let currentPeriodName = '';
@@ -2171,27 +2273,34 @@ export function diagnoseSalesGap(
   let previousSubset: TransactionRecord[] = [];
 
   if (filters.BULAN && filters.BULAN !== 'ALL') {
-    currentPeriodName = filters.BULAN.toUpperCase().trim();
+    const rawMonthFilter = filters.BULAN.toUpperCase().trim();
+    currentPeriodName = MONTH_ALIASES_MAP[rawMonthFilter] || rawMonthFilter;
     const currentIdx = MONTH_ORDER[currentPeriodName] || 10;
     const prevIdx = currentIdx > 1 ? currentIdx - 1 : 12;
     const prevYear = currentIdx === 1 ? activeYear - 1 : activeYear;
     previousPeriodName = MONTH_NAMES_ID[prevIdx - 1];
 
-    currentSubset = basePool.filter(
-      (r) => r.TAHUN === activeYear && (r.BULAN || '').toUpperCase().trim() === currentPeriodName
-    );
-    previousSubset = basePool.filter(
-      (r) => r.TAHUN === prevYear && (r.BULAN || '').toUpperCase().trim() === previousPeriodName
-    );
+    currentSubset = basePool.filter((r) => {
+      const p = resolveRecordPeriod(r);
+      return (p.year === activeYear || p.year === 0) && p.month === currentPeriodName;
+    });
+    previousSubset = basePool.filter((r) => {
+      const p = resolveRecordPeriod(r);
+      return (p.year === prevYear || p.year === 0) && p.month === previousPeriodName;
+    });
   } else {
     // Dynamic resolution: pick the latest month in dataset (e.g. OKTOBER) and its predecessor (SEPTEMBER)
-    const availableMonths = Array.from(
-      new Set(
-        (basePool.length > 0 ? basePool : allRecords)
-          .filter((r) => r.TAHUN === activeYear && r.BULAN && r.BULAN !== 'ALL')
-          .map((r) => r.BULAN.toUpperCase().trim())
-      )
-    ).sort((a, b) => (MONTH_ORDER[b] || 0) - (MONTH_ORDER[a] || 0));
+    const monthPool = basePool.length > 0 ? basePool : allRecords;
+    const availableMonthsSet = new Set<string>();
+    for (let i = 0; i < monthPool.length; i++) {
+      const p = resolveRecordPeriod(monthPool[i]);
+      if ((p.year === activeYear || p.year === 0) && p.month && p.month !== 'ALL') {
+        availableMonthsSet.add(p.month);
+      }
+    }
+    const availableMonths = Array.from(availableMonthsSet).sort(
+      (a, b) => (MONTH_ORDER[b] || 0) - (MONTH_ORDER[a] || 0)
+    );
 
     const latestMonth = availableMonths[0] || 'OKTOBER';
     const latestMonthIdx = MONTH_ORDER[latestMonth] || 10;
@@ -2201,16 +2310,18 @@ export function diagnoseSalesGap(
 
     currentPeriodName = `${latestMonth} ${activeYear}`;
     previousPeriodName = `${prevMonth} ${prevYear}`;
-    currentSubset = basePool.filter(
-      (r) => r.TAHUN === activeYear && (r.BULAN || '').toUpperCase().trim() === latestMonth
-    );
-    previousSubset = basePool.filter(
-      (r) => r.TAHUN === prevYear && (r.BULAN || '').toUpperCase().trim() === prevMonth
-    );
+    currentSubset = basePool.filter((r) => {
+      const p = resolveRecordPeriod(r);
+      return (p.year === activeYear || p.year === 0) && p.month === latestMonth;
+    });
+    previousSubset = basePool.filter((r) => {
+      const p = resolveRecordPeriod(r);
+      return (p.year === prevYear || p.year === 0) && p.month === prevMonth;
+    });
 
     if (currentSubset.length === 0 && basePool.length > 0) {
       currentSubset = dataset;
-      previousSubset = basePool.filter((r) => r.TAHUN === activeYear - 1);
+      previousSubset = basePool.filter((r) => resolveRecordPeriod(r).year === activeYear - 1);
       currentPeriodName = 'Periode Aktif';
       previousPeriodName = 'Baseline Tahun Lalu';
     }
@@ -2225,7 +2336,7 @@ export function diagnoseSalesGap(
 
   if (hasDateDayFilter) {
     const matchesDayRange = (r: TransactionRecord) => {
-      const day = extractDayOfMonth(r);
+      const day = getRecordDayOfMonth(r) ?? extractDayOfMonth(r);
       return day !== null && day >= startDay && day <= endDay;
     };
     currentSubset = currentSubset.filter(matchesDayRange);
@@ -2303,6 +2414,7 @@ export function diagnoseSalesGap(
 
   // 1. Group by Store: Identify Stores with drop, zero order, focus drop, or returns
   interface StoreAgg {
+    displayName: string;
     val: number;
     sellIn: number;
     sellOut: number;
@@ -2316,11 +2428,14 @@ export function diagnoseSalesGap(
   const storeCurMap: Record<string, StoreAgg> = {};
 
   previousSubset.forEach((r) => {
-    const prevEntry = storePrevMap[r.NAMA_STORE];
+    const rawName = (r.NAMA_STORE || '').trim() || 'N/A';
+    const storeKey = rawName.toUpperCase();
+    const prevEntry = storePrevMap[storeKey];
     const v = r.VALUE || 0;
     const isFocus = isFocusProduct(r);
-    const isRet = v < 0 || (r.KET || '').toUpperCase() === 'RETURN';
-    storePrevMap[r.NAMA_STORE] = {
+    const isRet = v < 0 || (r.KET || '').toUpperCase().includes('RETURN');
+    storePrevMap[storeKey] = {
+      displayName: prevEntry?.displayName || rawName,
       val: (prevEntry?.val || 0) + v,
       sellIn: (prevEntry?.sellIn || 0) + (isSellInRecord(r) ? v : 0),
       sellOut: (prevEntry?.sellOut || 0) + (isSellOutRecord(r) ? v : 0),
@@ -2333,11 +2448,14 @@ export function diagnoseSalesGap(
   });
 
   currentSubset.forEach((r) => {
-    const curEntry = storeCurMap[r.NAMA_STORE];
+    const rawName = (r.NAMA_STORE || '').trim() || 'N/A';
+    const storeKey = rawName.toUpperCase();
+    const curEntry = storeCurMap[storeKey];
     const v = r.VALUE || 0;
     const isFocus = isFocusProduct(r);
-    const isRet = v < 0 || (r.KET || '').toUpperCase() === 'RETURN';
-    storeCurMap[r.NAMA_STORE] = {
+    const isRet = v < 0 || (r.KET || '').toUpperCase().includes('RETURN');
+    storeCurMap[storeKey] = {
+      displayName: curEntry?.displayName || rawName,
       val: (curEntry?.val || 0) + v,
       sellIn: (curEntry?.sellIn || 0) + (isSellInRecord(r) ? v : 0),
       sellOut: (curEntry?.sellOut || 0) + (isSellOutRecord(r) ? v : 0),
@@ -2361,10 +2479,12 @@ export function diagnoseSalesGap(
   let lostStoresCount = 0;
   let lowOrderStoresCount = 0;
   let totalStoreDeficit = 0;
+  const isFocusedKetMode = ketMode === 'SELL IN' || ketMode === 'SELL OUT';
 
-  allStores.forEach((st) => {
-    const prevObj = storePrevMap[st];
-    const curObj = storeCurMap[st];
+  allStores.forEach((storeKey) => {
+    const prevObj = storePrevMap[storeKey];
+    const curObj = storeCurMap[storeKey];
+    const st = curObj?.displayName || prevObj?.displayName || storeKey;
     const prev = prevObj?.val || 0;
     const cur = curObj?.val || 0;
     const sellInPrev = prevObj?.sellIn || 0;
@@ -2383,13 +2503,23 @@ export function diagnoseSalesGap(
       totalStoreDeficit += deficit;
       const pct = prev > 0 ? (delta / prev) * 100 : -100;
 
-      let reason = 'Volume Pembelian Berkurang';
+      let reason =
+        ketMode === 'SELL OUT'
+          ? 'Volume Penjualan (Sell Out) Berkurang'
+          : ketMode === 'SELL IN'
+          ? 'Volume Orderan Masuk (Sell In) Berkurang'
+          : 'Volume Pembelian Berkurang';
       let gapCategory: 'lost_outlet' | 'volume_drop' | 'return_impact' = 'volume_drop';
 
       if (cur <= 0 && prev > 0) {
         lostStoresCount++;
         gapCategory = 'lost_outlet';
-        reason = 'Toko Pasif / Tidak Ada Repeat Order di Periode Ini';
+        reason =
+          ketMode === 'SELL OUT'
+            ? 'Gerai Nihil Penjualan (0 Sell Out) di Periode Ini'
+            : ketMode === 'SELL IN'
+            ? 'Toko Pasif / 0 PO Orderan Masuk (Sell In) di Periode Ini'
+            : 'Toko Pasif / Tidak Ada Repeat Order di Periode Ini';
         lostStoreContribs.push({
           storeName: st,
           salesName,
@@ -2398,14 +2528,23 @@ export function diagnoseSalesGap(
           previousValue: prev,
           currentValue: cur,
           impactValue: deficit,
-          note: '0 order di periode berjalan',
+          note:
+            ketMode === 'SELL OUT'
+              ? '0 Sell Out di periode berjalan'
+              : '0 order di periode berjalan',
         });
       } else {
         if (pct < -45) {
           lowOrderStoresCount++;
-          reason = 'Penurunan Signifikan (>45%) / Overstock dari Order Sebelumnya';
+          reason =
+            ketMode === 'SELL OUT'
+              ? 'Penurunan Signifikan Sell Out (>45%) vs Periode Lalu'
+              : 'Penurunan Signifikan (>45%) / Overstock dari Order Sebelumnya';
         } else if (prev > 5_000_000) {
-          reason = 'Penyusutan Order Akun Besar (Key Account De-stocking)';
+          reason =
+            ketMode === 'SELL OUT'
+              ? 'Perlambatan Serapan Konsumen di Gerai Utama'
+              : 'Penyusutan Order Akun Besar (Key Account De-stocking)';
         }
         volumeDropStoreContribs.push({
           storeName: st,
@@ -2464,7 +2603,7 @@ export function diagnoseSalesGap(
         gapCategory,
         primaryReason: reason,
       });
-    } else if (returnVal > 0) {
+    } else if (!isFocusedKetMode && returnVal > 0) {
       rawStoreGapItems.push({
         storeName: st,
         region,
@@ -2512,7 +2651,24 @@ export function diagnoseSalesGap(
     }
   });
 
-  droppingStores.sort((a, b) => b.deficitValue - a.deficitValue);
+  const compareByActiveGap = (
+    a: { deficitValue: number; sellInPrevious?: number; sellInCurrent?: number; sellOutPrevious?: number; sellOutCurrent?: number },
+    b: { deficitValue: number; sellInPrevious?: number; sellInCurrent?: number; sellOutPrevious?: number; sellOutCurrent?: number }
+  ) => {
+    if (ketMode === 'SELL OUT') {
+      const gapA = (a.sellOutCurrent ?? 0) - (a.sellOutPrevious ?? 0);
+      const gapB = (b.sellOutCurrent ?? 0) - (b.sellOutPrevious ?? 0);
+      return gapA - gapB; // Most negative Gap Out first
+    }
+    if (ketMode === 'SELL IN') {
+      const gapA = (a.sellInCurrent ?? 0) - (a.sellInPrevious ?? 0);
+      const gapB = (b.sellInCurrent ?? 0) - (b.sellInPrevious ?? 0);
+      return gapA - gapB; // Most negative Gap In first
+    }
+    return b.deficitValue - a.deficitValue;
+  };
+
+  droppingStores.sort(compareByActiveGap);
 
   const totalGapForShare = rawStoreGapItems.reduce((s, item) => s + item.deficitValue, 0);
   const storeGapDetails: StoreGapDetailItem[] = rawStoreGapItems
@@ -2521,7 +2677,7 @@ export function diagnoseSalesGap(
       contributionPercent:
         totalGapForShare > 0 ? (item.deficitValue / totalGapForShare) * 100 : 0,
     }))
-    .sort((a, b) => b.deficitValue - a.deficitValue);
+    .sort(compareByActiveGap);
 
   // 2. Group by SKU: Identify SKUs with drop
   const skuPrevMap: Record<
