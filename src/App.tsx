@@ -119,9 +119,6 @@ const StoreBaContributionView = React.lazy(() =>
     default: m.StoreBaContributionView,
   }))
 );
-const MasterStoreBaSettings = React.lazy(() =>
-  import('./components/MasterStoreBaSettings').then((m) => ({ default: m.MasterStoreBaSettings }))
-);
 const CentralKaMgManager = React.lazy(() =>
   import('./components/CentralKaMgManager').then((m) => ({ default: m.CentralKaMgManager }))
 );
@@ -1053,7 +1050,6 @@ export default function App() {
             records={filteredRecords}
             allRecords={records}
             filters={filters}
-            onNavigateToSettings={() => handleTabChange('pengaturan_master')}
           />
         )}
 
@@ -1074,17 +1070,6 @@ export default function App() {
             records={records}
             filters={filters}
             onFilterChange={handleFilterChange}
-          />
-        )}
-
-        {/* Tab: Pengaturan Master Toko, BA & Sales */}
-        {activeTab === 'pengaturan_master' && (
-          <MasterStoreBaSettings
-            records={records}
-            filters={filters}
-            onDataUpdated={() => {
-              showToast('Data Master Toko, BA & Sales berhasil disimpan!');
-            }}
           />
         )}
 

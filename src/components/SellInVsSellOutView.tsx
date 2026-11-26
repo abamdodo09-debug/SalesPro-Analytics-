@@ -403,16 +403,6 @@ export const SellInVsSellOutView: React.FC<SellInVsSellOutViewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-            {onNavigateTab && (
-              <button
-                onClick={() => onNavigateTab('pengaturan_master')}
-                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-200 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <Store className="w-3.5 h-3.5 text-slate-600" />
-                <span>Master Data &amp; Tim Coverage</span>
-              </button>
-            )}
-
             <button
               onClick={() =>
                 exportSellInVsSellOutToExcel(

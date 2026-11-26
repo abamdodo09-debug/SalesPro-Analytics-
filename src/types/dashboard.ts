@@ -63,7 +63,6 @@ export type ActiveTab =
   | 'table'
   | 'sell_in_vs_sell_out'
   | 'kontribusi_toko_ba'
-  | 'pengaturan_master'
   | 'manage_ka_mg'
   | 'info_keaktifan'
   | 'kunjungan_sales'

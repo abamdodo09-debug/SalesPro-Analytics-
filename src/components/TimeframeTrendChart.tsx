@@ -57,7 +57,7 @@ interface TimeframeTrendChartProps {
   onOpenTargetMgmt?: () => void;
 }
 
-export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
+export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = React.memo(({
   data,
   mode,
   onModeChange,
@@ -1806,4 +1806,4 @@ export const TimeframeTrendChart: React.FC<TimeframeTrendChartProps> = ({
       </div>
     </div>
   );
-};
+});

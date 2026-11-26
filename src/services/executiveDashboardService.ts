@@ -414,6 +414,33 @@ export function filterRecordsByDayRange(
   return out;
 }
 
+type MonthlyProfitSummaryCacheEntry = {
+  allRecords: TransactionRecord[];
+  filterSig: string;
+  selectedYear: number;
+  daySig: string;
+  summariesByMonth: Record<string, ProfitAreaSummary | null>;
+};
+
+let lastMonthlyProfitCache: MonthlyProfitSummaryCacheEntry | null = null;
+
+function buildProfitFilterSig(filters: DashboardFilters): string {
+  return [
+    filters.TAHUN || 'ALL',
+    filters.SALES || 'ALL',
+    filters.TRAINER || 'ALL',
+    filters.SPV || 'ALL',
+    filters.REGION || 'ALL',
+    filters.BRAND || 'ALL',
+    filters.KATEGORI || 'ALL',
+    filters.STATUS_PRODUK || 'ALL',
+    filters.NAMA_STORE || 'ALL',
+    filters.SKU || 'ALL',
+    filters.KET || 'ALL',
+    filters.searchQuery || '',
+  ].join('|');
+}
+
 export function buildExecutiveCoreSnapshot(
   allRecords: TransactionRecord[],
   filteredRecords: TransactionRecord[],
@@ -924,6 +951,18 @@ export function buildExecutiveCoreSnapshot(
         ),
       });
     }
+
+    const summariesByMonth: Record<string, ProfitAreaSummary | null> = {};
+    entries.forEach((e) => {
+      if (e.monthKey !== 'LAINNYA') summariesByMonth[e.monthKey] = e.summary;
+    });
+    lastMonthlyProfitCache = {
+      allRecords,
+      filterSig: buildProfitFilterSig(filters),
+      selectedYear,
+      daySig: normDay.label || '',
+      summariesByMonth,
+    };
 
     profitSummary = combineMonthlyProfitAreaSummaries(entries, 0.55, 0.33);
   } else {
@@ -1748,50 +1787,67 @@ export function buildMonthlyProfitHrSummary(
   const canApplyOverrides = canApplyMonthlyPnlOverrides(filters, dayRange);
   const savedPnlOverrides = canApplyOverrides ? loadSavedMonthlyPnlOverrides() : {};
 
-  const nonMonthBase = filterRecords(allRecords, {
-    ...filters,
-    BULAN: 'ALL',
-    TAHUN: filters.TAHUN !== 'ALL' ? String(filters.TAHUN).trim() : 'ALL',
-  });
-  const profitNonMonthFiltered = normalizeDayRange(dayRange).active
+  const normDay = normalizeDayRange(dayRange);
+  const filterSig = buildProfitFilterSig(filters);
+  const canReuseCache =
+    lastMonthlyProfitCache !== null &&
+    lastMonthlyProfitCache.allRecords === allRecords &&
+    lastMonthlyProfitCache.filterSig === filterSig &&
+    lastMonthlyProfitCache.selectedYear === selectedYear &&
+    lastMonthlyProfitCache.daySig === (normDay.label || '');
+
+  const nonMonthBase = canReuseCache
+    ? []
+    : filterRecords(allRecords, {
+        ...filters,
+        BULAN: 'ALL',
+        TAHUN: filters.TAHUN !== 'ALL' ? String(filters.TAHUN).trim() : 'ALL',
+      });
+  const profitNonMonthFiltered = canReuseCache
+    ? []
+    : normDay.active
     ? filterRecordsByDayRange(nonMonthBase, dayRange)
     : nonMonthBase;
 
   const monthRecsBucket = new Map<string, TransactionRecord[]>();
   MONTHS_12.forEach((m) => monthRecsBucket.set(m, []));
-  for (let i = 0; i < profitNonMonthFiltered.length; i++) {
-    const r = profitNonMonthFiltered[i];
-    const mKey = resolveRecordMonthAndYear(r).month || (r.BULAN || '').trim().toUpperCase();
-    const arr = monthRecsBucket.get(mKey);
-    if (arr) arr.push(r);
+  if (!canReuseCache) {
+    for (let i = 0; i < profitNonMonthFiltered.length; i++) {
+      const r = profitNonMonthFiltered[i];
+      const mKey = resolveRecordMonthAndYear(r).month || (r.BULAN || '').trim().toUpperCase();
+      const arr = monthRecsBucket.get(mKey);
+      if (arr) arr.push(r);
+    }
   }
 
-  const trainerConfigsForMonthly = loadTrainerConfigs();
+  const trainerConfigsForMonthly = canReuseCache ? [] : loadTrainerConfigs();
 
   const monthlyProfitList: MonthlyProfitHrBarItem[] = MONTHS_12.map((mKey, idx) => {
     const mRecs = monthRecsBucket.get(mKey) || [];
-    const mSummary =
-      mRecs.length > 0
-        ? calculateProfitArea(
-            mRecs,
-            0.55,
-            0.33,
-            loadSalesTargets(mKey),
-            loadBaNonLavojoyTargets(mKey),
-            loadBaLavojoyTargets(mKey),
-            undefined,
-            undefined,
-            DEFAULT_SALES_TARGET,
-            DEFAULT_BA_NON_LAVOJOY_TARGET,
-            DEFAULT_BA_LAVOJOY_TARGET,
-            undefined,
-            trainerConfigsForMonthly,
-            loadTrainerTargets(mKey),
-            `${mKey} ${selectedYear}`,
-            loadBaFocusTargets(mKey)
-          )
-        : null;
+    const mSummary = canReuseCache
+      ? lastMonthlyProfitCache!.summariesByMonth[mKey] || null
+      : mRecs.length > 0
+      ? calculateProfitArea(
+          mRecs,
+          0.55,
+          0.33,
+          loadSalesTargets(mKey),
+          loadBaNonLavojoyTargets(mKey),
+          loadBaLavojoyTargets(mKey),
+          undefined,
+          undefined,
+          DEFAULT_SALES_TARGET,
+          DEFAULT_BA_NON_LAVOJOY_TARGET,
+          DEFAULT_BA_LAVOJOY_TARGET,
+          undefined,
+          trainerConfigsForMonthly,
+          loadTrainerTargets(mKey),
+          `${mKey} ${selectedYear}`,
+          loadBaFocusTargets(mKey)
+        )
+      : null;
 
+    const hasMonthData = canReuseCache ? mSummary !== null : mRecs.length > 0;
     const sheetSellIn = mSummary ? mSummary.sellInActual : 0;
     const ov = canApplyOverrides ? savedPnlOverrides[mKey] || {} : {};
     const sellIn = ov.sellIn !== undefined ? ov.sellIn : sheetSellIn;
@@ -1807,6 +1863,8 @@ export function buildMonthlyProfitHrSummary(
     const baseSales = cb ? cb.salesCount : mSummary?.profitBySales?.length || 0;
     const baseBa = cb
       ? cb.baCount
+      : mSummary && mSummary.profitByStore
+      ? mSummary.profitByStore.filter((s) => s.hasBa).length
       : mRecs.length > 0
       ? new Set(mRecs.filter((r) => r.BA && r.BA !== '-' && r.NAMA_STORE).map((r) => r.NAMA_STORE)).size
       : 0;
@@ -1818,7 +1876,9 @@ export function buildMonthlyProfitHrSummary(
         : 2
       : 0;
     const baseSpv =
-      mRecs.length > 0
+      mSummary && mSummary.profitBySales && mSummary.profitBySales.length > 0
+        ? new Set(mSummary.profitBySales.map((s) => s.spvOrRegion).filter((s) => s && s !== '-')).size || 1
+        : mRecs.length > 0
         ? new Set(mRecs.map((r) => r.SPV).filter((s) => s && s !== '-')).size || 1
         : 0;
 
@@ -1851,7 +1911,7 @@ export function buildMonthlyProfitHrSummary(
       spvCount,
       sdmCount,
       isCustomEdited: Object.keys(ov).length > 0,
-      hasData: mRecs.length > 0,
+      hasData: hasMonthData,
     };
   });
 

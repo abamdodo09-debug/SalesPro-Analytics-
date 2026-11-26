@@ -23,7 +23,6 @@ import {
   FileSpreadsheet,
   Printer,
   X,
-  Sliders,
   BarChart3,
   CheckCircle2,
   TrendingUp,
@@ -33,7 +32,6 @@ interface StoreBaContributionViewProps {
   records: TransactionRecord[];
   allRecords?: TransactionRecord[];
   filters: FilterState;
-  onNavigateToSettings?: () => void;
 }
 
 type StoreFilterType = 'all' | 'ba_only' | 'non_ba_only';
@@ -70,7 +68,6 @@ export const StoreBaContributionView: React.FC<StoreBaContributionViewProps> = (
   records,
   allRecords,
   filters,
-  onNavigateToSettings,
 }) => {
   const sourceRecords = allRecords && allRecords.length > 0 ? allRecords : records;
 
@@ -261,16 +258,6 @@ export const StoreBaContributionView: React.FC<StoreBaContributionViewProps> = (
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            {onNavigateToSettings && (
-              <button
-                onClick={onNavigateToSettings}
-                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                title="Kelola daftar Toko & Penugasan BA"
-              >
-                <Sliders className="w-3.5 h-3.5 text-slate-600" />
-                <span>Pengaturan Toko &amp; BA</span>
-              </button>
-            )}
             <button
               onClick={handleExport}
               className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white transition-colors cursor-pointer whitespace-nowrap shrink-0"

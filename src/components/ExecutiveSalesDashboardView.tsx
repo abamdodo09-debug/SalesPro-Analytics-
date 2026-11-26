@@ -1,13 +1,18 @@
-import React, { useMemo, useState, useEffect, useTransition, useDeferredValue, useRef } from 'react';
+import React, {
+  useMemo,
+  useState,
+  useEffect,
+  useTransition,
+  useDeferredValue,
+  useRef,
+  useCallback,
+} from 'react';
 import {
   TransactionRecord,
   DashboardFilters,
   ActiveTab,
   StoreGapDetailItem,
   QuarterPeriodKey,
-  SalesQuarterlySummaryItem,
-  BaQuarterlySummaryItem,
-  TrainerQuarterlySummaryItem,
   AreaTargetItem,
   SalesTargetItem,
   SpvTargetItem,
@@ -25,13 +30,14 @@ import {
   buildTargetsAlertsLensData,
   filterRecordsByDayRange,
   ExecutiveDayRange,
-  MonthlyTrajectoryPoint,
+  ExecutiveCoreSnapshot,
+  MarketShareLensData,
+  ProductMixLensData,
+  PromoBaLensData,
+  TargetsAlertsLensData,
   MonthlyProfitHrSummary,
 } from '../services/executiveDashboardService';
-import {
-  calculateQuarterlySummary,
-  saveQuarterlyTargetOverride,
-} from '../services/quarterlySummaryService';
+import { calculateQuarterlySummary } from '../services/quarterlySummaryService';
 import { SALES_MASTER_6_CONFIG } from '../services/kpiSalesData';
 import { loadKpiSalesData, calculateKpiPoints } from '../services/agingAndKpiService';
 import { loadKpiTrainerData, calculateTrainerKpiPoints } from '../services/kpiTrainerService';
@@ -40,15 +46,12 @@ import {
   loadSalesSellOutTargets,
   loadTrainerConfigs,
   loadTrainerTargets,
-  syncQuarterBaSellInToStores,
   buildMonthlySpvTargetsMap,
 } from '../services/targetManagementService';
 import { MonthlyOnlinePromoRecapRow } from '../services/onlinePromoService';
-import { aggregatePerStoreMgRecap } from '../services/missGlamMarketShareService';
 import {
   formatRupiah,
   formatNumber,
-  formatPercent,
   filterRecords,
   aggregateTimeframe,
   MONTH_ORDER,
@@ -56,6 +59,19 @@ import {
 import { captureElementToPng } from '../utils/screenCapture';
 import { TimeframeTrendChart } from './TimeframeTrendChart';
 import { SearchableStoreFilter } from './SearchableStoreFilter';
+import {
+  SidebarLens,
+  formatCompactIdr,
+  DashboardSidebar,
+} from './ExecutiveDashboardWidgets';
+import { OverviewDashboardPanel } from './ExecutiveDashboardOverviewPanel';
+import { MarketShareDashboardPanel } from './ExecutiveDashboardMarketSharePanel';
+import {
+  ProductMixDashboardPanel,
+  ChannelGrowthDashboardPanel,
+  TargetsAlertsHeaderCards,
+} from './ExecutiveDashboardMidPanels';
+import { AchieveQuartalDashboardPanel } from './ExecutiveDashboardQuartalPanel';
 import {
   Camera,
   Loader2,
@@ -69,11 +85,7 @@ import {
   Target,
   Download,
   AlertTriangle,
-  CheckCircle2,
-  Star,
-  ArrowUpRight,
   ChevronRight,
-  ShieldCheck,
   Tag,
   Search,
   X,
@@ -86,10 +98,8 @@ import {
   GraduationCap,
   PanelTopOpen,
   PanelTopClose,
-  Edit3,
   Check,
   Crown,
-  Medal,
 } from 'lucide-react';
 
 interface ExecutiveSalesDashboardViewProps {
@@ -115,380 +125,27 @@ interface ExecutiveSalesDashboardViewProps {
   onToggleFullScreen?: () => void;
 }
 
-type SidebarLens =
-  | 'overview'
-  | 'tren_bulanan'
-  | 'regional'
-  | 'market_share'
-  | 'product_mix'
-  | 'channel_growth'
-  | 'promo_ba'
-  | 'finance_bills'
-  | 'targets_alerts'
-  | 'kpi_sales'
-  | 'kpi_trainer'
-  | 'achieve_quartal';
+let cachedKpiSalesItems: KpiSalesScorecardItem[] | null = null;
+let cachedKpiTrainerItems: KpiTrainerScorecardItem[] | null = null;
 
-function formatCompactIdr(val: number): string {
-  if (!Number.isFinite(val)) return 'Rp 0';
-  const abs = Math.abs(val);
-  const sign = val < 0 ? '-' : '';
-  if (abs >= 1_000_000_000) {
-    return `${sign}Rp ${(abs / 1_000_000_000).toFixed(2).replace('.', ',')}M`;
+function getCachedKpiSalesItems(forceRefresh = false): KpiSalesScorecardItem[] {
+  if (forceRefresh || !cachedKpiSalesItems) {
+    cachedKpiSalesItems = syncKpiSalesItemsForDashboard(loadKpiSalesData());
   }
-  if (abs >= 1_000_000) {
-    return `${sign}Rp ${(abs / 1_000_000).toFixed(1).replace('.', ',')}Jt`;
-  }
-  if (abs >= 1_000) {
-    return `${sign}Rp ${Math.round(abs / 1_000)}Rb`;
-  }
-  return `${sign}Rp ${Math.round(abs)}`;
+  return cachedKpiSalesItems;
 }
 
-function formatSharePct(pct: number): string {
-  if (!Number.isFinite(pct)) return '0,0%';
-  const hasSecondDecimal = Math.abs(pct * 10 - Math.round(pct * 10)) > 1e-4;
-  return `${(hasSecondDecimal ? pct.toFixed(2) : pct.toFixed(1)).replace('.', ',')}%`;
+function getCachedKpiTrainerItems(forceRefresh = false): KpiTrainerScorecardItem[] {
+  if (forceRefresh || !cachedKpiTrainerItems) {
+    cachedKpiTrainerItems = syncKpiTrainerItemsForDashboard(loadKpiTrainerData());
+  }
+  return cachedKpiTrainerItems;
 }
 
-const MiniProgressRing: React.FC<{
-  percent: number;
-  color: string;
-  label?: string;
-}> = React.memo(({ percent, color, label }) => {
-  const clamped = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
-  const r = 15.5;
-  const c = 2 * Math.PI * r;
-  const dash = (clamped / 100) * c;
-
-  return (
-    <div className="relative w-10 h-10 shrink-0 flex items-center justify-center">
-      <svg className="w-full h-full -rotate-90" viewBox="0 0 40 40">
-        <circle cx="20" cy="20" r={r} fill="none" stroke="#1E293B" strokeWidth="3.8" />
-        <circle
-          cx="20"
-          cy="20"
-          r={r}
-          fill="none"
-          stroke={color}
-          strokeWidth="3.8"
-          strokeLinecap="round"
-          strokeDasharray={`${dash} ${c}`}
-        />
-      </svg>
-      <span className="absolute text-[9px] font-mono tabular-nums font-bold text-slate-100">
-        {label ?? `${Math.round(clamped)}%`}
-      </span>
-    </div>
-  );
-});
-
-// Isolated Memoized Donut Card (hovering does NOT re-render dashboard)
-const BrandShareDonutCard: React.FC<{
-  topBrands: { name: string; value: number; sharePct: number; color: string }[];
-  selectedYear: number;
-}> = React.memo(({ topBrands, selectedYear }) => {
-  const [hoveredBrandIdx, setHoveredBrandIdx] = useState<number | null>(null);
-  const topBrand = topBrands[0];
-
-  const donutSegments = useMemo(() => {
-    const r = 56;
-    const circumference = 2 * Math.PI * r;
-    const totalShare = topBrands.reduce((s, b) => s + Math.max(0, b.sharePct), 0);
-    let offset = 0;
-    return topBrands.map((b) => {
-      const normalizedPct = totalShare > 0 ? (Math.max(0, b.sharePct) / totalShare) * 100 : 0;
-      const len = (normalizedPct / 100) * circumference;
-      const seg = {
-        ...b,
-        strokeLength: Math.max(0, len - 2),
-        strokeOffset: -offset,
-      };
-      offset += len;
-      return seg;
-    });
-  }, [topBrands]);
-
-  return (
-    <div className="lg:col-span-4 bg-[#121926] border border-[#1F293B] rounded-xl p-3 flex flex-col justify-between">
-      <div className="flex items-center justify-between gap-2 mb-1.5">
-        <h2 className="text-[11px] font-extrabold uppercase tracking-wider text-slate-100">
-          PANGSA BRAND KOSMETIK ({selectedYear})
-        </h2>
-        <span className="text-[10px] text-slate-400 whitespace-nowrap">
-          Data SalesPro Aktual
-        </span>
-      </div>
-
-      <div className="flex flex-col sm:flex-row items-center justify-center gap-4 my-auto">
-        <div className="relative w-[124px] h-[124px] shrink-0 flex items-center justify-center">
-          <svg className="w-full h-full -rotate-90" viewBox="0 0 150 150">
-            <circle cx="75" cy="75" r="56" fill="none" stroke="#1B2436" strokeWidth="22" />
-            {donutSegments.map((seg, idx) => (
-              <circle
-                key={seg.name}
-                cx="75"
-                cy="75"
-                r="56"
-                fill="none"
-                stroke={seg.color}
-                strokeWidth={hoveredBrandIdx === idx ? 25 : 22}
-                strokeDasharray={`${seg.strokeLength} ${2 * Math.PI * 56}`}
-                strokeDashoffset={seg.strokeOffset}
-                className="transition-all duration-150 cursor-pointer"
-                onMouseEnter={() => setHoveredBrandIdx(idx)}
-                onMouseLeave={() => setHoveredBrandIdx(null)}
-              />
-            ))}
-          </svg>
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-2 pointer-events-none">
-            <span className="text-base font-black font-mono tabular-nums text-white leading-none">
-              {hoveredBrandIdx !== null && topBrands[hoveredBrandIdx]
-                ? `${topBrands[hoveredBrandIdx].sharePct}%`
-                : topBrand
-                ? `${topBrand.sharePct}%`
-                : '0%'}
-            </span>
-            <span className="text-[9.5px] font-extrabold uppercase text-[#FF6B00] mt-0.5 truncate max-w-[78px]">
-              {hoveredBrandIdx !== null && topBrands[hoveredBrandIdx]
-                ? topBrands[hoveredBrandIdx].name
-                : topBrand?.name || '-'}
-            </span>
-            <span className="text-[8.5px] text-slate-400 font-mono tabular-nums">
-              {hoveredBrandIdx !== null
-                ? formatCompactIdr(topBrands[hoveredBrandIdx]?.value || 0)
-                : '#1 Brand'}
-            </span>
-          </div>
-        </div>
-
-        <div className="flex-1 w-full min-w-0 space-y-1 text-[11px]">
-          {topBrands.map((b, idx) => (
-            <div
-              key={b.name}
-              onMouseEnter={() => setHoveredBrandIdx(idx)}
-              onMouseLeave={() => setHoveredBrandIdx(null)}
-              className={`flex items-center justify-between gap-2 px-1.5 py-0.5 rounded-md transition-colors cursor-pointer ${
-                hoveredBrandIdx === idx ? 'bg-[#1A2438]' : ''
-              }`}
-              title={`${b.name}: ${formatRupiah(b.value)} (${b.sharePct}%)`}
-            >
-              <div className="flex items-center gap-1.5 min-w-0">
-                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: b.color }} />
-                <span className="font-medium text-slate-200 truncate">{b.name}</span>
-              </div>
-              <span
-                className="font-mono tabular-nums font-bold shrink-0 whitespace-nowrap"
-                style={{ color: idx === 0 ? '#FF6B00' : '#E2E8F0' }}
-              >
-                {b.sharePct}%
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-});
-
-// Isolated Memoized Trajectory Card (hovering does NOT re-render dashboard)
-const TrajectoryChartCard: React.FC<{
-  monthlyTrajectory: MonthlyTrajectoryPoint[];
-  avgMonthlyRevenue: number;
-  selectedYear: number;
-  onOpenTrendView?: () => void;
-}> = React.memo(({ monthlyTrajectory, avgMonthlyRevenue, selectedYear, onOpenTrendView }) => {
-  const [hoveredTrajIdx, setHoveredTrajIdx] = useState<number | null>(null);
-
-  const trajectoryChart = useMemo(() => {
-    const pts = monthlyTrajectory;
-    const maxVal = Math.max(1, ...pts.map((p) => p.totalValue)) * 1.18;
-    const width = 460;
-    const height = 136;
-    const padLeft = 52;
-    const padRight = 20;
-    const padTop = 24;
-    const padBottom = 22;
-    const plotW = width - padLeft - padRight;
-    const plotH = height - padTop - padBottom;
-
-    const coords = pts.map((p, idx) => {
-      const x =
-        pts.length > 1 ? padLeft + (idx / (pts.length - 1)) * plotW : padLeft + plotW / 2;
-      const y = padTop + plotH - (p.totalValue / maxVal) * plotH;
-      return { ...p, x, y };
-    });
-
-    const linePath =
-      coords.length > 0
-        ? coords.map((c, idx) => `${idx === 0 ? 'M' : 'L'} ${c.x} ${c.y}`).join(' ')
-        : '';
-
-    const areaPath =
-      coords.length > 1
-        ? `${linePath} L ${coords[coords.length - 1].x} ${padTop + plotH} L ${coords[0].x} ${padTop + plotH} Z`
-        : '';
-
-    const peakCoord =
-      coords.length > 0 ? [...coords].sort((a, b) => b.totalValue - a.totalValue)[0] : null;
-
-    return {
-      width,
-      height,
-      padLeft,
-      padRight,
-      padTop,
-      plotH,
-      maxVal,
-      coords,
-      linePath,
-      areaPath,
-      peakCoord,
-    };
-  }, [monthlyTrajectory]);
-
-  return (
-    <div className="lg:col-span-7 bg-[#121926] border border-[#1F293B] rounded-xl p-3 flex flex-col justify-between">
-      <div className="flex items-center justify-between gap-2 mb-1">
-        <h2 className="text-[11px] font-extrabold uppercase tracking-wider text-slate-100">
-          TRAJEKTORI OMSET BULANAN {selectedYear}
-        </h2>
-        <div className="flex items-center gap-2">
-          <span
-            className="text-[10.5px] font-bold font-mono tabular-nums text-emerald-400 whitespace-nowrap"
-            title={`Rata-rata: ${formatRupiah(avgMonthlyRevenue)} / bulan`}
-          >
-            Avg: {formatCompactIdr(avgMonthlyRevenue)}/bln
-          </span>
-          {onOpenTrendView && (
-            <button
-              type="button"
-              onClick={onOpenTrendView}
-              className="px-2 py-0.5 rounded bg-[#FF6B00]/15 hover:bg-[#FF6B00]/25 text-[#FFB067] border border-[#FF6B00]/30 text-[10px] font-bold whitespace-nowrap cursor-pointer transition-colors"
-            >
-              Tren &amp; Rincian →
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="relative my-auto">
-        {hoveredTrajIdx !== null && trajectoryChart.coords[hoveredTrajIdx] && (
-          <div className="mb-1 px-2 py-0.5 rounded bg-[#1A2438] border border-[#2C3B57] text-[10px] font-mono tabular-nums flex items-center justify-between">
-            <span className="font-sans font-bold text-white">
-              {trajectoryChart.coords[hoveredTrajIdx].month} {selectedYear}
-            </span>
-            <span className="text-[#FF6B00] font-bold">
-              {formatRupiah(trajectoryChart.coords[hoveredTrajIdx].totalValue)}
-            </span>
-          </div>
-        )}
-
-        <svg viewBox={`0 0 ${trajectoryChart.width} ${trajectoryChart.height}`} className="w-full h-[132px]">
-          <defs>
-            <linearGradient id="trajOrangeFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#FF6B00" stopOpacity="0.38" />
-              <stop offset="100%" stopColor="#FF6B00" stopOpacity="0.02" />
-            </linearGradient>
-          </defs>
-
-          {[0, 0.33, 0.66, 1].map((ratio) => {
-            const yPos = trajectoryChart.padTop + trajectoryChart.plotH - ratio * trajectoryChart.plotH;
-            const tickVal = trajectoryChart.maxVal * ratio;
-            return (
-              <g key={ratio}>
-                <line
-                  x1={trajectoryChart.padLeft}
-                  y1={yPos}
-                  x2={trajectoryChart.width - trajectoryChart.padRight}
-                  y2={yPos}
-                  stroke="#1E293B"
-                  strokeDasharray="3 3"
-                />
-                <text
-                  x={trajectoryChart.padLeft - 6}
-                  y={yPos + 3}
-                  textAnchor="end"
-                  fill="#94A3B8"
-                  fontSize="9"
-                  fontFamily="JetBrains Mono, monospace"
-                >
-                  {ratio === 0 ? '0' : formatCompactIdr(tickVal).replace('Rp ', '')}
-                </text>
-              </g>
-            );
-          })}
-
-          {trajectoryChart.areaPath && (
-            <path d={trajectoryChart.areaPath} fill="url(#trajOrangeFill)" />
-          )}
-
-          {trajectoryChart.linePath && (
-            <path
-              d={trajectoryChart.linePath}
-              fill="none"
-              stroke="#FF6B00"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          )}
-
-          {trajectoryChart.peakCoord && trajectoryChart.peakCoord.totalValue > 0 && (
-            <g
-              transform={`translate(${Math.min(
-                trajectoryChart.width - 96,
-                Math.max(trajectoryChart.padLeft + 4, trajectoryChart.peakCoord.x - 45)
-              )}, ${Math.max(2, trajectoryChart.peakCoord.y - 22)})`}
-            >
-              <rect width="90" height="16" rx="4" fill="#10B981" />
-              <text
-                x="45"
-                y="11"
-                textAnchor="middle"
-                fill="#052E16"
-                fontSize="8.5"
-                fontWeight="800"
-                fontFamily="JetBrains Mono, monospace"
-              >
-                PEAK {formatCompactIdr(trajectoryChart.peakCoord.totalValue).replace('Rp ', '')}
-              </text>
-            </g>
-          )}
-
-          {trajectoryChart.coords.map((pt, idx) => (
-            <g
-              key={pt.month}
-              className="cursor-pointer"
-              onMouseEnter={() => setHoveredTrajIdx(idx)}
-              onMouseLeave={() => setHoveredTrajIdx(null)}
-            >
-              <circle
-                cx={pt.x}
-                cy={pt.y}
-                r={hoveredTrajIdx === idx ? 5 : 3.5}
-                fill="#FFFFFF"
-                stroke="#FF6B00"
-                strokeWidth="2.2"
-              />
-              <text
-                x={pt.x}
-                y={trajectoryChart.height - 5}
-                textAnchor="middle"
-                fill={hoveredTrajIdx === idx ? '#FFFFFF' : '#94A3B8'}
-                fontSize="8.5"
-                fontWeight="700"
-                fontFamily="JetBrains Mono, monospace"
-              >
-                {pt.shortMonth}
-              </text>
-            </g>
-          ))}
-        </svg>
-      </div>
-    </div>
-  );
-});
+function invalidateKpiDashboardCaches(): void {
+  cachedKpiSalesItems = null;
+  cachedKpiTrainerItems = null;
+}
 
 // Isolated Memoized Monthly Profit & HR Capacity Panel
 const MonthlyProfitHrPanel: React.FC<{
@@ -3169,7 +2826,7 @@ const KpiSalesDashboardPanel: React.FC<{
   onNavigateTab: (tab: ActiveTab) => void;
 }> = React.memo(({ filters, selectedYear, onNavigateTab }) => {
   const [rawItems, setRawItems] = useState<KpiSalesScorecardItem[]>(() =>
-    syncKpiSalesItemsForDashboard(loadKpiSalesData())
+    getCachedKpiSalesItems(false)
   );
   const [chartViewMode, setChartViewMode] = useState<'per_sales' | 'team_avg'>('per_sales');
   const [selectedPeriod, setSelectedPeriod] = useState<string>('ALL');
@@ -3184,7 +2841,7 @@ const KpiSalesDashboardPanel: React.FC<{
   } | null>(null);
 
   useEffect(() => {
-    const refresh = () => setRawItems(syncKpiSalesItemsForDashboard(loadKpiSalesData()));
+    const refresh = () => setRawItems(getCachedKpiSalesItems(true));
     window.addEventListener(TARGETS_UPDATED_EVENT, refresh);
     window.addEventListener('storage', refresh);
     return () => {
@@ -4048,7 +3705,7 @@ const KpiTrainerDashboardPanel: React.FC<{
   onNavigateTab: (tab: ActiveTab) => void;
 }> = React.memo(({ filters, selectedYear, onNavigateTab }) => {
   const [rawItems, setRawItems] = useState<KpiTrainerScorecardItem[]>(() =>
-    syncKpiTrainerItemsForDashboard(loadKpiTrainerData())
+    getCachedKpiTrainerItems(false)
   );
   const [chartMetric, setChartMetric] = useState<'score' | 'sell_out'>('score');
   const [selectedPeriod, setSelectedPeriod] = useState<string>('ALL');
@@ -4056,7 +3713,7 @@ const KpiTrainerDashboardPanel: React.FC<{
   const [hoveredItem, setHoveredItem] = useState<KpiTrainerScorecardItem | null>(null);
 
   useEffect(() => {
-    const refresh = () => setRawItems(syncKpiTrainerItemsForDashboard(loadKpiTrainerData()));
+    const refresh = () => setRawItems(getCachedKpiTrainerItems(true));
     window.addEventListener(TARGETS_UPDATED_EVENT, refresh);
     window.addEventListener('storage', refresh);
     return () => {
@@ -4808,6 +4465,277 @@ const KpiTrainerDashboardPanel: React.FC<{
   );
 });
 
+const TrenBulananDashboardPanel: React.FC<{
+  trendChartData: ReturnType<typeof aggregateTimeframe>;
+  trendTimeframeMode: TimeframeMode;
+  onTrendTimeframeModeChange: (mode: TimeframeMode) => void;
+  filters: DashboardFilters;
+  effectiveFilteredCount: number;
+  monthlySpvTargetsData: ReturnType<typeof buildMonthlySpvTargetsMap> | null;
+  onShowAllMonths: () => void;
+  onOpenTargetMgmt: () => void;
+}> = React.memo(
+  ({
+    trendChartData,
+    trendTimeframeMode,
+    onTrendTimeframeModeChange,
+    filters,
+    effectiveFilteredCount,
+    monthlySpvTargetsData,
+    onShowAllMonths,
+    onOpenTargetMgmt,
+  }) => (
+    <div className="flex-1 flex flex-col gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
+            Tren Pencapaian Bulanan &amp; Rincian Data
+          </h2>
+          <p className="text-xs text-slate-400">
+            Indikator Growth (Bulanan) serta Rincian Data Bulanan sesuai Filter Terintegrasi
+          </p>
+        </div>
+        {filters.BULAN !== 'ALL' && (
+          <button
+            type="button"
+            onClick={onShowAllMonths}
+            className="px-3 py-1.5 rounded-lg bg-[#FF6B00]/15 hover:bg-[#FF6B00]/25 border border-[#FF6B00]/40 text-[#FFB067] text-xs font-bold cursor-pointer transition-colors"
+          >
+            Tampilkan Semua Bulan (Jan–Des)
+          </button>
+        )}
+      </div>
+
+      <TimeframeTrendChart
+        theme="dark"
+        data={trendChartData}
+        mode={trendTimeframeMode}
+        onModeChange={onTrendTimeframeModeChange}
+        selectedMonth={filters.BULAN}
+        filters={filters}
+        totalFilteredRecords={effectiveFilteredCount}
+        spvTargetByMonth={monthlySpvTargetsData?.byKey}
+        spvScopeLabel={monthlySpvTargetsData?.spvScopeLabel}
+        targetMode={monthlySpvTargetsData?.targetMode}
+        targetEntityLabel={monthlySpvTargetsData?.targetEntityLabel}
+        onOpenTargetMgmt={onOpenTargetMgmt}
+      />
+    </div>
+  )
+);
+
+const PromoBaDashboardPanel: React.FC<{
+  promoBaData: PromoBaLensData;
+  promoTotalActual: number;
+  promoStoreCount: number;
+  promoDaysCount: number;
+  baTotalDenda: number;
+  baIncidentsCount: number;
+  salesVisitsCount: number;
+  trainerVisitsCount: number;
+  onNavigateTab: (tab: ActiveTab) => void;
+  onOpenPromo: () => void;
+}> = React.memo(
+  ({
+    promoBaData,
+    promoTotalActual,
+    promoStoreCount,
+    promoDaysCount,
+    baTotalDenda,
+    baIncidentsCount,
+    salesVisitsCount,
+    trainerVisitsCount,
+    onNavigateTab,
+    onOpenPromo,
+  }) => (
+    <div className="flex-1 flex flex-col gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
+            Tim BA, Report Promo Toko Online &amp; Kunjungan Lapangan
+          </h2>
+          <p className="text-xs text-slate-400">
+            Rekap promo online, evaluasi denda nihil BA, serta check-in tim Sales &amp; Trainer
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onOpenPromo}
+            className="px-3 py-1.5 rounded-lg bg-[#FF6B00] text-white text-xs font-bold cursor-pointer"
+          >
+            Buka Promo Online
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigateTab('punishment')}
+            className="px-3 py-1.5 rounded-lg bg-[#192234] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer"
+          >
+            Evaluasi Denda BA
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigateTab('kunjungan_sales')}
+            className="px-3 py-1.5 rounded-lg bg-[#192234] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer"
+          >
+            Kunjungan Sales
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 font-mono tabular-nums">
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+          <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Total Promo Toko Online</span>
+          <span className="text-base font-black text-[#FF6B00] mt-1 block whitespace-nowrap">{formatRupiah(promoTotalActual)}</span>
+          <span className="text-[11px] text-slate-400 whitespace-nowrap">{promoStoreCount} Toko · {promoDaysCount} Hari</span>
+        </div>
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+          <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Denda Nihil BA Aktif</span>
+          <span className="text-base font-black text-rose-400 mt-1 block whitespace-nowrap">{formatRupiah(baTotalDenda)}</span>
+          <span className="text-[11px] text-slate-400 whitespace-nowrap">{baIncidentsCount} Kejadian Nihil</span>
+        </div>
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+          <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Total Kunjungan Sales</span>
+          <span className="text-base font-black text-[#00D2FF] mt-1 block whitespace-nowrap">{salesVisitsCount} Check-In</span>
+          <span className="text-[11px] text-slate-400">ILHAMSYAH, TIWI, ALBERT</span>
+        </div>
+        <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
+          <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Total Kunjungan Trainer</span>
+          <span className="text-base font-black text-emerald-400 mt-1 block whitespace-nowrap">{trainerVisitsCount} Check-In</span>
+          <span className="text-[11px] text-slate-400">ARA &amp; RATIH</span>
+        </div>
+      </div>
+
+      <PromoMonthlyGrowthPanel
+        promoMonthlyRecap={promoBaData.promoMonthlyRecap}
+        onOpenPromo={onOpenPromo}
+      />
+    </div>
+  )
+);
+
+const FinanceBillsDashboardPanel: React.FC<{
+  monthlyProfitHrSummary: MonthlyProfitHrSummary;
+  profitSummary: ExecutiveCoreSnapshot['profitSummary'];
+  unpaidBillsAmount: number;
+  overdueBillsCount: number;
+  filterMonth: string;
+  onNavigateTab: (tab: ActiveTab) => void;
+}> = React.memo(
+  ({
+    monthlyProfitHrSummary,
+    profitSummary,
+    unpaidBillsAmount,
+    overdueBillsCount,
+    filterMonth,
+    onNavigateTab,
+  }) => {
+    const profitPctVsSellIn = Math.round((profitSummary.remainingProfitPercentSellIn || 0) * 10) / 10;
+    return (
+      <div className="flex-1 flex flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
+              Profit Area (P&amp;L), Estimasi Cost Gaji &amp; Tagihan Piutang
+            </h2>
+            <p className="text-xs text-slate-400">
+              Margin kotor 55%, biaya operasional 33%, beban gaji tim, serta kesehatan aging tagihan
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onNavigateTab('profit')}
+              className="px-3 py-1.5 rounded-lg bg-[#FF6B00] text-white text-xs font-bold cursor-pointer"
+            >
+              Buka Profit Area
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigateTab('cost')}
+              className="px-3 py-1.5 rounded-lg bg-[#192234] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer"
+            >
+              Buka Cost &amp; Gaji
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigateTab('aging')}
+              className="px-3 py-1.5 rounded-lg bg-[#192234] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer"
+            >
+              Buka Aging Tagihan
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 font-mono tabular-nums">
+          <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-4">
+            <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Margin Kotor (55%)</span>
+            <span className="text-base xl:text-lg font-black text-white mt-1 block whitespace-nowrap">{formatRupiah(profitSummary.marginValue)}</span>
+            <span className="text-[11px] text-slate-400 whitespace-nowrap">Sell In: {formatRupiah(profitSummary.sellInActual)}</span>
+          </div>
+          <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-4">
+            <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Total Beban (Ops + Gaji)</span>
+            <span className="text-base xl:text-lg font-black text-[#FF6B00] mt-1 block whitespace-nowrap">{formatRupiah(profitSummary.totalExpense)}</span>
+            <span className="text-[11px] text-slate-400 whitespace-nowrap">Gaji: {formatRupiah(profitSummary.salaryCost)}</span>
+          </div>
+          <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-4">
+            <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Sisa Profit Bersih</span>
+            <span className={`text-base xl:text-lg font-black mt-1 block whitespace-nowrap ${profitSummary.remainingProfitValue >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {formatRupiah(profitSummary.remainingProfitValue)}
+            </span>
+            <span className="text-[11px] text-slate-400 whitespace-nowrap">{profitPctVsSellIn}% vs Sell In</span>
+          </div>
+          <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-4">
+            <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Tagihan Belum Lunas</span>
+            <span className="text-base xl:text-lg font-black text-[#00D2FF] mt-1 block whitespace-nowrap">{formatRupiah(unpaidBillsAmount)}</span>
+            <span className="text-[11px] text-slate-400 whitespace-nowrap">{overdueBillsCount} Nota &gt; 30 Hari</span>
+          </div>
+        </div>
+
+        <MonthlyProfitHrPanel pnlData={monthlyProfitHrSummary} filterMonth={filterMonth} />
+      </div>
+    );
+  }
+);
+
+const TargetsAlertsDashboardPanel: React.FC<{
+  targetsAlertsData: TargetsAlertsLensData;
+  targetGapSummary: ExecutiveCoreSnapshot['targetGapSummary'];
+  lostStoresCount: number;
+  registeredSheetBaCount: number;
+  registeredSheetTrainerCount: number;
+  ketFilter: string;
+  onNavigateTab: (tab: ActiveTab) => void;
+}> = React.memo(
+  ({
+    targetsAlertsData,
+    targetGapSummary,
+    lostStoresCount,
+    registeredSheetBaCount,
+    registeredSheetTrainerCount,
+    ketFilter,
+    onNavigateTab,
+  }) => (
+    <div className="flex-1 flex flex-col gap-3">
+      <TargetsAlertsHeaderCards
+        targetGapSummary={targetGapSummary}
+        lostStoresCount={lostStoresCount}
+        registeredSheetBaCount={registeredSheetBaCount}
+        registeredSheetTrainerCount={registeredSheetTrainerCount}
+        productStatusSummary={targetsAlertsData.productStatusSummary}
+        ketFilter={ketFilter}
+        onNavigateTab={onNavigateTab}
+      />
+      <TargetsGapPanel
+        storeGapDetails={targetsAlertsData.storeGapDetails}
+        totalStoreGapDeficit={targetsAlertsData.totalStoreGapDeficit}
+        gapPreviousPeriodName={targetsAlertsData.gapPreviousPeriodName}
+        gapCurrentPeriodName={targetsAlertsData.gapCurrentPeriodName}
+      />
+    </div>
+  )
+);
+
 export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewProps> = ({
   allRecords,
   filteredRecords,
@@ -4829,28 +4757,31 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
   const [startDayInput, setStartDayInput] = useState<string>('');
   const [endDayInput, setEndDayInput] = useState<string>('');
 
-  const handleSelectDayPreset = (preset: 'ALL' | '1-10' | '1-15' | '1-20' | '11-20' | '21-31' | 'CUSTOM') => {
-    setDayPreset(preset);
-    if (preset === 'ALL') {
-      setStartDayInput('');
-      setEndDayInput('');
-    } else if (preset === '1-10') {
-      setStartDayInput('1');
-      setEndDayInput('10');
-    } else if (preset === '1-15') {
-      setStartDayInput('1');
-      setEndDayInput('15');
-    } else if (preset === '1-20') {
-      setStartDayInput('1');
-      setEndDayInput('20');
-    } else if (preset === '11-20') {
-      setStartDayInput('11');
-      setEndDayInput('20');
-    } else if (preset === '21-31') {
-      setStartDayInput('21');
-      setEndDayInput('31');
-    }
-  };
+  const handleSelectDayPreset = useCallback(
+    (preset: 'ALL' | '1-10' | '1-15' | '1-20' | '11-20' | '21-31' | 'CUSTOM') => {
+      setDayPreset(preset);
+      if (preset === 'ALL') {
+        setStartDayInput('');
+        setEndDayInput('');
+      } else if (preset === '1-10') {
+        setStartDayInput('1');
+        setEndDayInput('10');
+      } else if (preset === '1-15') {
+        setStartDayInput('1');
+        setEndDayInput('15');
+      } else if (preset === '1-20') {
+        setStartDayInput('1');
+        setEndDayInput('20');
+      } else if (preset === '11-20') {
+        setStartDayInput('11');
+        setEndDayInput('20');
+      } else if (preset === '21-31') {
+        setStartDayInput('21');
+        setEndDayInput('31');
+      }
+    },
+    []
+  );
 
   const rawDayRange = useMemo<ExecutiveDayRange | undefined>(() => {
     if (!startDayInput && !endDayInput) return undefined;
@@ -4865,17 +4796,52 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
   const mainPanelRef = useRef<HTMLDivElement | null>(null);
   const [screenshotStatus, setScreenshotStatus] = useState<'idle' | 'capturing' | 'done' | 'error'>('idle');
 
-  const handleSelectLens = (lens: SidebarLens) => {
+  const handleSelectLens = useCallback((lens: SidebarLens) => {
     setUiLens(lens);
     startLensTransition(() => {
       setActiveLens(lens);
     });
-  };
+  }, []);
+
+  const handleOpenTrendView = useCallback(() => {
+    handleSelectLens('tren_bulanan');
+  }, [handleSelectLens]);
+
+  const handleShowAllMonths = useCallback(() => {
+    onChangeFilter('BULAN', 'ALL');
+  }, [onChangeFilter]);
+
+  const handleChangeKet = useCallback(
+    (ket: string) => {
+      onChangeFilter('KET', ket as DashboardFilters['KET']);
+    },
+    [onChangeFilter]
+  );
+
+  const handleOpenTargetMgmt = useCallback(() => {
+    onNavigateTab('target_mgmt');
+  }, [onNavigateTab]);
+
+  const handleOpenMarketShareMg = useCallback(() => {
+    onNavigateTab('market_share_mg');
+  }, [onNavigateTab]);
+
+  const handleOpenPromo = useCallback(() => {
+    onNavigateTab('promo_toko_online');
+  }, [onNavigateTab]);
 
   const [quartalRefreshTick, setQuartalRefreshTick] = useState<number>(0);
 
+  const handleTargetsUpdated = useCallback(() => {
+    invalidateKpiDashboardCaches();
+    setQuartalRefreshTick((t) => t + 1);
+  }, []);
+
   useEffect(() => {
-    const onTargetsChanged = () => setQuartalRefreshTick((t) => t + 1);
+    const onTargetsChanged = () => {
+      invalidateKpiDashboardCaches();
+      setQuartalRefreshTick((t) => t + 1);
+    };
     window.addEventListener(TARGETS_UPDATED_EVENT, onTargetsChanged);
     window.addEventListener('storage', onTargetsChanged);
     return () => {
@@ -4884,34 +4850,100 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     };
   }, []);
 
-  // Fast Core & Overview Snapshot (NO 12x P&L, NO 2nd gap pass, NO unused dimension scans)
+  // Fast Core & Overview Snapshot
   const snap = useMemo(() => {
     void quartalRefreshTick;
     return buildExecutiveCoreSnapshot(allRecords, filteredRecords, filters, deferredDayRange);
   }, [allRecords, filteredRecords, filters, deferredDayRange, quartalRefreshTick]);
 
-  // Tren Pencapaian Bulanan & Rincian Data state & memo (computed only when active)
+  // Persistent Per-Lens Cache (keeps visited menus instant on re-switch)
+  const lensCacheRef = useRef<{
+    allRecords: TransactionRecord[];
+    filteredRecords: TransactionRecord[];
+    filters: DashboardFilters;
+    deferredDayRange: ExecutiveDayRange | undefined;
+    quartalRefreshTick: number;
+    selectedYear: number;
+    trendRecords?: TransactionRecord[];
+    trendByMode: Partial<Record<TimeframeMode, ReturnType<typeof aggregateTimeframe>>>;
+    monthlySpvTargets?: ReturnType<typeof buildMonthlySpvTargetsMap>;
+    marketShare?: { tick: number; data: MarketShareLensData };
+    productMix?: ProductMixLensData;
+    channelGrowth?: ReturnType<typeof buildChannelGrowthLensData>;
+    promoBa?: { tick: number; data: PromoBaLensData };
+    monthlyProfit?: MonthlyProfitHrSummary;
+    targetsAlerts?: TargetsAlertsLensData;
+    quarterRawByQ: Partial<Record<QuarterPeriodKey, ReturnType<typeof calculateQuarterlySummary>>>;
+  }>({
+    allRecords,
+    filteredRecords,
+    filters,
+    deferredDayRange,
+    quartalRefreshTick,
+    selectedYear: snap.selectedYear,
+    trendByMode: {},
+    quarterRawByQ: {},
+  });
+
+  const lensCache = lensCacheRef.current;
+  if (
+    lensCache.allRecords !== allRecords ||
+    lensCache.filteredRecords !== filteredRecords ||
+    lensCache.filters !== filters ||
+    lensCache.deferredDayRange !== deferredDayRange ||
+    lensCache.quartalRefreshTick !== quartalRefreshTick ||
+    lensCache.selectedYear !== snap.selectedYear
+  ) {
+    lensCache.allRecords = allRecords;
+    lensCache.filteredRecords = filteredRecords;
+    lensCache.filters = filters;
+    lensCache.deferredDayRange = deferredDayRange;
+    lensCache.quartalRefreshTick = quartalRefreshTick;
+    lensCache.selectedYear = snap.selectedYear;
+    lensCache.trendRecords = undefined;
+    lensCache.trendByMode = {};
+    lensCache.monthlySpvTargets = undefined;
+    lensCache.productMix = undefined;
+    lensCache.channelGrowth = undefined;
+    lensCache.monthlyProfit = undefined;
+    lensCache.targetsAlerts = undefined;
+    lensCache.quarterRawByQ = {};
+  }
+
+  // Tren Pencapaian Bulanan & Rincian Data state & cached memo
   const [trendTimeframeMode, setTrendTimeframeMode] = useState<TimeframeMode>('bulanan');
   const trendRecords = useMemo(() => {
     if (activeLens !== 'tren_bulanan') return [];
-    return deferredDayRange
-      ? filterRecordsByDayRange(filteredRecords, deferredDayRange)
-      : filteredRecords;
+    if (!lensCacheRef.current.trendRecords) {
+      lensCacheRef.current.trendRecords = deferredDayRange
+        ? filterRecordsByDayRange(filteredRecords, deferredDayRange)
+        : filteredRecords;
+    }
+    return lensCacheRef.current.trendRecords;
   }, [activeLens, filteredRecords, deferredDayRange]);
+
   const trendChartData = useMemo(() => {
     if (activeLens !== 'tren_bulanan') return [];
-    return aggregateTimeframe(trendRecords, trendTimeframeMode);
+    const existing = lensCacheRef.current.trendByMode[trendTimeframeMode];
+    if (existing) return existing;
+    const computed = aggregateTimeframe(trendRecords, trendTimeframeMode);
+    lensCacheRef.current.trendByMode[trendTimeframeMode] = computed;
+    return computed;
   }, [activeLens, trendRecords, trendTimeframeMode]);
+
   const monthlySpvTargetsData = useMemo(() => {
     void quartalRefreshTick;
     if (activeLens !== 'tren_bulanan') return null;
-    return buildMonthlySpvTargetsMap(allRecords, {
-      TAHUN: filters.TAHUN,
-      SPV: filters.SPV,
-      REGION: filters.REGION,
-      SALES: filters.SALES,
-      NAMA_STORE: filters.NAMA_STORE,
-    });
+    if (!lensCacheRef.current.monthlySpvTargets) {
+      lensCacheRef.current.monthlySpvTargets = buildMonthlySpvTargetsMap(allRecords, {
+        TAHUN: filters.TAHUN,
+        SPV: filters.SPV,
+        REGION: filters.REGION,
+        SALES: filters.SALES,
+        NAMA_STORE: filters.NAMA_STORE,
+      });
+    }
+    return lensCacheRef.current.monthlySpvTargets;
   }, [
     activeLens,
     allRecords,
@@ -4923,79 +4955,75 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     quartalRefreshTick,
   ]);
 
-  // Lazy Sub-Lens Data (ONLY computed when that specific sub-menu is active!)
   const marketShareData = useMemo(() => {
     if (activeLens !== 'market_share') return null;
-    return buildMarketShareLensData();
-  }, [activeLens]);
-
-  const [mgFilterMonth, setMgFilterMonth] = useState<string>('ALL');
-  const [mgFilterStore, setMgFilterStore] = useState<string>('ALL');
-  const [mgHoveredChartMonthIdx, setMgHoveredChartMonthIdx] = useState<number | null>(null);
-
-  const mgMaxChartSharePct = useMemo(() => {
-    if (!marketShareData) return 10;
-    const { mgStoreAnalytics } = marketShareData;
-    const vals = [
-      ...mgStoreAnalytics.monthlyTrendChartData.map((m) => Math.max(0, m.marketSharePercent)),
-      ...mgStoreAnalytics.allActiveStores.map((s) => Math.max(0, s.latestShare)),
-      mgStoreAnalytics.networkAvgShare,
-    ];
-    return Math.max(...vals, 10);
-  }, [marketShareData]);
-
-  const filteredMgPerStoreRecap = useMemo(() => {
-    if (!marketShareData) return [];
-    const base =
-      mgFilterMonth === 'ALL'
-        ? marketShareData.mgPerStoreRecap
-        : aggregatePerStoreMgRecap(
-            marketShareData.mgItems,
-            marketShareData.mgStoreOptions,
-            mgFilterMonth
-          );
-    if (mgFilterStore === 'ALL') return base;
-    return base.filter(
-      (r) => r.storeName.trim().toUpperCase() === mgFilterStore.trim().toUpperCase()
-    );
-  }, [marketShareData, mgFilterMonth, mgFilterStore]);
+    if (lensCacheRef.current.marketShare?.tick === quartalRefreshTick) {
+      return lensCacheRef.current.marketShare.data;
+    }
+    const data = buildMarketShareLensData();
+    lensCacheRef.current.marketShare = { tick: quartalRefreshTick, data };
+    return data;
+  }, [activeLens, quartalRefreshTick]);
 
   const productMixData = useMemo(() => {
     if (activeLens !== 'product_mix') return null;
-    return buildProductMixLensData(filteredRecords, deferredDayRange);
+    if (!lensCacheRef.current.productMix) {
+      lensCacheRef.current.productMix = buildProductMixLensData(filteredRecords, deferredDayRange);
+    }
+    return lensCacheRef.current.productMix;
   }, [activeLens, filteredRecords, deferredDayRange]);
 
   const channelGrowthRows = useMemo(() => {
     if (activeLens !== 'channel_growth') return null;
-    return buildChannelGrowthLensData(allRecords, snap.selectedYear, filters, deferredDayRange);
+    if (!lensCacheRef.current.channelGrowth) {
+      lensCacheRef.current.channelGrowth = buildChannelGrowthLensData(
+        allRecords,
+        snap.selectedYear,
+        filters,
+        deferredDayRange
+      );
+    }
+    return lensCacheRef.current.channelGrowth;
   }, [activeLens, allRecords, snap.selectedYear, filters, deferredDayRange]);
 
   const promoBaData = useMemo(() => {
     if (activeLens !== 'promo_ba') return null;
-    return buildPromoBaLensData();
-  }, [activeLens]);
+    if (lensCacheRef.current.promoBa?.tick === quartalRefreshTick) {
+      return lensCacheRef.current.promoBa.data;
+    }
+    const data = buildPromoBaLensData();
+    lensCacheRef.current.promoBa = { tick: quartalRefreshTick, data };
+    return data;
+  }, [activeLens, quartalRefreshTick]);
 
   const monthlyProfitHrSummary = useMemo(() => {
     if (activeLens !== 'finance_bills') return null;
-    return buildMonthlyProfitHrSummary(allRecords, filters, snap.selectedYear, deferredDayRange);
+    if (!lensCacheRef.current.monthlyProfit) {
+      lensCacheRef.current.monthlyProfit = buildMonthlyProfitHrSummary(
+        allRecords,
+        filters,
+        snap.selectedYear,
+        deferredDayRange
+      );
+    }
+    return lensCacheRef.current.monthlyProfit;
   }, [activeLens, allRecords, filters, snap.selectedYear, deferredDayRange]);
 
   const targetsAlertsData = useMemo(() => {
     if (activeLens !== 'targets_alerts') return null;
-    return buildTargetsAlertsLensData(
-      allRecords,
-      filteredRecords,
-      filters,
-      snap.gapDiagnosis,
-      deferredDayRange
-    );
+    if (!lensCacheRef.current.targetsAlerts) {
+      lensCacheRef.current.targetsAlerts = buildTargetsAlertsLensData(
+        allRecords,
+        filteredRecords,
+        filters,
+        snap.gapDiagnosis,
+        deferredDayRange
+      );
+    }
+    return lensCacheRef.current.targetsAlerts;
   }, [activeLens, allRecords, filteredRecords, filters, snap.gapDiagnosis, deferredDayRange]);
 
   const [selectedQuarter, setSelectedQuarter] = useState<QuarterPeriodKey>('Q4');
-  const [hallOfFameTab, setHallOfFameTab] = useState<'sales' | 'ba' | 'trainer'>('sales');
-  const [quartalSearch, setQuartalSearch] = useState<string>('');
-  const [editingBaSellInName, setEditingBaSellInName] = useState<string | null>(null);
-  const [editingBaSellInDraft, setEditingBaSellInDraft] = useState<string>('');
 
   useEffect(() => {
     if (filters.BULAN && filters.BULAN !== 'ALL') {
@@ -5007,8 +5035,10 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     }
   }, [filters.BULAN]);
 
-  const achieveQuartalData = useMemo(() => {
+  const rawQuarterSummary = useMemo(() => {
     if (activeLens !== 'achieve_quartal') return null;
+    const cachedQ = lensCacheRef.current.quarterRawByQ[selectedQuarter];
+    if (cachedQ) return cachedQ;
 
     const hasProductSubFilters =
       filters.BRAND !== 'ALL' ||
@@ -5044,233 +5074,57 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
       filters.SPV,
       activeKet
     );
+    lensCacheRef.current.quarterRawByQ[selectedQuarter] = rawQuarter;
+    return rawQuarter;
+  }, [activeLens, allRecords, filters, selectedQuarter, snap.selectedYear, deferredDayRange, quartalRefreshTick]);
 
-    const effSearch = (quartalSearch || filters.searchQuery || '').trim().toLowerCase();
+  const sidebarItems = useMemo<
+    ReadonlyArray<{
+      id: SidebarLens;
+      label: string;
+      icon: React.ReactNode;
+    }>
+  >(
+    () => [
+      { id: 'overview', label: 'Overview Dashboard', icon: <LayoutDashboard className="w-3.5 h-3.5" /> },
+      { id: 'tren_bulanan', label: 'Tren Bulanan & Rincian', icon: <Calendar className="w-3.5 h-3.5" /> },
+      { id: 'regional', label: 'Area & Tim Sales', icon: <MapPin className="w-3.5 h-3.5" /> },
+      { id: 'market_share', label: 'Market Share MG', icon: <PieChartIcon className="w-3.5 h-3.5" /> },
+      { id: 'product_mix', label: 'Brand, Kategori & SKU', icon: <Layers className="w-3.5 h-3.5" /> },
+      { id: 'channel_growth', label: 'Growth & BA vs Non-BA', icon: <TrendingUp className="w-3.5 h-3.5" /> },
+      { id: 'promo_ba', label: 'Tim BA, Promo & Visit', icon: <Tag className="w-3.5 h-3.5" /> },
+      { id: 'finance_bills', label: 'Profit, Cost & Tagihan', icon: <Wallet className="w-3.5 h-3.5" /> },
+      { id: 'targets_alerts', label: 'Target & Analisa Gap', icon: <Target className="w-3.5 h-3.5" /> },
+      { id: 'kpi_sales', label: 'KPI Sales', icon: <Award className="w-3.5 h-3.5" /> },
+      { id: 'kpi_trainer', label: 'KPI Trainer', icon: <GraduationCap className="w-3.5 h-3.5" /> },
+      { id: 'achieve_quartal', label: 'Achieve Quartal', icon: <Crown className="w-3.5 h-3.5" /> },
+    ],
+    []
+  );
 
-    const filteredSales: SalesQuarterlySummaryItem[] = rawQuarter.salesList
-      .filter((s) => {
-        if (filters.SALES && filters.SALES !== 'ALL') {
-          const fSales = filters.SALES.trim().toUpperCase();
-          const canonical = fSales === 'ALBERT' ? 'ALBERT FERNANDO' : fSales;
-          if (s.salesName.toUpperCase() !== canonical) return false;
-        }
-        if (filters.TRAINER && filters.TRAINER !== 'ALL') {
-          const cfg = SALES_MASTER_6_CONFIG[s.salesName];
-          if (cfg && !cfg.trainerCovered.toUpperCase().includes(filters.TRAINER.toUpperCase())) {
-            return false;
-          }
-        }
-        if (filters.SPV && filters.SPV !== 'ALL' && s.spvName.toUpperCase() !== filters.SPV.toUpperCase()) {
-          return false;
-        }
-        if (
-          filters.REGION &&
-          filters.REGION !== 'ALL' &&
-          (s.region || '').toUpperCase() !== filters.REGION.toUpperCase() &&
-          (s.coverArea || '').toUpperCase() !== filters.REGION.toUpperCase()
-        ) {
-          return false;
-        }
-        if (!effSearch) return true;
-        return (
-          s.salesName.toLowerCase().includes(effSearch) ||
-          s.coverArea.toLowerCase().includes(effSearch) ||
-          s.spvName.toLowerCase().includes(effSearch) ||
-          (s.region && s.region.toLowerCase().includes(effSearch))
-        );
-      })
-      .sort((a, b) => {
-        const diff = b.quarterAchievementPercent - a.quarterAchievementPercent;
-        if (Math.abs(diff) > 0.0001) return diff;
-        return b.quarterActual - a.quarterActual;
+  const handleScreenshot = useCallback(async () => {
+    if (!mainPanelRef.current || screenshotStatus === 'capturing') return;
+    setScreenshotStatus('capturing');
+    const activeLabel =
+      sidebarItems.find((s) => s.id === activeLens)?.label || 'Dashboard';
+    const safeMenu = activeLabel.replace(/[^a-zA-Z0-9_-]+/g, '_');
+    const safeMonth = (filters.BULAN || 'ALL').replace(/[^a-zA-Z0-9_-]+/g, '_');
+    const stamp = new Date().toISOString().slice(0, 10);
+    try {
+      await captureElementToPng({
+        element: mainPanelRef.current,
+        filename: `Screenshoot_${safeMenu}_${safeMonth}_${snap.selectedYear}_${stamp}.png`,
+        backgroundColor: '#0A0E17',
+        scale: 1.5,
       });
-
-    const filteredBa: BaQuarterlySummaryItem[] = rawQuarter.baList
-      .filter((b) => {
-        if (filters.SPV && filters.SPV !== 'ALL' && b.spvName && b.spvName.toUpperCase() !== filters.SPV.toUpperCase()) {
-          return false;
-        }
-        if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL') {
-          const targetStore = filters.NAMA_STORE.toUpperCase().trim();
-          const storeTokens = (b.storeName || '')
-            .split(',')
-            .map((t) => t.trim().toUpperCase())
-            .filter(Boolean);
-          if ((b.storeName || '').toUpperCase().trim() !== targetStore && !storeTokens.includes(targetStore)) {
-            return false;
-          }
-        }
-        if (filters.REGION && filters.REGION !== 'ALL') {
-          const targetReg = filters.REGION.toUpperCase().trim();
-          const regionMatch = (b.region || '').toUpperCase().trim() === targetReg;
-          const areaTokens = (b.coverArea || '')
-            .split(',')
-            .map((t) => t.trim().toUpperCase())
-            .filter(Boolean);
-          if (!regionMatch && (b.coverArea || '').toUpperCase().trim() !== targetReg && !areaTokens.includes(targetReg)) {
-            return false;
-          }
-        }
-        if (!effSearch) return true;
-        return (
-          b.baName.toLowerCase().includes(effSearch) ||
-          b.storeName.toLowerCase().includes(effSearch) ||
-          b.coverArea.toLowerCase().includes(effSearch) ||
-          b.baNumber.toLowerCase().includes(effSearch) ||
-          (b.spvName && b.spvName.toLowerCase().includes(effSearch))
-        );
-      })
-      .sort((a, b) => {
-        const diff = b.quarterAchievementPercent - a.quarterAchievementPercent;
-        if (Math.abs(diff) > 0.0001) return diff;
-        return b.quarterActual - a.quarterActual;
-      });
-
-    const filteredTrainer: TrainerQuarterlySummaryItem[] = rawQuarter.trainerList
-      .filter((t) => {
-        if (filters.TRAINER && filters.TRAINER !== 'ALL' && t.trainerName.toUpperCase() !== filters.TRAINER.toUpperCase()) {
-          return false;
-        }
-        if (
-          filters.REGION &&
-          filters.REGION !== 'ALL' &&
-          (t.areaCovered || '').toUpperCase() !== filters.REGION.toUpperCase() &&
-          (t.region || '').toUpperCase() !== filters.REGION.toUpperCase()
-        ) {
-          return false;
-        }
-        if (!effSearch) return true;
-        return (
-          t.trainerName.toLowerCase().includes(effSearch) ||
-          t.areaCovered.toLowerCase().includes(effSearch)
-        );
-      })
-      .sort((a, b) => {
-        const diff = b.quarterAchievementPercent - a.quarterAchievementPercent;
-        if (Math.abs(diff) > 0.0001) return diff;
-        return b.quarterActual - a.quarterActual;
-      });
-
-    const isKetSellIn = activeKet === 'SELL IN';
-    const isKetSellOut = activeKet === 'SELL OUT';
-    const activeKetDisplayLabel = isKetSellIn
-      ? 'SELL IN (Pencapaian Sell In)'
-      : isKetSellOut
-      ? 'SELL OUT (Pencapaian Sell Out)'
-      : activeKet === 'ALL'
-      ? 'SEMUA KET (Sell In & Sell Out)'
-      : activeKet;
-
-    const topSales = filteredSales[0]
-      ? {
-          name: filteredSales[0].salesName,
-          actual: filteredSales[0].quarterActual,
-          target: filteredSales[0].quarterTarget,
-          percent: filteredSales[0].quarterAchievementPercent,
-        }
-      : null;
-
-    const topBa = filteredBa[0]
-      ? {
-          name: filteredBa[0].baName,
-          store: filteredBa[0].storeName,
-          actual: filteredBa[0].quarterActual,
-          target: filteredBa[0].quarterTarget,
-          percent: filteredBa[0].quarterAchievementPercent,
-        }
-      : null;
-
-    const topTrainer = filteredTrainer[0]
-      ? {
-          name: filteredTrainer[0].trainerName,
-          actual: filteredTrainer[0].quarterActual,
-          score: filteredTrainer[0].avgKpiScore,
-          percent: filteredTrainer[0].quarterAchievementPercent,
-        }
-      : null;
-
-    return {
-      overall: rawQuarter.overall,
-      filteredSales,
-      filteredBa,
-      filteredTrainer,
-      topSales,
-      topBa,
-      topTrainer,
-      isKetSellIn,
-      isKetSellOut,
-      activeKetDisplayLabel,
-    };
-  }, [activeLens, allRecords, filters, selectedQuarter, snap.selectedYear, deferredDayRange, quartalSearch, quartalRefreshTick]);
-
-  const handleSaveBaSellInTarget = (baName: string) => {
-    const rawDigits = editingBaSellInDraft.replace(/[^\d]/g, '');
-    const parsedVal = Number(rawDigits);
-    if (!Number.isFinite(parsedVal) || rawDigits === '') {
-      setEditingBaSellInName(null);
-      return;
+      setScreenshotStatus('done');
+      setTimeout(() => setScreenshotStatus('idle'), 2200);
+    } catch (err) {
+      console.error('Screenshoot gagal:', err);
+      setScreenshotStatus('error');
+      setTimeout(() => setScreenshotStatus('idle'), 2500);
     }
-    const cleanTarget = Math.max(0, Math.round(parsedVal));
-    const baItem = achieveQuartalData?.filteredBa.find(
-      (b) => b.baName.toLowerCase() === baName.toLowerCase()
-    );
-    const syncedToStores = syncQuarterBaSellInToStores({
-      year: snap.selectedYear,
-      quarter: selectedQuarter,
-      baName,
-      storeName: baItem?.storeName || '',
-      quarterTargetSellIn: cleanTarget,
-      monthlyBreakdown: baItem?.monthlyBreakdown,
-    });
-    if (!syncedToStores) {
-      saveQuarterlyTargetOverride(snap.selectedYear, selectedQuarter, 'ba', baName, {
-        targetSellIn: cleanTarget,
-      });
-    }
-    setEditingBaSellInName(null);
-    setQuartalRefreshTick((t) => t + 1);
-  };
-
-  const sidebarItems: Array<{
-    id: SidebarLens;
-    label: string;
-    icon: React.ReactNode;
-  }> = [
-    { id: 'overview', label: 'Overview Dashboard', icon: <LayoutDashboard className="w-3.5 h-3.5" /> },
-    { id: 'tren_bulanan', label: 'Tren Bulanan & Rincian', icon: <Calendar className="w-3.5 h-3.5" /> },
-    { id: 'regional', label: 'Area & Tim Sales', icon: <MapPin className="w-3.5 h-3.5" /> },
-    { id: 'market_share', label: 'Market Share MG', icon: <PieChartIcon className="w-3.5 h-3.5" /> },
-    { id: 'product_mix', label: 'Brand, Kategori & SKU', icon: <Layers className="w-3.5 h-3.5" /> },
-    { id: 'channel_growth', label: 'Growth & BA vs Non-BA', icon: <TrendingUp className="w-3.5 h-3.5" /> },
-    { id: 'promo_ba', label: 'Tim BA, Promo & Visit', icon: <Tag className="w-3.5 h-3.5" /> },
-    { id: 'finance_bills', label: 'Profit, Cost & Tagihan', icon: <Wallet className="w-3.5 h-3.5" /> },
-    { id: 'targets_alerts', label: 'Target & Analisa Gap', icon: <Target className="w-3.5 h-3.5" /> },
-    { id: 'kpi_sales', label: 'KPI Sales', icon: <Award className="w-3.5 h-3.5" /> },
-    { id: 'kpi_trainer', label: 'KPI Trainer', icon: <GraduationCap className="w-3.5 h-3.5" /> },
-    { id: 'achieve_quartal', label: 'Achieve Quartal', icon: <Crown className="w-3.5 h-3.5" /> },
-  ];
-
-  const maxRegionalBar = useMemo(() => {
-    return (
-      Math.max(1, ...snap.regionalBars.map((b) => Math.max(b.value, b.target))) * 1.1
-    );
-  }, [snap.regionalBars]);
-
-  const profitPctVsSellIn =
-    Math.round((snap.profitSummary.remainingProfitPercentSellIn || 0) * 10) / 10;
-  const avgPricePerUnit =
-    snap.summary.totalQty > 0
-      ? Math.round(snap.summary.totalRevenue / snap.summary.totalQty)
-      : 0;
-  const topSku = snap.topSku;
-  const topBrand = snap.topBrands[0];
-  const fastestGrowthArea =
-    snap.brandComparisonRows.length > 0
-      ? [...snap.brandComparisonRows].sort((a, b) => b.growth - a.growth)[0]
-      : null;
-
-  const targetProgressClamped = Math.max(0, Math.min(100, snap.achievementPercent));
-  const isTargetOnTrack = snap.achievementPercent >= 75;
+  }, [activeLens, filters.BULAN, screenshotStatus, sidebarItems, snap.selectedYear]);
 
   return (
     <div
@@ -5286,103 +5140,16 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
         }`}
       >
         {/* LEFT DARK SIDEBAR */}
-        <aside className="w-full lg:w-[200px] xl:w-[214px] shrink-0 bg-[#0D121D] border-b lg:border-b-0 lg:border-r border-[#1C2536] flex flex-col justify-between p-3">
-          <div>
-            <div className="flex items-center gap-2 px-1 pb-3 border-b border-[#1C2536]">
-              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#FF7A00] to-[#EA580C] flex items-center justify-center font-black text-white text-xs shadow-md shadow-orange-600/30 shrink-0">
-                SP
-              </div>
-              <div className="min-w-0">
-                <span className="text-xs font-extrabold tracking-wide text-white block leading-tight">
-                  SALESPRO
-                </span>
-                <span className="text-[9.5px] font-extrabold tracking-wider text-[#FF6B00] block uppercase">
-                  MARKET INTELLIGENCE
-                </span>
-              </div>
-            </div>
-
-            <nav className="mt-2.5 flex lg:flex-col gap-1 overflow-x-auto lg:overflow-visible pb-1.5 lg:pb-0 no-scrollbar">
-              {sidebarItems.map((item) => {
-                const isActive = uiLens === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => handleSelectLens(item.id)}
-                    className={`flex items-center gap-2 px-2.5 py-2 rounded-lg text-[11.5px] font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 text-left ${
-                      isActive
-                        ? 'bg-gradient-to-r from-[#FF6B00] to-[#F97316] text-white font-bold shadow-md shadow-orange-600/25'
-                        : 'text-slate-400 hover:text-slate-100 hover:bg-[#151D2E]'
-                    }`}
-                  >
-                    <span className={isActive ? 'text-white' : 'text-slate-400'}>
-                      {item.icon}
-                    </span>
-                    <span>{item.label}</span>
-                  </button>
-                );
-              })}
-            </nav>
-          </div>
-
-          <div className="hidden lg:block mt-3 bg-[#111826] border border-[#1F2A3D] rounded-xl p-3 space-y-2">
-            <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 block">
-              TARGET PERIODE ({snap.selectedYear})
-            </span>
-            <div>
-              <span className="text-[10px] text-slate-400 block">Target Omset</span>
-              <span
-                className="text-[12.5px] font-black font-mono tabular-nums text-white block whitespace-nowrap"
-                title={formatRupiah(snap.targetTotal)}
-              >
-                {formatRupiah(snap.targetTotal)}
-              </span>
-            </div>
-
-            <div className="space-y-1">
-              <div className="w-full h-1.5 bg-[#1D283A] rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-[#FF6B00] to-[#F59E0B] rounded-full transition-all duration-300"
-                  style={{ width: `${targetProgressClamped}%` }}
-                />
-              </div>
-              <div className="flex items-center justify-between text-[10.5px] font-mono tabular-nums">
-                <span className="text-slate-400">Realisasi</span>
-                <span className="font-bold text-emerald-400">{snap.achievementPercent}%</span>
-              </div>
-            </div>
-
-            <div className="pt-1 border-t border-[#1C2536]">
-              <span
-                className="text-[12px] font-extrabold font-mono tabular-nums text-white block whitespace-nowrap"
-                title={formatRupiah(snap.summary.totalRevenue)}
-              >
-                {formatRupiah(snap.summary.totalRevenue)}
-              </span>
-              <span className="text-[9.5px] text-slate-400 block mt-0.5">
-                {snap.selectedMonthLabel}
-              </span>
-            </div>
-
-            <div
-              className={`px-2 py-1 rounded-lg border text-[10.5px] font-bold flex items-center gap-1.5 ${
-                isTargetOnTrack
-                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
-                  : 'bg-amber-500/10 border-amber-500/30 text-amber-300'
-              }`}
-            >
-              {isTargetOnTrack ? (
-                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-              ) : (
-                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-              )}
-              <span className="whitespace-nowrap">
-                {isTargetOnTrack ? 'On Track' : 'Perlu Akselerasi'}
-              </span>
-            </div>
-          </div>
-        </aside>
+        <DashboardSidebar
+          sidebarItems={sidebarItems}
+          uiLens={uiLens}
+          onSelectLens={handleSelectLens}
+          selectedYear={snap.selectedYear}
+          targetTotal={snap.targetTotal}
+          achievementPercent={snap.achievementPercent}
+          totalRevenue={snap.summary.totalRevenue}
+          selectedMonthLabel={snap.selectedMonthLabel}
+        />
 
         {/* MAIN RIGHT CONTENT PANEL */}
         <div
@@ -5448,29 +5215,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
                 <button
                   type="button"
                   disabled={screenshotStatus === 'capturing'}
-                  onClick={async () => {
-                    if (!mainPanelRef.current || screenshotStatus === 'capturing') return;
-                    setScreenshotStatus('capturing');
-                    const activeLabel =
-                      sidebarItems.find((s) => s.id === activeLens)?.label || 'Dashboard';
-                    const safeMenu = activeLabel.replace(/[^a-zA-Z0-9_-]+/g, '_');
-                    const safeMonth = (filters.BULAN || 'ALL').replace(/[^a-zA-Z0-9_-]+/g, '_');
-                    const stamp = new Date().toISOString().slice(0, 10);
-                    try {
-                      await captureElementToPng({
-                        element: mainPanelRef.current,
-                        filename: `Screenshoot_${safeMenu}_${safeMonth}_${snap.selectedYear}_${stamp}.png`,
-                        backgroundColor: '#0A0E17',
-                        scale: 1.5,
-                      });
-                      setScreenshotStatus('done');
-                      setTimeout(() => setScreenshotStatus('idle'), 2200);
-                    } catch (err) {
-                      console.error('Screenshoot gagal:', err);
-                      setScreenshotStatus('error');
-                      setTimeout(() => setScreenshotStatus('idle'), 2500);
-                    }
-                  }}
+                  onClick={handleScreenshot}
                   title="Ambil gambar seluruh tampilan menu dashboard yang sedang dibuka"
                   className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border text-xs font-extrabold transition-colors cursor-pointer whitespace-nowrap shrink-0 shadow-md ${
                     screenshotStatus === 'done'
@@ -5740,944 +5485,28 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
             </div>
           </div>
 
-          {/* ACTIVE LENS CONTENT */}
+          {/* ACTIVE LENS CONTENT (All 12 panels isolated with React.memo for 0ms sidebar highlight) */}
           {activeLens === 'overview' && (
-            <div className="flex-1 flex flex-col justify-between gap-2.5">
-              {/* ROW 1: 7 COMPACT KPI STRIP CARDS */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-7 gap-2">
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-2.5 flex flex-col justify-between gap-1.5">
-                  <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 leading-none">
-                    TOTAL OMSET
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <MiniProgressRing percent={snap.achievementPercent} color="#FF6B00" />
-                    <div className="min-w-0">
-                      <span
-                        className="text-[13px] font-black font-mono tabular-nums text-white block leading-tight whitespace-nowrap"
-                        title={formatRupiah(snap.summary.totalRevenue)}
-                      >
-                        {formatCompactIdr(snap.summary.totalRevenue)}
-                      </span>
-                      <span
-                        className={`text-[10px] font-mono tabular-nums font-bold block leading-tight mt-0.5 whitespace-nowrap ${
-                          snap.overallGrowthPct >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                        }`}
-                      >
-                        {snap.overallGrowthPct >= 0 ? '↑' : '↓'} {formatPercent(snap.overallGrowthPct)} MoM
-                      </span>
-                    </div>
-                  </div>
-                  <span
-                    className="text-[10px] text-slate-400 font-mono tabular-nums leading-tight whitespace-nowrap"
-                    title={`Target: ${formatRupiah(snap.targetTotal)}`}
-                  >
-                    Tgt: {formatCompactIdr(snap.targetTotal)}
-                  </span>
-                </div>
-
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-2.5 flex flex-col justify-between gap-1.5">
-                  <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 leading-none">
-                    MARKET SHARE MG
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <MiniProgressRing
-                      percent={snap.mgAvgSharePct > 0 ? snap.mgAvgSharePct : (topBrand?.sharePct || 0)}
-                      color="#00D2FF"
-                      label={`${Math.round(snap.mgAvgSharePct > 0 ? snap.mgAvgSharePct : (topBrand?.sharePct || 0))}%`}
-                    />
-                    <div className="min-w-0">
-                      <span className="text-[12.5px] font-black font-mono tabular-nums text-white block leading-tight whitespace-nowrap">
-                        {snap.mgAvgSharePct > 0
-                          ? `${snap.mgAvgSharePct}% Share`
-                          : topBrand
-                          ? `${topBrand.sharePct}% Top`
-                          : '0% Share'}
-                      </span>
-                      <span className="text-[10px] font-mono tabular-nums font-bold text-cyan-400 block leading-tight mt-0.5 whitespace-nowrap">
-                        {snap.mgShareDeltaPp !== null
-                          ? `${snap.mgShareDeltaPp >= 0 ? '↑ +' : '↓ '}${snap.mgShareDeltaPp} pp`
-                          : `${snap.mgActiveStoreCount} Toko MG`}
-                      </span>
-                    </div>
-                  </div>
-                  <span
-                    className="text-[10px] text-slate-400 leading-tight truncate"
-                    title={snap.mgTopStore?.storeName || topBrand?.name || 'Input Market Share'}
-                  >
-                    {snap.mgTopStore
-                      ? `Top: ${snap.mgTopStore.storeName}`
-                      : topBrand
-                      ? `#1 ${topBrand.name}`
-                      : 'Input Market Share'}
-                  </span>
-                </div>
-
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-2.5 flex flex-col justify-between gap-1.5">
-                  <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 leading-none">
-                    UNIT TERJUAL (QTY)
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <MiniProgressRing
-                      percent={snap.sellThroughPct > 0 ? Math.min(100, snap.sellThroughPct) : 85}
-                      color="#3B82F6"
-                    />
-                    <div className="min-w-0">
-                      <span className="text-[13px] font-black font-mono tabular-nums text-white block leading-tight whitespace-nowrap">
-                        {formatNumber(snap.summary.totalQty)} pcs
-                      </span>
-                      <span
-                        className={`text-[10px] font-mono tabular-nums font-bold block leading-tight mt-0.5 whitespace-nowrap ${
-                          snap.overallQtyGrowthPct >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                        }`}
-                      >
-                        {snap.overallQtyGrowthPct >= 0 ? '↑' : '↓'} {formatPercent(snap.overallQtyGrowthPct)} MoM
-                      </span>
-                    </div>
-                  </div>
-                  <span className="text-[10px] text-slate-400 font-mono tabular-nums leading-tight whitespace-nowrap">
-                    {formatNumber(snap.summary.totalTransactions)} Transaksi
-                  </span>
-                </div>
-
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-2.5 flex flex-col justify-between gap-1.5">
-                  <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 leading-none">
-                    PROFIT &amp; MARGIN
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <MiniProgressRing
-                      percent={Math.max(0, profitPctVsSellIn)}
-                      color="#10B981"
-                      label={`${Math.round(profitPctVsSellIn)}%`}
-                    />
-                    <div className="min-w-0">
-                      <span className="text-[13px] font-black font-mono tabular-nums text-white block leading-tight whitespace-nowrap">
-                        {profitPctVsSellIn}% Net
-                      </span>
-                      <span
-                        className="text-[10px] font-mono tabular-nums font-bold text-emerald-400 block leading-tight mt-0.5 whitespace-nowrap"
-                        title={formatRupiah(snap.profitSummary.remainingProfitValue)}
-                      >
-                        {formatCompactIdr(snap.profitSummary.remainingProfitValue)}
-                      </span>
-                    </div>
-                  </div>
-                  <span className="text-[10px] text-slate-400 font-mono tabular-nums leading-tight whitespace-nowrap">
-                    Margin 55% · Ops 33%
-                  </span>
-                </div>
-
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-2.5 flex flex-col justify-between gap-1">
-                  <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 leading-none">
-                    AVG HARGA / UNIT
-                  </span>
-                  <span
-                    className="text-base font-black font-mono tabular-nums text-white leading-tight whitespace-nowrap"
-                    title={formatRupiah(avgPricePerUnit)}
-                  >
-                    {formatCompactIdr(avgPricePerUnit)}
-                  </span>
-                  <div className="space-y-0.5">
-                    <span className="text-[10px] font-mono tabular-nums font-bold text-emerald-400 block leading-tight whitespace-nowrap">
-                      Fokus: {snap.focusPct}% Omset
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-mono tabular-nums block leading-tight whitespace-nowrap">
-                      Produk New: {snap.newPct}%
-                    </span>
-                  </div>
-                </div>
-
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-2.5 flex flex-col justify-between gap-1">
-                  <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 leading-none">
-                    TOKO SELL IN (BA)
-                  </span>
-                  <span className="text-base font-black font-mono tabular-nums text-white leading-tight whitespace-nowrap">
-                    {snap.storeBaSummary.totalStoresCount} Toko
-                  </span>
-                  <div className="space-y-0.5">
-                    <span className="text-[10px] font-mono tabular-nums font-bold text-cyan-400 block leading-tight whitespace-nowrap">
-                      BA: {snap.storeBaSummary.tokoBaCount} ({snap.storeBaSummary.totalBaCount} BA)
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-mono tabular-nums block leading-tight whitespace-nowrap">
-                      Non-BA: {snap.storeBaSummary.tokoNonBaCount} Toko
-                    </span>
-                  </div>
-                </div>
-
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-2.5 flex flex-col justify-between gap-1">
-                  <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 leading-none">
-                    PROMO TOKO ONLINE
-                  </span>
-                  <span
-                    className="text-base font-black font-mono tabular-nums text-white leading-tight whitespace-nowrap"
-                    title={formatRupiah(snap.promoTotalActual)}
-                  >
-                    {formatCompactIdr(snap.promoTotalActual)}
-                  </span>
-                  <div className="space-y-0.5">
-                    <span
-                      className={`text-[10px] font-mono tabular-nums font-bold block leading-tight whitespace-nowrap ${
-                        snap.promoLatestGrowthPct === null
-                          ? 'text-slate-300'
-                          : snap.promoLatestGrowthPct >= 0
-                          ? 'text-emerald-400'
-                          : 'text-rose-400'
-                      }`}
-                    >
-                      {snap.promoLatestGrowthPct !== null
-                        ? `${snap.promoLatestGrowthPct >= 0 ? '↑' : '↓'} ${formatPercent(snap.promoLatestGrowthPct)} MoM`
-                        : `${snap.promoStoreCount} Toko Online`}
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-mono tabular-nums block leading-tight whitespace-nowrap">
-                      {snap.promoDaysCount} Hari Promo
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* ROW 2: 3 MIDDLE CHART PANELS */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5">
-                {/* PANEL 2A: HORIZONTAL BAR CHART (TIM SALES PERFORMANCE) */}
-                <div className="lg:col-span-4 bg-[#121926] border border-[#1F293B] rounded-xl p-3 flex flex-col justify-between">
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <h2 className="text-[11px] font-extrabold uppercase tracking-wider text-slate-100">
-                      PERFORMA PENJUALAN TIM SALES
-                    </h2>
-                    <span className="text-[10px] font-bold text-[#FF6B00] font-mono tabular-nums whitespace-nowrap shrink-0">
-                      Urut % Tertinggi · Target: 100%
-                    </span>
-                  </div>
-
-                  <div className="space-y-2 my-auto">
-                    {snap.regionalBars.length > 0 ? (
-                      <>
-                        {snap.regionalBars.map((bar) => {
-                          const widthPct = Math.max(4, Math.min(94, (bar.value / maxRegionalBar) * 100));
-                          const targetPct = Math.max(8, Math.min(96, (bar.target / maxRegionalBar) * 100));
-                          return (
-                            <div key={bar.name} className="flex items-center gap-2 text-xs">
-                              <span
-                                className="w-[82px] xl:w-[92px] shrink-0 text-[10.5px] font-semibold text-slate-200 truncate"
-                                title={`${bar.name} (${bar.subLabel})`}
-                              >
-                                {bar.name}
-                              </span>
-                              <div className="relative flex-1 min-w-[90px] h-4 bg-[#1B2436] rounded-sm overflow-visible flex items-center">
-                                <div
-                                  className="h-full rounded-sm bg-gradient-to-r from-[#2563EB] to-[#00D2FF] flex items-center justify-center transition-all duration-300"
-                                  style={{ width: `${widthPct}%` }}
-                                >
-                                  {widthPct >= 26 && (
-                                    <span className="text-[9.5px] font-mono tabular-nums font-extrabold text-slate-950 px-1">
-                                      {bar.achievementPct}%
-                                    </span>
-                                  )}
-                                </div>
-                                {widthPct < 26 && (
-                                  <span className="text-[9.5px] font-mono tabular-nums font-bold text-cyan-300 pl-1.5">
-                                    {bar.achievementPct}%
-                                  </span>
-                                )}
-                                <div
-                                  className="absolute top-[-2px] bottom-[-2px] border-l-2 border-dashed border-[#FF6B00] pointer-events-none"
-                                  style={{ left: `${targetPct}%` }}
-                                  title={`Target: ${formatRupiah(bar.target)}`}
-                                />
-                              </div>
-                              <span
-                                className="w-[74px] shrink-0 text-[10.5px] font-mono tabular-nums font-bold text-white text-right whitespace-nowrap"
-                                title={formatRupiah(bar.value)}
-                              >
-                                {formatCompactIdr(bar.value)}
-                              </span>
-                            </div>
-                          );
-                        })}
-
-                        <div className="flex items-center gap-2 pt-0.5 text-[9.5px] font-mono tabular-nums text-slate-500">
-                          <div className="w-[82px] xl:w-[92px] shrink-0" />
-                          <div className="flex-1 flex justify-between whitespace-nowrap">
-                            <span>0</span>
-                            <span>{formatCompactIdr(maxRegionalBar * 0.33)}</span>
-                            <span>{formatCompactIdr(maxRegionalBar * 0.66)}</span>
-                            <span>{formatCompactIdr(maxRegionalBar)}</span>
-                          </div>
-                          <div className="w-[74px] shrink-0" />
-                        </div>
-                      </>
-                    ) : (
-                      <div className="py-8 text-center text-xs text-slate-500">
-                        Belum ada data penjualan tim sales pada filter ini.
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* PANEL 2B: ISOLATED MEMOIZED DONUT CHART */}
-                <BrandShareDonutCard topBrands={snap.topBrands} selectedYear={snap.selectedYear} />
-
-                {/* PANEL 2C: QUARTERLY STACKED BAR CHART */}
-                <div className="lg:col-span-4 bg-[#121926] border border-[#1F293B] rounded-xl p-3 flex flex-col justify-between">
-                  <div className="flex items-center justify-between gap-2 mb-1.5">
-                    <h2 className="text-[11px] font-extrabold uppercase tracking-wider text-slate-100">
-                      BAURAN PRODUK KUARTAL (%)
-                    </h2>
-                    <span className="text-[10px] text-slate-400 whitespace-nowrap">
-                      Q1–Q4 {snap.selectedYear}
-                    </span>
-                  </div>
-
-                  <div className="flex-1 flex flex-col justify-end pt-1">
-                    <div className="relative h-[116px] flex items-end gap-3 pl-9 pr-2 border-b border-[#1E293B]">
-                      {[0, 25, 50, 75, 100].map((pct) => (
-                        <React.Fragment key={pct}>
-                          <span
-                            className="absolute left-0 w-8 text-right pr-1.5 text-[9px] font-mono tabular-nums text-slate-500 -translate-y-1/2 pointer-events-none"
-                            style={{
-                              bottom: `${pct}%`,
-                              transform:
-                                pct === 0
-                                  ? 'translateY(4px)'
-                                  : pct === 100
-                                  ? 'translateY(6px)'
-                                  : 'translateY(50%)',
-                            }}
-                          >
-                            {pct}%
-                          </span>
-                          <div
-                            className="absolute left-9 right-0 border-t border-dashed border-[#1E293B] pointer-events-none"
-                            style={{ bottom: `${pct}%` }}
-                          />
-                        </React.Fragment>
-                      ))}
-
-                      {snap.quarterlyMix.map((q) => {
-                        const hasData = q.totalValue > 0;
-                        return (
-                          <div
-                            key={q.quarter}
-                            className="flex-1 h-full flex flex-col justify-end items-center z-10"
-                            title={`${q.label}: Fokus ${q.focusPct}% | New ${q.newPct}% | Reguler ${q.regularPct}%`}
-                          >
-                            {hasData ? (
-                              <div className="w-10 sm:w-11 h-full flex flex-col justify-end rounded-t-sm overflow-hidden">
-                                {q.focusPct > 0 && (
-                                  <div
-                                    className="w-full bg-[#FF6B00] flex items-center justify-center text-[9.5px] font-mono tabular-nums font-bold text-white"
-                                    style={{ height: `${q.focusPct}%` }}
-                                  >
-                                    {q.focusPct >= 14 ? `${q.focusPct}%` : ''}
-                                  </div>
-                                )}
-                                {q.newPct > 0 && (
-                                  <div
-                                    className="w-full bg-[#2563EB] flex items-center justify-center text-[9.5px] font-mono tabular-nums font-bold text-white"
-                                    style={{ height: `${q.newPct}%` }}
-                                  >
-                                    {q.newPct >= 14 ? `${q.newPct}%` : ''}
-                                  </div>
-                                )}
-                                {q.regularPct > 0 && (
-                                  <div
-                                    className="w-full bg-[#00D2FF] flex items-center justify-center text-[9.5px] font-mono tabular-nums font-bold text-slate-950"
-                                    style={{ height: `${q.regularPct}%` }}
-                                  >
-                                    {q.regularPct >= 14 ? `${q.regularPct}%` : ''}
-                                  </div>
-                                )}
-                              </div>
-                            ) : (
-                              <div className="w-10 sm:w-11 h-1.5 bg-[#1B2436] rounded-t-sm" />
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    <div className="flex items-center gap-3 pl-9 pr-2 pt-1.5 text-[9.5px] font-bold text-slate-400">
-                      {snap.quarterlyMix.map((q) => (
-                        <span key={q.quarter} className="flex-1 text-center whitespace-nowrap">
-                          {q.label}
-                        </span>
-                      ))}
-                    </div>
-
-                    <div className="flex items-center justify-center gap-3.5 pt-1.5 text-[10px] text-slate-300 flex-wrap">
-                      <span className="inline-flex items-center gap-1">
-                        <span className="w-2 h-2 rounded-full bg-[#FF6B00]" />
-                        Produk Fokus
-                      </span>
-                      <span className="inline-flex items-center gap-1">
-                        <span className="w-2 h-2 rounded-full bg-[#2563EB]" />
-                        Produk New
-                      </span>
-                      <span className="inline-flex items-center gap-1">
-                        <span className="w-2 h-2 rounded-full bg-[#00D2FF]" />
-                        Produk Reguler
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* ROW 3: PERBANDINGAN PERFORMA BRAND (MoM) + PERBANDINGAN PERFORMA SALES (MoM) (Full-Width Stack so all columns are 100% visible) */}
-              <div className="flex flex-col gap-2.5">
-                {/* PANEL 3A: BRAND COMPARISON (MoM) */}
-                <div className="w-full bg-[#121926] border border-[#1F293B] rounded-xl p-3 flex flex-col justify-between">
-                  <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
-                    <h2 className="text-[11px] font-extrabold uppercase tracking-wider text-slate-100">
-                      PERBANDINGAN PERFORMA BRAND (MoM)
-                    </h2>
-                    <span className="text-[10px] font-bold text-[#FF6B00] whitespace-nowrap font-mono">
-                      {snap.previousPeriodLabel || 'OKTOBER 2026'} vs {snap.currentPeriodLabel || 'NOVEMBER 2026'}
-                    </span>
-                  </div>
-
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-[11px] text-left border-collapse">
-                      <thead>
-                        <tr className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 border-b border-[#1E293B]">
-                          <th className="py-1.5 pr-3 whitespace-nowrap">BRAND</th>
-                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">BLN LALU ({snap.previousPeriodLabel || 'OKTOBER 2026'})</th>
-                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">BLN INI ({snap.currentPeriodLabel || 'NOVEMBER 2026'})</th>
-                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">SELISIH (Δ)</th>
-                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">MoM</th>
-                          <th className="py-1.5 pl-2.5 text-right whitespace-nowrap">SHARE</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
-                        {snap.brandComparisonRows.map((row) => {
-                          const delta = row.current - row.previous;
-                          return (
-                            <tr key={row.name} className="hover:bg-[#172033] transition-colors">
-                              <td className="py-1.5 pr-3 font-sans font-semibold text-slate-200 whitespace-nowrap">
-                                <span className="inline-flex items-center gap-1.5">
-                                  <span
-                                    className="w-2 h-2 rounded-xs shrink-0"
-                                    style={{ backgroundColor: row.color }}
-                                  />
-                                  <span>{row.name}</span>
-                                </span>
-                              </td>
-                              <td
-                                className="py-1.5 px-2.5 text-right text-slate-400 whitespace-nowrap"
-                                title={formatRupiah(row.previous)}
-                              >
-                                {formatRupiah(row.previous)}
-                              </td>
-                              <td
-                                className="py-1.5 px-2.5 text-right font-bold text-white whitespace-nowrap"
-                                title={formatRupiah(row.current)}
-                              >
-                                {formatRupiah(row.current)}
-                              </td>
-                              <td
-                                className={`py-1.5 px-2.5 text-right font-bold whitespace-nowrap ${
-                                  delta >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                                }`}
-                                title={formatRupiah(delta)}
-                              >
-                                {delta >= 0 ? `+${formatCompactIdr(delta)}` : `-${formatCompactIdr(Math.abs(delta))}`}
-                              </td>
-                              <td
-                                className={`py-1.5 px-2.5 text-right font-bold whitespace-nowrap ${
-                                  row.growth >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                                }`}
-                              >
-                                {row.growth >= 0 ? `+${row.growth}% ↑` : `${row.growth}% ↓`}
-                              </td>
-                              <td className="py-1.5 pl-2.5 text-right text-slate-300 font-semibold whitespace-nowrap">
-                                {row.sharePct}%
-                              </td>
-                            </tr>
-                          );
-                        })}
-
-                        {snap.brandComparisonRows.length === 0 && (
-                          <tr>
-                            <td colSpan={6} className="py-5 text-center font-sans text-slate-500">
-                              Data perbandingan belum tersedia pada filter ini.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                      <tfoot>
-                        {(() => {
-                          const totalDelta =
-                            snap.brandComparisonTotals.current - snap.brandComparisonTotals.previous;
-                          return (
-                            <tr className="border-t border-[#28354D] font-mono tabular-nums text-[11px]">
-                              <td className="pt-2 pr-3 font-sans font-extrabold text-white whitespace-nowrap">
-                                TOTAL PORTFOLIO ({snap.brandComparisonRows.length} Brand)
-                              </td>
-                              <td
-                                className="pt-2 px-2.5 text-right font-bold text-slate-300 whitespace-nowrap"
-                                title={formatRupiah(snap.brandComparisonTotals.previous)}
-                              >
-                                {formatRupiah(snap.brandComparisonTotals.previous)}
-                              </td>
-                              <td
-                                className="pt-2 px-2.5 text-right font-black text-[#FF6B00] whitespace-nowrap"
-                                title={formatRupiah(snap.brandComparisonTotals.current)}
-                              >
-                                {formatRupiah(snap.brandComparisonTotals.current)}
-                              </td>
-                              <td
-                                className={`pt-2 px-2.5 text-right font-bold whitespace-nowrap ${
-                                  totalDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                                }`}
-                                title={formatRupiah(totalDelta)}
-                              >
-                                {totalDelta >= 0
-                                  ? `+${formatCompactIdr(totalDelta)}`
-                                  : `-${formatCompactIdr(Math.abs(totalDelta))}`}
-                              </td>
-                              <td
-                                className={`pt-2 px-2.5 text-right font-bold whitespace-nowrap ${
-                                  snap.brandComparisonTotals.growth >= 0
-                                    ? 'text-emerald-400'
-                                    : 'text-rose-400'
-                                }`}
-                              >
-                                {snap.brandComparisonTotals.growth >= 0 ? '+' : ''}
-                                {snap.brandComparisonTotals.growth}%
-                              </td>
-                              <td className="pt-2 pl-2.5 text-right font-bold text-white whitespace-nowrap">
-                                100.0%
-                              </td>
-                            </tr>
-                          );
-                        })()}
-                      </tfoot>
-                    </table>
-                  </div>
-                </div>
-
-                {/* PANEL 3B: PERBANDINGAN PERFORMA SALES (MoM) */}
-                <div className="w-full bg-[#121926] border border-[#1F293B] rounded-xl p-3 flex flex-col justify-between">
-                  <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h2 className="text-[11px] font-extrabold uppercase tracking-wider text-slate-100">
-                        PERBANDINGAN PERFORMA SALES (MoM)
-                      </h2>
-                      {snap.activeDayRangeLabel && (
-                        <span className="px-1.5 py-0.5 rounded bg-[#FF6B00]/15 border border-[#FF6B00]/40 text-[#FF6B00] text-[9.5px] font-mono font-bold whitespace-nowrap">
-                          {snap.activeDayRangeLabel}
-                        </span>
-                      )}
-                    </div>
-                    <span className="text-[10px] font-bold text-[#00D2FF] whitespace-nowrap font-mono">
-                      {snap.previousPeriodLabel || 'OKTOBER 2026'} vs {snap.currentPeriodLabel || 'NOVEMBER 2026'}
-                    </span>
-                  </div>
-
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-[11px] text-left border-collapse">
-                      <thead>
-                        <tr className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 border-b border-[#1E293B]">
-                          <th className="py-1.5 pr-3 whitespace-nowrap">NAMA SALES</th>
-                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">
-                            {snap.previousPeriodLabel || 'OKTOBER 2026'}
-                          </th>
-                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">
-                            {snap.currentPeriodLabel || 'NOVEMBER 2026'}
-                          </th>
-                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">SELISIH (Δ)</th>
-                          <th className="py-1.5 px-2.5 text-right whitespace-nowrap">MoM (%)</th>
-                          <th className="py-1.5 pl-2.5 text-right whitespace-nowrap">SHARE</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
-                        {snap.salesComparisonRows.map((row) => (
-                          <tr key={row.name} className="hover:bg-[#172033] transition-colors">
-                            <td className="py-1.5 pr-3 font-sans font-semibold text-slate-200 whitespace-nowrap">
-                              <div className="inline-flex items-center gap-1.5">
-                                <span
-                                  className="w-2 h-2 rounded-xs shrink-0"
-                                  style={{ backgroundColor: row.color }}
-                                />
-                                <span>{row.name}</span>
-                                <span className="text-[9.5px] text-slate-400 font-normal">
-                                  ({row.subLabel})
-                                </span>
-                              </div>
-                            </td>
-                            <td
-                              className="py-1.5 px-2.5 text-right text-slate-400 whitespace-nowrap"
-                              title={formatRupiah(row.previous)}
-                            >
-                              {formatRupiah(row.previous)}
-                            </td>
-                            <td
-                              className="py-1.5 px-2.5 text-right font-bold text-white whitespace-nowrap"
-                              title={formatRupiah(row.current)}
-                            >
-                              {formatRupiah(row.current)}
-                            </td>
-                            <td
-                              className={`py-1.5 px-2.5 text-right font-bold whitespace-nowrap ${
-                                row.delta >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                              }`}
-                              title={formatRupiah(row.delta)}
-                            >
-                              {row.delta >= 0
-                                ? `+${formatCompactIdr(row.delta)}`
-                                : `-${formatCompactIdr(Math.abs(row.delta))}`}
-                            </td>
-                            <td
-                              className={`py-1.5 px-2.5 text-right font-bold whitespace-nowrap ${
-                                row.growth >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                              }`}
-                            >
-                              {row.growth >= 0 ? `+${row.growth}% ↑` : `${row.growth}% ↓`}
-                            </td>
-                            <td className="py-1.5 pl-2.5 text-right text-cyan-300 font-semibold whitespace-nowrap">
-                              {row.sharePct}%
-                            </td>
-                          </tr>
-                        ))}
-
-                        {snap.salesComparisonRows.length === 0 && (
-                          <tr>
-                            <td colSpan={6} className="py-5 text-center font-sans text-slate-500">
-                              Belum ada data perbandingan Sales pada filter periode ini.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                      <tfoot>
-                        <tr className="border-t border-[#28354D] font-mono tabular-nums text-[11px]">
-                          <td className="pt-2 pr-3 font-sans font-extrabold text-white whitespace-nowrap">
-                            TOTAL TIM SALES ({snap.salesComparisonRows.length})
-                          </td>
-                          <td
-                            className="pt-2 px-2.5 text-right font-bold text-slate-300 whitespace-nowrap"
-                            title={formatRupiah(snap.salesComparisonTotals.previous)}
-                          >
-                            {formatRupiah(snap.salesComparisonTotals.previous)}
-                          </td>
-                          <td
-                            className="pt-2 px-2.5 text-right font-black text-[#00D2FF] whitespace-nowrap"
-                            title={formatRupiah(snap.salesComparisonTotals.current)}
-                          >
-                            {formatRupiah(snap.salesComparisonTotals.current)}
-                          </td>
-                          <td
-                            className={`pt-2 px-2.5 text-right font-bold whitespace-nowrap ${
-                              snap.salesComparisonTotals.delta >= 0
-                                ? 'text-emerald-400'
-                                : 'text-rose-400'
-                            }`}
-                            title={formatRupiah(snap.salesComparisonTotals.delta)}
-                          >
-                            {snap.salesComparisonTotals.delta >= 0
-                              ? `+${formatCompactIdr(snap.salesComparisonTotals.delta)}`
-                              : `-${formatCompactIdr(Math.abs(snap.salesComparisonTotals.delta))}`}
-                          </td>
-                          <td
-                            className={`pt-2 px-2.5 text-right font-bold whitespace-nowrap ${
-                              snap.salesComparisonTotals.growth >= 0
-                                ? 'text-emerald-400'
-                                : 'text-rose-400'
-                            }`}
-                          >
-                            {snap.salesComparisonTotals.growth >= 0 ? '+' : ''}
-                            {snap.salesComparisonTotals.growth}%
-                          </td>
-                          <td className="pt-2 pl-2.5 text-right font-bold text-white whitespace-nowrap">
-                            100.0%
-                          </td>
-                        </tr>
-                      </tfoot>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
-              {/* ROW 4: TRAJEKTORI OMSET BULANAN + KANAL TOKO & INTELIJEN ALERT */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5">
-                <TrajectoryChartCard
-                  monthlyTrajectory={snap.monthlyTrajectory}
-                  avgMonthlyRevenue={snap.avgMonthlyRevenue}
-                  selectedYear={snap.selectedYear}
-                  onOpenTrendView={() => handleSelectLens('tren_bulanan')}
-                />
-
-                <div className="lg:col-span-5 bg-[#121926] border border-[#1F293B] rounded-xl p-3 flex flex-col justify-between gap-2.5">
-                  <div>
-                    <h2 className="text-[11px] font-extrabold uppercase tracking-wider text-slate-100 mb-2">
-                      KANAL TOKO &amp; INTELIJEN ALERT
-                    </h2>
-
-                    <div className="space-y-2 text-xs">
-                      <div className="space-y-1">
-                        <div className="flex justify-between items-center gap-2 text-[10.5px]">
-                          <span className="text-slate-200 font-semibold whitespace-nowrap">
-                            Toko BA ({snap.storeBaSummary.tokoBaCount})
-                          </span>
-                          <span
-                            className="font-mono tabular-nums font-bold text-[#FF6B00] whitespace-nowrap"
-                            title={formatRupiah(snap.storeBaSummary.tokoBaTotalRevenue)}
-                          >
-                            {snap.storeBaSummary.tokoBaRevenuePercent}% · {formatCompactIdr(snap.storeBaSummary.tokoBaTotalRevenue)}
-                          </span>
-                        </div>
-                        <div className="w-full h-1.5 bg-[#1D283A] rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-[#FF6B00] rounded-full"
-                            style={{ width: `${snap.storeBaSummary.tokoBaRevenuePercent}%` }}
-                          />
-                        </div>
-                      </div>
-
-                      <div className="space-y-1">
-                        <div className="flex justify-between items-center gap-2 text-[10.5px]">
-                          <span className="text-slate-200 font-semibold whitespace-nowrap">
-                            Non-BA ({snap.storeBaSummary.tokoNonBaCount})
-                          </span>
-                          <span
-                            className="font-mono tabular-nums font-bold text-[#3B82F6] whitespace-nowrap"
-                            title={formatRupiah(snap.storeBaSummary.tokoNonBaTotalRevenue)}
-                          >
-                            {snap.storeBaSummary.tokoNonBaRevenuePercent}% · {formatCompactIdr(snap.storeBaSummary.tokoNonBaTotalRevenue)}
-                          </span>
-                        </div>
-                        <div className="w-full h-1.5 bg-[#1D283A] rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-[#3B82F6] rounded-full"
-                            style={{ width: `${snap.storeBaSummary.tokoNonBaRevenuePercent}%` }}
-                          />
-                        </div>
-                      </div>
-
-                      <div className="space-y-1">
-                        <div className="flex justify-between items-center gap-2 text-[10.5px]">
-                          <span className="text-slate-200 font-semibold whitespace-nowrap">
-                            Sell Out / In
-                          </span>
-                          <span
-                            className="font-mono tabular-nums font-bold text-[#00D2FF] whitespace-nowrap"
-                            title={formatRupiah(snap.totalSellOut)}
-                          >
-                            {snap.sellThroughPct}% · {formatCompactIdr(snap.totalSellOut)}
-                          </span>
-                        </div>
-                        <div className="w-full h-1.5 bg-[#1D283A] rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-[#00D2FF] rounded-full"
-                            style={{ width: `${Math.min(100, snap.sellThroughPct)}%` }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 block">
-                      INTELLIGENCE ALERTS
-                    </span>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-1.5">
-                      {snap.alerts.map((al) => {
-                        const isWarn = al.severity === 'warning';
-                        return (
-                          <button
-                            key={al.id}
-                            type="button"
-                            onClick={() => onNavigateTab(al.targetTab as ActiveTab)}
-                            className={`w-full text-left p-2 rounded-lg border transition-colors cursor-pointer flex items-start gap-1.5 ${
-                              isWarn
-                                ? 'bg-amber-500/10 border-amber-500/35 hover:bg-amber-500/15'
-                                : 'bg-emerald-500/10 border-emerald-500/35 hover:bg-emerald-500/15'
-                            }`}
-                          >
-                            {isWarn ? (
-                              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
-                            ) : (
-                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
-                            )}
-                            <div className="min-w-0">
-                              <span
-                                className={`text-[10.5px] font-bold block leading-tight ${
-                                  isWarn ? 'text-amber-300' : 'text-emerald-300'
-                                }`}
-                              >
-                                {al.title}
-                              </span>
-                              <span className="text-[9.5px] text-slate-300 leading-tight block mt-0.5 line-clamp-2">
-                                {al.description}
-                              </span>
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* ROW 5: BOTTOM 5 SUMMARY CARDS STRIP */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-2.5 flex items-start gap-2.5">
-                  <div className="w-7 h-7 rounded-full bg-orange-500/15 border border-orange-500/30 text-[#FF6B00] flex items-center justify-center shrink-0 mt-0.5">
-                    <Target className="w-3.5 h-3.5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 block leading-none">
-                      REALISASI OMSET AKTIF
-                    </span>
-                    <span className="text-[12.5px] xl:text-[13px] font-black font-mono tabular-nums text-white block mt-1 whitespace-nowrap">
-                      {formatRupiah(snap.summary.totalRevenue)}
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-mono tabular-nums block whitespace-nowrap">
-                      Target: {formatRupiah(snap.targetTotal)}
-                    </span>
-                    <div className="w-full h-1.5 bg-[#1D283A] rounded-full overflow-hidden mt-1">
-                      <div
-                        className="h-full bg-[#FF6B00] rounded-full"
-                        style={{ width: `${targetProgressClamped}%` }}
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-2.5 flex items-start gap-2.5">
-                  <div className="w-7 h-7 rounded-lg bg-blue-500/15 border border-blue-500/30 text-[#3B82F6] flex items-center justify-center shrink-0 mt-0.5">
-                    <TrendingUp className="w-3.5 h-3.5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 block leading-none">
-                      PROYEKSI TAHUN {snap.selectedYear}
-                    </span>
-                    <span className="text-[12.5px] xl:text-[13px] font-black font-mono tabular-nums text-white block mt-1 whitespace-nowrap">
-                      {formatRupiah(snap.projectedYearEnd)}
-                    </span>
-                    <span className="text-[10px] font-mono tabular-nums font-bold text-emerald-400 block mt-0.5 whitespace-nowrap">
-                      Peak: {snap.peakMonth ? `${snap.peakMonth.shortMonth} (${formatCompactIdr(snap.peakMonth.totalValue)})` : '-'}
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-mono tabular-nums block whitespace-nowrap">
-                      Avg: {formatCompactIdr(snap.avgMonthlyRevenue)} / bln
-                    </span>
-                  </div>
-                </div>
-
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-2.5 flex items-start gap-2.5">
-                  <div className="w-7 h-7 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0 mt-0.5">
-                    <Star className="w-3.5 h-3.5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 block leading-none">
-                      PRODUK / SKU TERLARIS
-                    </span>
-                    <span
-                      className="text-[12.5px] font-extrabold text-white block mt-1 truncate"
-                      title={topSku?.name || '-'}
-                    >
-                      {topSku?.name || '-'}
-                    </span>
-                    <span className="text-[10px] font-mono tabular-nums font-bold text-[#FF6B00] block mt-0.5 whitespace-nowrap">
-                      {topSku ? `${formatCompactIdr(topSku.totalValue)} (${formatNumber(topSku.totalQty)} pcs)` : '-'}
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-mono tabular-nums block whitespace-nowrap">
-                      Kontribusi: {topSku ? `${topSku.contributionPercent.toFixed(1)}%` : '0%'}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-2.5 flex items-start gap-2.5">
-                  <div className="w-7 h-7 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 flex items-center justify-center shrink-0 mt-0.5">
-                    <ArrowUpRight className="w-3.5 h-3.5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 block leading-none">
-                      PERTUMBUHAN TERCEPAT
-                    </span>
-                    <span className="text-[12.5px] font-extrabold text-white block mt-1 truncate">
-                      {fastestGrowthArea?.name || topBrand?.name || '-'}
-                    </span>
-                    <span
-                      className={`text-[10px] font-mono tabular-nums font-bold block mt-0.5 whitespace-nowrap ${
-                        (fastestGrowthArea?.growth || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                      }`}
-                    >
-                      {fastestGrowthArea
-                        ? `${fastestGrowthArea.growth >= 0 ? '↑ +' : '↓ '}${fastestGrowthArea.growth}% MoM`
-                        : 'Periode Aktif'}
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-mono tabular-nums block whitespace-nowrap">
-                      Visit: {snap.salesVisitsCount} Sales · {snap.trainerVisitsCount} Trainer
-                    </span>
-                  </div>
-                </div>
-
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-2.5 flex items-start gap-2.5">
-                  <div className="w-7 h-7 rounded-lg bg-cyan-500/15 border border-cyan-500/30 text-[#00D2FF] flex items-center justify-center shrink-0 mt-0.5">
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400 block leading-none">
-                      PIUTANG &amp; DISIPLIN BA
-                    </span>
-                    <span className="text-[12.5px] font-black font-mono tabular-nums text-white block mt-1 whitespace-nowrap">
-                      Lancar ({snap.healthyBillsPct}%)
-                    </span>
-                    <span className="text-[10px] font-mono tabular-nums font-bold text-emerald-400 block mt-0.5 whitespace-nowrap">
-                      {snap.overdueBillsCount === 0
-                        ? 'Tagihan Sehat'
-                        : `${snap.overdueBillsCount} Nota > 30 Hari`}
-                    </span>
-                    <span
-                      className="text-[10px] text-slate-400 font-mono tabular-nums block whitespace-nowrap"
-                      title={`Denda BA: ${formatRupiah(snap.baTotalDenda)}`}
-                    >
-                      Denda BA: {formatCompactIdr(snap.baTotalDenda)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <OverviewDashboardPanel
+              snap={snap}
+              onOpenTrendView={handleOpenTrendView}
+              onNavigateTab={onNavigateTab}
+            />
           )}
 
-          {/* SUB-LENS: TREN PENCAPAIAN BULANAN & RINCIAN DATA */}
           {activeLens === 'tren_bulanan' && (
-            <div className="flex-1 flex flex-col gap-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
-                    Tren Pencapaian Bulanan &amp; Rincian Data
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Indikator Growth (Bulanan) serta Rincian Data Bulanan sesuai Filter Terintegrasi
-                  </p>
-                </div>
-                {filters.BULAN !== 'ALL' && (
-                  <button
-                    type="button"
-                    onClick={() => onChangeFilter('BULAN', 'ALL')}
-                    className="px-3 py-1.5 rounded-lg bg-[#FF6B00]/15 hover:bg-[#FF6B00]/25 border border-[#FF6B00]/40 text-[#FFB067] text-xs font-bold cursor-pointer transition-colors"
-                  >
-                    Tampilkan Semua Bulan (Jan–Des)
-                  </button>
-                )}
-              </div>
-
-              <TimeframeTrendChart
-                theme="dark"
-                data={trendChartData}
-                mode={trendTimeframeMode}
-                onModeChange={setTrendTimeframeMode}
-                selectedMonth={filters.BULAN}
-                filters={filters}
-                totalFilteredRecords={snap.effectiveFilteredCount}
-                spvTargetByMonth={monthlySpvTargetsData?.byKey}
-                spvScopeLabel={monthlySpvTargetsData?.spvScopeLabel}
-                targetMode={monthlySpvTargetsData?.targetMode}
-                targetEntityLabel={monthlySpvTargetsData?.targetEntityLabel}
-                onOpenTargetMgmt={() => onNavigateTab('target_mgmt')}
-              />
-            </div>
+            <TrenBulananDashboardPanel
+              trendChartData={trendChartData}
+              trendTimeframeMode={trendTimeframeMode}
+              onTrendTimeframeModeChange={setTrendTimeframeMode}
+              filters={filters}
+              effectiveFilteredCount={snap.effectiveFilteredCount}
+              monthlySpvTargetsData={monthlySpvTargetsData}
+              onShowAllMonths={handleShowAllMonths}
+              onOpenTargetMgmt={handleOpenTargetMgmt}
+            />
           )}
 
-          {/* SUB-LENS: AREA & TIM SALES */}
           {activeLens === 'regional' && (
             <RegionalSalesPanel
               sales={snap.targetMatrix.sales}
@@ -6685,1804 +5514,82 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
               spvs={snap.targetMatrix.spvs}
               ketFilter={filters.KET}
               selectedMonthLabel={snap.selectedMonthLabel}
-              onChangeKet={(ket) => onChangeFilter('KET', ket as DashboardFilters['KET'])}
+              onChangeKet={handleChangeKet}
               onNavigateTab={onNavigateTab}
             />
           )}
 
-          {/* SUB-LENS: MARKET SHARE MISSGLAM */}
           {activeLens === 'market_share' && marketShareData && (
-            <div className="flex-1 flex flex-col gap-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
-                    Market Share MissGlam (MG) — Semua Gerai
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Rekap Actual vs Omset Toko, Grafik Pergerakan &amp; Analisa Potensi Market Share (%) seluruh cabang MissGlam
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => onNavigateTab('market_share_mg')}
-                  className="px-3 py-1.5 rounded-lg bg-[#FF6B00] hover:bg-[#EA580C] text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
-                >
-                  <span>Kelola &amp; Input Market Share MG</span>
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
-                  <span className="text-[10px] font-bold uppercase text-slate-400 block">Rata-rata Market Share MG</span>
-                  <span className="text-xl font-black font-mono tabular-nums text-[#00D2FF] mt-1 block whitespace-nowrap">
-                    {formatSharePct(marketShareData.mgAvgSharePct)}
-                  </span>
-                </div>
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
-                  <span className="text-[10px] font-bold uppercase text-slate-400 block">Total Actual MG</span>
-                  <span className="text-xl font-black font-mono tabular-nums text-[#FF6B00] mt-1 block whitespace-nowrap">
-                    {formatRupiah(marketShareData.mgTotalActual)}
-                  </span>
-                </div>
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
-                  <span className="text-[10px] font-bold uppercase text-slate-400 block">Total Omset Toko MG</span>
-                  <span className="text-xl font-black font-mono tabular-nums text-white mt-1 block whitespace-nowrap">
-                    {formatRupiah(marketShareData.mgTotalStoreOmset)}
-                  </span>
-                </div>
-              </div>
-
-              {marketShareData.mgItems.length > 0 ? (
-                <>
-                  {/* Grafik Pergerakan & Perbandingan Market Share MissGlam */}
-                  <div className="bg-[#121926] border border-[#1F293B] rounded-xl overflow-hidden">
-                    <div className="px-4 py-3 border-b border-[#1E293B] bg-[#0F1623] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                      <div className="flex items-center gap-2.5">
-                        <div className="p-2 rounded-lg bg-pink-500/20 border border-pink-500/35 text-pink-400 shrink-0">
-                          <BarChart3 className="w-4 h-4" />
-                        </div>
-                        <div>
-                          <h3 className="text-xs sm:text-sm font-extrabold text-white">
-                            Grafik Pergerakan &amp; Perbandingan Market Share MissGlam
-                          </h3>
-                          <p className="text-[11px] text-slate-400 mt-0.5">
-                            Tren Market Share (%) antar bulan serta posisi &amp; perubahan setiap cabang terhadap rata-rata toko ({formatSharePct(marketShareData.mgStoreAnalytics.networkAvgShare)}).
-                          </p>
-                        </div>
-                      </div>
-                      {(mgFilterMonth !== 'ALL' || mgFilterStore !== 'ALL') && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setMgFilterMonth('ALL');
-                            setMgFilterStore('ALL');
-                          }}
-                          className="px-3 py-1.5 rounded-lg bg-[#1A2438] border border-[#2D3E5E] hover:bg-[#23314A] text-cyan-300 text-xs font-bold whitespace-nowrap shrink-0 cursor-pointer"
-                        >
-                          Reset Filter Grafik
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="flex flex-col divide-y divide-[#1E293B]">
-                      {/* Top Full-Width Chart: Monthly Market Share (%) Trend — all months visible on screen */}
-                      <div className="w-full p-4 flex flex-col justify-between space-y-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div>
-                            <h4 className="text-xs font-extrabold text-white">
-                              Tren Market Share Bulanan (%)
-                            </h4>
-                            <p className="text-[11px] text-slate-400 mt-0.5">
-                              Klik batang bulan untuk memfilter tabel. Angka di atas batang menunjukkan selisih poin % MoM.
-                            </p>
-                          </div>
-                          <span className="text-[11px] font-mono text-slate-400 tabular-nums">
-                            {marketShareData.mgStoreAnalytics.monthlyTrendChartData.length} Bulan Terdata
-                          </span>
-                        </div>
-
-                        <div className="relative pt-7">
-                          {mgHoveredChartMonthIdx !== null &&
-                            marketShareData.mgStoreAnalytics.monthlyTrendChartData[mgHoveredChartMonthIdx] &&
-                            (() => {
-                              const hm = marketShareData.mgStoreAnalytics.monthlyTrendChartData[mgHoveredChartMonthIdx];
-                              return (
-                                <div className="absolute top-0 left-1/2 -translate-x-1/2 bg-[#080D16] text-white px-3.5 py-2 rounded-lg shadow-xl text-xs z-20 pointer-events-none border border-[#2D3E5E] whitespace-nowrap">
-                                  <div className="flex items-center gap-2">
-                                    <span className="font-bold">{hm.monthPeriod}</span>
-                                    <span className="text-slate-500">·</span>
-                                    <span className="text-[#00D2FF] font-mono font-extrabold">
-                                      {formatSharePct(hm.marketSharePercent)}
-                                    </span>
-                                  </div>
-                                  <div className="text-[11px] font-mono text-slate-300 tabular-nums mt-0.5">
-                                    Actual {formatCompactIdr(hm.totalActual)} / Omset{' '}
-                                    {formatCompactIdr(hm.totalStoreOmset)} ({hm.storeCount} toko)
-                                  </div>
-                                </div>
-                              );
-                            })()}
-
-                          <div className="flex items-stretch gap-2">
-                            <div className="flex flex-col justify-between text-right font-mono text-[10px] text-slate-500 tabular-nums py-7 pr-2 border-r border-[#1E293B] shrink-0 w-11">
-                              <span>{formatSharePct(mgMaxChartSharePct)}</span>
-                              <span>{formatSharePct(mgMaxChartSharePct * 0.5)}</span>
-                              <span>0%</span>
-                            </div>
-
-                            <div className="flex-1 flex items-end gap-1.5 sm:gap-2.5 h-56 pt-8 pb-2 min-w-0">
-                              {marketShareData.mgStoreAnalytics.monthlyTrendChartData.map((pt, idx) => {
-                                const heightPct =
-                                  mgMaxChartSharePct > 0
-                                    ? Math.max(6, (Math.max(0, pt.marketSharePercent) / mgMaxChartSharePct) * 100)
-                                    : 6;
-                                const isSelected = mgFilterMonth.toUpperCase() === pt.monthPeriod.toUpperCase();
-                                const isUp = pt.deltaSharePercent !== null && pt.deltaSharePercent > 0;
-                                const isDown = pt.deltaSharePercent !== null && pt.deltaSharePercent < 0;
-
-                                return (
-                                  <button
-                                    key={pt.monthPeriod}
-                                    type="button"
-                                    onClick={() =>
-                                      setMgFilterMonth(isSelected ? 'ALL' : pt.monthPeriod)
-                                    }
-                                    onMouseEnter={() => setMgHoveredChartMonthIdx(idx)}
-                                    onMouseLeave={() => setMgHoveredChartMonthIdx(null)}
-                                    className="flex-1 min-w-0 flex flex-col items-center h-full justify-end group cursor-pointer focus:outline-none"
-                                  >
-                                    <div className="mb-1 flex flex-col items-center w-full">
-                                      {pt.deltaSharePercent !== null ? (
-                                        <span
-                                          className={`text-[9.5px] font-mono font-bold tabular-nums leading-none truncate max-w-full ${
-                                            isUp
-                                              ? 'text-emerald-400'
-                                              : isDown
-                                              ? 'text-rose-400'
-                                              : 'text-slate-400'
-                                          }`}
-                                        >
-                                          {pt.deltaSharePercent > 0 ? '+' : ''}
-                                          {pt.deltaSharePercent.toFixed(1).replace('.', ',')}%
-                                        </span>
-                                      ) : (
-                                        <span className="text-[9.5px] font-mono text-slate-500 leading-none">
-                                          Awal
-                                        </span>
-                                      )}
-                                      <span className="text-[10.5px] font-mono font-extrabold text-[#00D2FF] tabular-nums mt-0.5 truncate max-w-full">
-                                        {formatSharePct(pt.marketSharePercent)}
-                                      </span>
-                                    </div>
-
-                                    <div className="w-full relative flex items-end justify-center h-full px-1">
-                                      <div
-                                        style={{ height: `${heightPct}%` }}
-                                        className={`w-full max-w-[46px] rounded-t-md transition-all duration-200 ${
-                                          isSelected
-                                            ? 'bg-pink-500 ring-2 ring-pink-300'
-                                            : isUp
-                                            ? 'bg-emerald-500 group-hover:bg-emerald-400'
-                                            : isDown
-                                            ? 'bg-rose-500 group-hover:bg-rose-400'
-                                            : 'bg-pink-500/85 group-hover:bg-pink-400'
-                                        }`}
-                                      />
-                                    </div>
-
-                                    <div className="mt-2 text-center w-full">
-                                      <span className="block text-[10px] font-bold text-slate-200 truncate">
-                                        {pt.monthPeriod}
-                                      </span>
-                                      <span className="block text-[9.5px] font-mono text-slate-400 tabular-nums truncate">
-                                        {formatCompactIdr(pt.totalActual)}
-                                      </span>
-                                    </div>
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Bottom Full-Width Chart: Per-Store Market Share (%) & Movement Comparison */}
-                      <div className="w-full p-4 space-y-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div>
-                            <h4 className="text-xs font-extrabold text-white">
-                              Perbandingan &amp; Perubahan Market Share per Toko
-                            </h4>
-                            <p className="text-[11px] text-slate-400 mt-0.5">
-                              Garis putus-putus menandai rata-rata jaringan ({formatSharePct(marketShareData.mgStoreAnalytics.networkAvgShare)}). Klik baris toko untuk filter tabel.
-                            </p>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-300">
-                            <span className="flex items-center gap-1.5">
-                              <span className="w-2.5 h-2.5 rounded-xs bg-emerald-500 inline-block" />
-                              Naik
-                            </span>
-                            <span className="flex items-center gap-1.5">
-                              <span className="w-2.5 h-2.5 rounded-xs bg-rose-500 inline-block" />
-                              Turun
-                            </span>
-                            <span className="flex items-center gap-1.5">
-                              <span className="w-2.5 h-2.5 rounded-xs bg-pink-500 inline-block" />
-                              Stabil / 1 Bln
-                            </span>
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5 max-h-[340px] overflow-y-auto pr-1">
-                          {marketShareData.mgStoreAnalytics.allActiveStores.map((st) => {
-                            const barPct =
-                              mgMaxChartSharePct > 0
-                                ? Math.min(100, Math.max(2, (Math.max(0, st.latestShare) / mgMaxChartSharePct) * 100))
-                                : 0;
-                            const avgLinePct =
-                              mgMaxChartSharePct > 0
-                                ? Math.min(100, Math.max(0, (marketShareData.mgStoreAnalytics.networkAvgShare / mgMaxChartSharePct) * 100))
-                                : 0;
-                            const isSelected = mgFilterStore.toUpperCase() === st.storeName.toUpperCase();
-                            const barColor =
-                              st.trend === 'up'
-                                ? 'bg-emerald-500'
-                                : st.trend === 'down'
-                                ? 'bg-rose-500'
-                                : 'bg-pink-500';
-
-                            return (
-                              <button
-                                key={st.storeName}
-                                type="button"
-                                onClick={() =>
-                                  setMgFilterStore(isSelected ? 'ALL' : st.storeName)
-                                }
-                                className={`w-full text-left px-2.5 py-2 rounded-lg transition-colors cursor-pointer border ${
-                                  isSelected
-                                    ? 'bg-pink-500/15 border-pink-500/45'
-                                    : 'border-[#1A2334] hover:bg-[#172033]'
-                                }`}
-                              >
-                                <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-1">
-                                  <div className="flex items-center gap-2 min-w-0">
-                                    <span className="font-extrabold text-white truncate">
-                                      {st.storeName}
-                                    </span>
-                                    <span className="text-[11px] font-mono text-slate-400">
-                                      {st.latestMonth}
-                                    </span>
-                                  </div>
-                                  <div className="flex items-center gap-2.5 font-mono tabular-nums shrink-0">
-                                    {st.deltaShare !== null ? (
-                                      <span
-                                        className={`text-[11px] font-bold ${
-                                          st.trend === 'up'
-                                            ? 'text-emerald-400'
-                                            : st.trend === 'down'
-                                            ? 'text-rose-400'
-                                            : 'text-slate-400'
-                                        }`}
-                                      >
-                                        {st.trend === 'up'
-                                          ? `▲ +${st.deltaShare.toFixed(1).replace('.', ',')}%`
-                                          : st.trend === 'down'
-                                          ? `▼ ${st.deltaShare.toFixed(1).replace('.', ',')}%`
-                                          : 'Stabil (0,0%)'}
-                                      </span>
-                                    ) : (
-                                      <span className="text-[11px] text-slate-500">1 Bulan</span>
-                                    )}
-                                    <span className="font-extrabold text-[#00D2FF] min-w-[52px] text-right">
-                                      {formatSharePct(st.latestShare)}
-                                    </span>
-                                  </div>
-                                </div>
-
-                                <div className="relative h-2.5 w-full rounded-full bg-[#1B2436] overflow-visible">
-                                  <div
-                                    className={`h-full rounded-full transition-all duration-300 ${barColor}`}
-                                    style={{ width: `${barPct}%` }}
-                                  />
-                                  {marketShareData.mgStoreAnalytics.networkAvgShare > 0 && (
-                                    <div
-                                      title={`Rata-rata: ${formatSharePct(marketShareData.mgStoreAnalytics.networkAvgShare)}`}
-                                      className="absolute top-[-3px] bottom-[-3px] w-0.5 border-l-2 border-dashed border-cyan-300/80 pointer-events-none"
-                                      style={{ left: `${avgLinePct}%` }}
-                                    />
-                                  )}
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Analisa Perubahan & Potensi Market Share Toko MissGlam */}
-                  <div className="bg-[#121926] border border-[#1F293B] rounded-xl overflow-hidden">
-                    <div className="px-4 py-3 border-b border-[#1E293B] bg-[#0F1623] flex flex-col lg:flex-row lg:items-center justify-between gap-2">
-                      <div>
-                        <h3 className="text-xs sm:text-sm font-extrabold text-white">
-                          Analisa Perubahan &amp; Potensi Market Share Toko MissGlam
-                        </h3>
-                        <p className="text-[11px] text-slate-400 mt-0.5">
-                          Pemetaan otomatis cabang yang mengalami peningkatan, penurunan antar bulan, serta peluang terbesar untuk ditingkatkan.
-                        </p>
-                      </div>
-                      <div className="text-xs font-mono text-slate-300 tabular-nums">
-                        Rata-rata jaringan:{' '}
-                        <strong className="text-[#00D2FF]">
-                          {formatSharePct(marketShareData.mgStoreAnalytics.networkAvgShare)}
-                        </strong>
-                        {marketShareData.mgStoreAnalytics.topStoreName && (
-                          <>
-                            <span className="mx-1.5 text-slate-600">·</span>
-                            Tertinggi:{' '}
-                            <strong className="text-emerald-400">
-                              {marketShareData.mgStoreAnalytics.topStoreName} (
-                              {formatSharePct(marketShareData.mgStoreAnalytics.topShare)})
-                            </strong>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 lg:grid-cols-3 divide-y lg:divide-y-0 lg:divide-x divide-[#1E293B]">
-                      {/* Column 1: Increasing Market Share */}
-                      <div className="p-4 space-y-2.5">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <TrendingUp className="w-4 h-4 text-emerald-400 shrink-0" />
-                            <h4 className="text-xs font-extrabold text-white">
-                              Toko Mengalami Peningkatan
-                            </h4>
-                          </div>
-                          <span className="text-xs font-mono font-bold text-emerald-400 tabular-nums">
-                            {marketShareData.mgStoreAnalytics.increasingStores.length} Toko
-                          </span>
-                        </div>
-
-                        {marketShareData.mgStoreAnalytics.increasingStores.length === 0 ? (
-                          <p className="text-xs text-slate-400 leading-relaxed pt-1">
-                            {marketShareData.mgStoreAnalytics.allActiveStores.some((s) => s.monthsCount >= 2)
-                              ? 'Belum ada toko yang mencatat kenaikan market share dibanding bulan sebelumnya.'
-                              : 'Perbandingan kenaikan akan otomatis tampil setelah minimal 2 bulan data diinput untuk toko yang sama.'}
-                          </p>
-                        ) : (
-                          <div className="divide-y divide-[#1A2334] max-h-[300px] overflow-y-auto pr-1">
-                            {marketShareData.mgStoreAnalytics.increasingStores.map((st) => {
-                              const isSelected = mgFilterStore.toUpperCase() === st.storeName.toUpperCase();
-                              return (
-                                <button
-                                  key={st.storeName}
-                                  type="button"
-                                  onClick={() =>
-                                    setMgFilterStore(isSelected ? 'ALL' : st.storeName)
-                                  }
-                                  className={`w-full text-left py-2.5 first:pt-1 last:pb-0 rounded-md px-1.5 transition-colors cursor-pointer ${
-                                    isSelected ? 'bg-emerald-500/15' : 'hover:bg-[#172033]'
-                                  }`}
-                                >
-                                  <div className="flex items-center justify-between gap-2 text-xs">
-                                    <span className="font-extrabold text-white">
-                                      {st.storeName}
-                                    </span>
-                                    <span className="font-mono font-extrabold text-emerald-400 tabular-nums">
-                                      ▲ +{st.deltaShare?.toFixed(1).replace('.', ',')}%
-                                    </span>
-                                  </div>
-                                  <div className="text-[11px] font-mono text-slate-300 tabular-nums mt-0.5">
-                                    {st.prevMonth}: {formatSharePct(st.prevShare ?? 0)} → {st.latestMonth}:{' '}
-                                    <strong className="text-white">
-                                      {formatSharePct(st.latestShare)}
-                                    </strong>
-                                  </div>
-                                  {st.deltaActual !== null && (
-                                    <div className="text-[11px] text-slate-400 font-mono tabular-nums mt-0.5">
-                                      Actual {st.deltaActual >= 0 ? '+' : ''}
-                                      {formatCompactIdr(st.deltaActual)} vs bulan lalu
-                                    </div>
-                                  )}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Column 2: Decreasing Market Share */}
-                      <div className="p-4 space-y-2.5">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <TrendingDown className="w-4 h-4 text-rose-400 shrink-0" />
-                            <h4 className="text-xs font-extrabold text-white">
-                              Toko Mengalami Penurunan
-                            </h4>
-                          </div>
-                          <span className="text-xs font-mono font-bold text-rose-400 tabular-nums">
-                            {marketShareData.mgStoreAnalytics.decreasingStores.length} Toko
-                          </span>
-                        </div>
-
-                        {marketShareData.mgStoreAnalytics.decreasingStores.length === 0 ? (
-                          <p className="text-xs text-slate-400 leading-relaxed pt-1">
-                            {marketShareData.mgStoreAnalytics.allActiveStores.some((s) => s.monthsCount >= 2)
-                              ? 'Tidak ada toko yang mengalami penurunan market share pada periode terbaru.'
-                              : 'Perbandingan penurunan akan otomatis tampil setelah minimal 2 bulan data diinput untuk toko yang sama.'}
-                          </p>
-                        ) : (
-                          <div className="divide-y divide-[#1A2334] max-h-[300px] overflow-y-auto pr-1">
-                            {marketShareData.mgStoreAnalytics.decreasingStores.map((st) => {
-                              const isSelected = mgFilterStore.toUpperCase() === st.storeName.toUpperCase();
-                              return (
-                                <button
-                                  key={st.storeName}
-                                  type="button"
-                                  onClick={() =>
-                                    setMgFilterStore(isSelected ? 'ALL' : st.storeName)
-                                  }
-                                  className={`w-full text-left py-2.5 first:pt-1 last:pb-0 rounded-md px-1.5 transition-colors cursor-pointer ${
-                                    isSelected ? 'bg-rose-500/15' : 'hover:bg-[#172033]'
-                                  }`}
-                                >
-                                  <div className="flex items-center justify-between gap-2 text-xs">
-                                    <span className="font-extrabold text-white">
-                                      {st.storeName}
-                                    </span>
-                                    <span className="font-mono font-extrabold text-rose-400 tabular-nums">
-                                      ▼ {st.deltaShare?.toFixed(1).replace('.', ',')}%
-                                    </span>
-                                  </div>
-                                  <div className="text-[11px] font-mono text-slate-300 tabular-nums mt-0.5">
-                                    {st.prevMonth}: {formatSharePct(st.prevShare ?? 0)} → {st.latestMonth}:{' '}
-                                    <strong className="text-white">
-                                      {formatSharePct(st.latestShare)}
-                                    </strong>
-                                  </div>
-                                  <div className="text-[11px] text-slate-400 font-mono tabular-nums mt-0.5">
-                                    Puncak: {formatSharePct(st.peakShare)} ({st.peakMonth})
-                                    {st.deltaActual !== null
-                                      ? ` · Actual ${st.deltaActual >= 0 ? '+' : ''}${formatCompactIdr(st.deltaActual)}`
-                                      : ''}
-                                  </div>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Column 3: High Potential Stores */}
-                      <div className="p-4 space-y-2.5">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <Target className="w-4 h-4 text-pink-400 shrink-0" />
-                            <h4 className="text-xs font-extrabold text-white">
-                              Toko Berpotensi Ditingkatkan
-                            </h4>
-                          </div>
-                          <span className="text-xs font-mono font-bold text-pink-400 tabular-nums">
-                            {marketShareData.mgStoreAnalytics.potentialStores.length} Toko
-                          </span>
-                        </div>
-
-                        {marketShareData.mgStoreAnalytics.potentialStores.length === 0 ? (
-                          <p className="text-xs text-slate-400 leading-relaxed pt-1">
-                            Semua toko aktif telah mencapai performa optimal terhadap tolok ukur saat ini.
-                          </p>
-                        ) : (
-                          <div className="divide-y divide-[#1A2334] max-h-[300px] overflow-y-auto pr-1">
-                            {marketShareData.mgStoreAnalytics.potentialStores.map((st) => {
-                              const isSelected = mgFilterStore.toUpperCase() === st.storeName.toUpperCase();
-                              return (
-                                <button
-                                  key={st.storeName}
-                                  type="button"
-                                  onClick={() =>
-                                    setMgFilterStore(isSelected ? 'ALL' : st.storeName)
-                                  }
-                                  className={`w-full text-left py-2.5 first:pt-1 last:pb-0 rounded-md px-1.5 transition-colors cursor-pointer ${
-                                    isSelected ? 'bg-pink-500/15' : 'hover:bg-[#172033]'
-                                  }`}
-                                >
-                                  <div className="flex items-center justify-between gap-2 text-xs">
-                                    <span className="font-extrabold text-white">
-                                      {st.storeName}
-                                    </span>
-                                    <span className="font-mono font-extrabold text-pink-400 tabular-nums">
-                                      {st.upsideActualRp > 0
-                                        ? `+${formatCompactIdr(st.upsideActualRp)}`
-                                        : `Target ${formatSharePct(st.targetBenchmarkShare)}`}
-                                    </span>
-                                  </div>
-                                  <div className="text-[11px] font-mono text-slate-300 tabular-nums mt-0.5">
-                                    Share {formatSharePct(st.latestShare)} → Target{' '}
-                                    {formatSharePct(st.targetBenchmarkShare)} · Omset{' '}
-                                    {formatCompactIdr(st.latestOmset)}
-                                  </div>
-                                  <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
-                                    {st.potentialReason}
-                                  </p>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div>
-                    <h3 className="text-xs sm:text-sm font-extrabold text-white">
-                      Grafik &amp; Analisa Market Share Belum Tersedia
-                    </h3>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      Input minimal 1 data toko MissGlam terlebih dahulu untuk menampilkan Grafik Pergerakan, Perbandingan Toko, serta Analisa Perubahan &amp; Potensi Market Share.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('market_share_mg')}
-                    className="px-3.5 py-2 rounded-lg bg-pink-600 hover:bg-pink-500 text-white text-xs font-bold whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    Input Data Market Share MG
-                  </button>
-                </div>
-              )}
-
-              <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3.5">
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h3 className="text-xs font-extrabold uppercase tracking-wider text-white">
-                      Rekap Market Share Per Toko
-                    </h3>
-                    {mgFilterMonth !== 'ALL' && (
-                      <span className="px-2 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/40 text-cyan-300 text-[10.5px] font-bold">
-                        Bulan: {mgFilterMonth}
-                      </span>
-                    )}
-                    {mgFilterStore !== 'ALL' && (
-                      <span className="px-2 py-0.5 rounded bg-pink-500/15 border border-pink-500/40 text-pink-300 text-[10.5px] font-bold">
-                        Toko: {mgFilterStore}
-                      </span>
-                    )}
-                  </div>
-                  {(mgFilterMonth !== 'ALL' || mgFilterStore !== 'ALL') && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setMgFilterMonth('ALL');
-                        setMgFilterStore('ALL');
-                      }}
-                      className="text-[11px] font-bold text-slate-300 hover:text-white underline cursor-pointer"
-                    >
-                      Tampilkan Semua Data
-                    </button>
-                  )}
-                </div>
-                <div className="overflow-auto max-h-[420px]">
-                  <table className="w-full text-xs text-left">
-                    <thead className="sticky top-0 bg-[#121926] z-10">
-                      <tr className="text-[10px] uppercase text-slate-400 border-b border-[#1E293B]">
-                        <th className="py-2 pr-2 whitespace-nowrap">Nama Toko MissGlam</th>
-                        <th className="py-2 px-2 text-right whitespace-nowrap">Actual (Rp)</th>
-                        <th className="py-2 px-2 text-right whitespace-nowrap">Omset Toko (Rp)</th>
-                        <th className="py-2 px-2 text-right whitespace-nowrap">Market Share (%)</th>
-                        <th className="py-2 pl-2 text-center whitespace-nowrap">Bulan Terdata</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
-                      {filteredMgPerStoreRecap.map((row) => (
-                        <tr key={row.storeName} className="hover:bg-[#172033]">
-                          <td className="py-2 pr-2 font-sans font-bold text-white whitespace-nowrap">{row.storeName}</td>
-                          <td className="py-2 px-2 text-right text-[#FF6B00] font-bold whitespace-nowrap">{formatRupiah(row.totalActual)}</td>
-                          <td className="py-2 px-2 text-right text-slate-300 whitespace-nowrap">{formatRupiah(row.totalStoreOmset)}</td>
-                          <td className="py-2 px-2 text-right font-black text-[#00D2FF] whitespace-nowrap">
-                            {formatSharePct(row.marketSharePercent)}
-                          </td>
-                          <td className="py-2 pl-2 text-center text-slate-400 whitespace-nowrap">{row.monthsCount} bln</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
+            <MarketShareDashboardPanel
+              marketShareData={marketShareData}
+              onOpenMarketShareMg={handleOpenMarketShareMg}
+            />
           )}
 
-          {/* SUB-LENS: BRAND, KATEGORI & SKU */}
           {activeLens === 'product_mix' && productMixData && (
-            <div className="flex-1 flex flex-col gap-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
-                    Brand Kosmetik, Kategori &amp; Performa SKU
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Top Kategori (Makeup, Personal Care, Skin Care, Tools, Hued), Top 10 SKU Terlaris &amp; 10 SKU Slow Moving
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('brand')}
-                    className="px-3 py-1.5 rounded-lg bg-[#FF6B00] hover:bg-[#EA580C] text-white text-xs font-bold cursor-pointer whitespace-nowrap"
-                  >
-                    Buka Brand
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('category')}
-                    className="px-3 py-1.5 rounded-lg bg-[#192234] hover:bg-[#233049] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer whitespace-nowrap"
-                  >
-                    Buka Kategori
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('sku')}
-                    className="px-3 py-1.5 rounded-lg bg-[#192234] hover:bg-[#233049] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer whitespace-nowrap"
-                  >
-                    Buka SKU
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3">
-                {/* LEFT: TOP KATEGORI PRODUK (Strictly 5 Categories: MAKEUP, PERSONAL CARE, SKIN CARE, TOOLS, HUED) */}
-                <div className="lg:col-span-5 bg-[#121926] border border-[#1F293B] rounded-xl p-3.5 flex flex-col justify-between gap-3">
-                  <div>
-                    <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#1E293B] mb-3">
-                      <div>
-                        <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#FF6B00]">
-                          Top Kategori Produk ({productMixData.topCategories.length})
-                        </h3>
-                        <p className="text-[10.5px] text-slate-400 mt-0.5">
-                          MAKEUP · PERSONAL CARE · SKIN CARE · TOOLS · HUED
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="space-y-3 text-xs">
-                      {productMixData.topCategories.map((cat) => {
-                        const barGradient =
-                          cat.category === 'MAKEUP'
-                            ? 'from-[#EA580C] to-[#FF8533]'
-                            : cat.category === 'PERSONAL CARE'
-                            ? 'from-emerald-600 to-emerald-400'
-                            : cat.category === 'SKIN CARE'
-                            ? 'from-cyan-600 to-[#00D2FF]'
-                            : cat.category === 'TOOLS'
-                            ? 'from-violet-600 to-purple-400'
-                            : 'from-pink-600 to-rose-400';
-
-                        return (
-                          <div key={cat.category} className="space-y-1.5">
-                            <div className="flex items-baseline justify-between gap-2 font-mono tabular-nums">
-                              <div className="min-w-0">
-                                <span className="font-sans font-extrabold text-white tracking-wide">
-                                  {cat.category}
-                                </span>
-                                <span className="text-[10px] text-slate-400 ml-1.5">
-                                  · {formatNumber(cat.totalQty)} pcs
-                                </span>
-                              </div>
-                              <span className="text-cyan-400 font-bold whitespace-nowrap shrink-0">
-                                {formatRupiah(cat.totalValue)}{' '}
-                                <span className="text-slate-300">({cat.contributionPercent.toFixed(1)}%)</span>
-                              </span>
-                            </div>
-                            <div className="w-full h-2 bg-[#1B2436] rounded-full overflow-hidden">
-                              <div
-                                className={`h-full bg-gradient-to-r ${barGradient} rounded-full transition-all duration-300`}
-                                style={{
-                                  width: `${
-                                    cat.totalValue > 0
-                                      ? Math.min(100, Math.max(3, cat.contributionPercent))
-                                      : 0
-                                  }%`,
-                                }}
-                              />
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div className="pt-2.5 border-t border-[#1E293B] flex items-center justify-between gap-2 text-[11px] font-mono tabular-nums">
-                    <span className="font-sans font-bold text-slate-400">
-                      Total 5 Kategori Utama
-                    </span>
-                    <span className="font-black text-[#FF6B00] whitespace-nowrap">
-                      {formatRupiah(
-                        productMixData.topCategories.reduce((sum, c) => sum + c.totalValue, 0)
-                      )}{' '}
-                      ·{' '}
-                      {formatNumber(
-                        productMixData.topCategories.reduce((sum, c) => sum + c.totalQty, 0)
-                      )}{' '}
-                      pcs
-                    </span>
-                  </div>
-                </div>
-
-                {/* RIGHT: TOP 10 SKU TERLARIS */}
-                <div className="lg:col-span-7 bg-[#121926] border border-[#1F293B] rounded-xl p-3.5 overflow-auto max-h-[430px]">
-                  <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#1E293B] mb-2">
-                    <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#00D2FF]">
-                      Top 10 SKU Terlaris
-                    </h3>
-                    <span className="text-[10.5px] font-mono text-slate-400">
-                      Urutan Omset Tertinggi
-                    </span>
-                  </div>
-                  <table className="w-full text-xs text-left border-collapse">
-                    <thead className="sticky top-0 bg-[#121926] z-10">
-                      <tr className="text-[10px] uppercase text-slate-400 border-b border-[#1E293B]">
-                        <th className="py-2 pr-2 text-center w-7">No</th>
-                        <th className="py-2 pr-2">SKU</th>
-                        <th className="py-2 px-2 text-right whitespace-nowrap">Qty</th>
-                        <th className="py-2 px-2 text-right whitespace-nowrap">Omset</th>
-                        <th className="py-2 pl-2 text-right whitespace-nowrap">Share</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
-                      {productMixData.topSkus.slice(0, 10).map((sku, idx) => (
-                        <tr key={sku.name} className="hover:bg-[#172033] transition-colors">
-                          <td className="py-2 pr-2 text-center text-slate-500 font-bold">
-                            {idx + 1}
-                          </td>
-                          <td className="py-2 pr-2 font-sans font-semibold text-white whitespace-normal break-words leading-snug">
-                            {sku.name}
-                          </td>
-                          <td className="py-2 px-2 text-right text-slate-300 whitespace-nowrap">
-                            {formatNumber(sku.totalQty)}
-                          </td>
-                          <td className="py-2 px-2 text-right font-bold text-[#FF6B00] whitespace-nowrap">
-                            {formatRupiah(sku.totalValue)}
-                          </td>
-                          <td className="py-2 pl-2 text-right text-emerald-400 font-bold whitespace-nowrap">
-                            {sku.contributionPercent.toFixed(1)}%
-                          </td>
-                        </tr>
-                      ))}
-                      {productMixData.topSkus.length === 0 && (
-                        <tr>
-                          <td colSpan={5} className="py-6 text-center font-sans text-slate-400">
-                            Belum ada data SKU pada filter aktif.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* BOTTOM FULL-WIDTH: 10 SKU SLOW MOVING */}
-              <div className="w-full bg-[#121926] border border-[#1F293B] rounded-xl overflow-hidden flex flex-col">
-                <div className="px-4 py-3 border-b border-[#1E293B] bg-[#0E1523] flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h3 className="text-xs font-extrabold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
-                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-                      <span>10 SKU Slow Moving</span>
-                    </h3>
-                    <p className="text-[11px] text-slate-400 mt-0.5">
-                      Daftar 10 SKU aktif dengan perputaran Qty &amp; Omset terendah pada filter periode aktif untuk evaluasi promo atau stok
-                    </p>
-                  </div>
-                  <span className="text-[11px] font-mono font-bold text-slate-300 tabular-nums whitespace-nowrap">
-                    Total 10 SKU:{' '}
-                    {formatNumber(
-                      productMixData.slowMovingSkus.reduce((s, r) => s + r.totalQty, 0)
-                    )}{' '}
-                    pcs ·{' '}
-                    <span className="text-amber-400">
-                      {formatRupiah(
-                        productMixData.slowMovingSkus.reduce((s, r) => s + r.totalValue, 0)
-                      )}
-                    </span>
-                  </span>
-                </div>
-
-                <div className="w-full overflow-x-auto">
-                  <table className="w-full text-xs text-left border-collapse">
-                    <thead className="bg-[#0B101A]">
-                      <tr className="text-[10px] uppercase text-slate-400 border-b border-[#1E293B]">
-                        <th className="py-2.5 px-3 text-center w-10">No</th>
-                        <th className="py-2.5 px-3">Nama SKU</th>
-                        <th className="py-2.5 px-3 whitespace-nowrap">Brand</th>
-                        <th className="py-2.5 px-3 whitespace-nowrap">Kategori</th>
-                        <th className="py-2.5 px-3 text-right whitespace-nowrap">Qty (Pcs)</th>
-                        <th className="py-2.5 px-3 text-right whitespace-nowrap">Tx / Toko</th>
-                        <th className="py-2.5 px-3 text-right whitespace-nowrap">Omset</th>
-                        <th className="py-2.5 px-3 text-right whitespace-nowrap">Share</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
-                      {productMixData.slowMovingSkus.length === 0 ? (
-                        <tr>
-                          <td colSpan={8} className="py-8 text-center font-sans text-slate-400">
-                            Belum ada data SKU slow moving pada filter yang dipilih.
-                          </td>
-                        </tr>
-                      ) : (
-                        productMixData.slowMovingSkus.map((sku, idx) => (
-                          <tr key={sku.name} className="hover:bg-[#172033] transition-colors">
-                            <td className="py-2.5 px-3 text-center font-bold text-amber-400">
-                              {idx + 1}
-                            </td>
-                            <td className="py-2.5 px-3 font-sans font-semibold text-white whitespace-normal break-words leading-snug">
-                              {sku.name}
-                            </td>
-                            <td className="py-2.5 px-3 font-sans font-bold text-slate-200 whitespace-nowrap">
-                              {sku.brand}
-                            </td>
-                            <td className="py-2.5 px-3 font-sans text-cyan-300 whitespace-nowrap">
-                              {sku.category}
-                            </td>
-                            <td className="py-2.5 px-3 text-right font-extrabold text-amber-400 whitespace-nowrap">
-                              {formatNumber(sku.totalQty)} pcs
-                            </td>
-                            <td className="py-2.5 px-3 text-right text-slate-300 whitespace-nowrap">
-                              {sku.transactionCount} tx · {sku.storeCount} toko
-                            </td>
-                            <td className="py-2.5 px-3 text-right font-bold text-slate-200 whitespace-nowrap">
-                              {formatRupiah(sku.totalValue)}
-                            </td>
-                            <td className="py-2.5 px-3 text-right text-rose-400 whitespace-nowrap">
-                              {sku.contributionPercent.toFixed(2)}%
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
+            <ProductMixDashboardPanel
+              productMixData={productMixData}
+              onNavigateTab={onNavigateTab}
+            />
           )}
 
-          {/* SUB-LENS: PERTUMBUHAN & TOKO BA VS NON-BA (SELL IN) */}
           {activeLens === 'channel_growth' && channelGrowthRows && (
-            <div className="flex-1 flex flex-col gap-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
-                    Kontribusi Toko Ada BA vs Non-BA (Khusus Omset Sell In) &amp; Sell In vs Out
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Rekapitulasi bulanan jumlah toko, Omset Sell In, dan rasio Sell Through
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('kontribusi_toko_ba')}
-                    className="px-3 py-1.5 rounded-lg bg-[#FF6B00] text-white text-xs font-bold cursor-pointer"
-                  >
-                    Buka Toko BA vs Non-BA
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('sell_in_vs_sell_out')}
-                    className="px-3 py-1.5 rounded-lg bg-[#192234] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer"
-                  >
-                    Buka Sell In vs Out
-                  </button>
-                </div>
-              </div>
-
-              <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3.5 overflow-auto max-h-[calc(100vh-260px)]">
-                <table className="w-full text-xs text-left">
-                  <thead className="sticky top-0 bg-[#121926] z-10">
-                    <tr className="text-[10px] uppercase text-slate-400 border-b border-[#1E293B]">
-                      <th className="py-2 pr-2 whitespace-nowrap">Bulan</th>
-                      <th className="py-2 px-2 text-center whitespace-nowrap">Semua Toko</th>
-                      <th className="py-2 px-2 text-right whitespace-nowrap">Omset Sell In</th>
-                      <th className="py-2 px-2 text-center text-[#FF6B00] whitespace-nowrap">Toko Ada BA</th>
-                      <th className="py-2 px-2 text-right text-[#FF6B00] whitespace-nowrap">Sell In BA</th>
-                      <th className="py-2 px-2 text-right text-[#FF6B00] whitespace-nowrap">Kontribusi BA</th>
-                      <th className="py-2 px-2 text-center text-[#00D2FF] whitespace-nowrap">Toko Non-BA</th>
-                      <th className="py-2 px-2 text-right text-[#00D2FF] whitespace-nowrap">Sell In Non-BA</th>
-                      <th className="py-2 pl-2 text-right text-[#00D2FF] whitespace-nowrap">Kontribusi Non-BA</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#1A2334] font-mono tabular-nums">
-                    {channelGrowthRows.map((m) => (
-                      <tr key={m.monthName} className="hover:bg-[#172033]">
-                        <td className="py-2 pr-2 font-sans font-bold text-white whitespace-nowrap">{m.monthName}</td>
-                        <td className="py-2 px-2 text-center text-slate-300 whitespace-nowrap">{m.totalStoresCount}</td>
-                        <td className="py-2 px-2 text-right font-bold text-white whitespace-nowrap">{formatRupiah(m.totalSellIn)}</td>
-                        <td className="py-2 px-2 text-center text-[#FF6B00] font-bold whitespace-nowrap">{m.tokoBaCount} Toko</td>
-                        <td className="py-2 px-2 text-right text-slate-200 whitespace-nowrap">{formatRupiah(m.tokoBaSellIn)}</td>
-                        <td className="py-2 px-2 text-right font-black text-[#FF6B00] whitespace-nowrap">{m.tokoBaContributionPct}%</td>
-                        <td className="py-2 px-2 text-center text-[#00D2FF] font-bold whitespace-nowrap">{m.tokoNonBaCount}</td>
-                        <td className="py-2 px-2 text-right text-slate-200 whitespace-nowrap">{formatRupiah(m.tokoNonBaSellIn)}</td>
-                        <td className="py-2 pl-2 text-right font-black text-[#00D2FF] whitespace-nowrap">{m.tokoNonBaContributionPct}%</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <ChannelGrowthDashboardPanel
+              channelGrowthRows={channelGrowthRows}
+              onNavigateTab={onNavigateTab}
+            />
           )}
 
-          {/* SUB-LENS: TIM BA, PROMO TOKO ONLINE & KUNJUNGAN */}
           {activeLens === 'promo_ba' && promoBaData && (
-            <div className="flex-1 flex flex-col gap-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
-                    Tim BA, Report Promo Toko Online &amp; Kunjungan Lapangan
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Rekap promo online, evaluasi denda nihil BA, serta check-in tim Sales &amp; Trainer
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('promo_toko_online')}
-                    className="px-3 py-1.5 rounded-lg bg-[#FF6B00] text-white text-xs font-bold cursor-pointer"
-                  >
-                    Buka Promo Online
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('punishment')}
-                    className="px-3 py-1.5 rounded-lg bg-[#192234] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer"
-                  >
-                    Evaluasi Denda BA
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('kunjungan_sales')}
-                    className="px-3 py-1.5 rounded-lg bg-[#192234] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer"
-                  >
-                    Kunjungan Sales
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 font-mono tabular-nums">
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
-                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Total Promo Toko Online</span>
-                  <span className="text-base font-black text-[#FF6B00] mt-1 block whitespace-nowrap">{formatRupiah(snap.promoTotalActual)}</span>
-                  <span className="text-[11px] text-slate-400 whitespace-nowrap">{snap.promoStoreCount} Toko · {snap.promoDaysCount} Hari</span>
-                </div>
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
-                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Denda Nihil BA Aktif</span>
-                  <span className="text-base font-black text-rose-400 mt-1 block whitespace-nowrap">{formatRupiah(snap.baTotalDenda)}</span>
-                  <span className="text-[11px] text-slate-400 whitespace-nowrap">{snap.baIncidentsCount} Kejadian Nihil</span>
-                </div>
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
-                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Total Kunjungan Sales</span>
-                  <span className="text-base font-black text-[#00D2FF] mt-1 block whitespace-nowrap">{snap.salesVisitsCount} Check-In</span>
-                  <span className="text-[11px] text-slate-400">ILHAMSYAH, TIWI, ALBERT</span>
-                </div>
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-3">
-                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Total Kunjungan Trainer</span>
-                  <span className="text-base font-black text-emerald-400 mt-1 block whitespace-nowrap">{snap.trainerVisitsCount} Check-In</span>
-                  <span className="text-[11px] text-slate-400">ARA &amp; RATIH</span>
-                </div>
-              </div>
-
-              <PromoMonthlyGrowthPanel
-                promoMonthlyRecap={promoBaData.promoMonthlyRecap}
-                onOpenPromo={() => onNavigateTab('promo_toko_online')}
-              />
-            </div>
+            <PromoBaDashboardPanel
+              promoBaData={promoBaData}
+              promoTotalActual={snap.promoTotalActual}
+              promoStoreCount={snap.promoStoreCount}
+              promoDaysCount={snap.promoDaysCount}
+              baTotalDenda={snap.baTotalDenda}
+              baIncidentsCount={snap.baIncidentsCount}
+              salesVisitsCount={snap.salesVisitsCount}
+              trainerVisitsCount={snap.trainerVisitsCount}
+              onNavigateTab={onNavigateTab}
+              onOpenPromo={handleOpenPromo}
+            />
           )}
 
-          {/* SUB-LENS: KEUANGAN, PROFIT, COST & TAGIHAN */}
           {activeLens === 'finance_bills' && monthlyProfitHrSummary && (
-            <div className="flex-1 flex flex-col gap-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
-                    Profit Area (P&amp;L), Estimasi Cost Gaji &amp; Tagihan Piutang
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Margin kotor 55%, biaya operasional 33%, beban gaji tim, serta kesehatan aging tagihan
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('profit')}
-                    className="px-3 py-1.5 rounded-lg bg-[#FF6B00] text-white text-xs font-bold cursor-pointer"
-                  >
-                    Buka Profit Area
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('cost')}
-                    className="px-3 py-1.5 rounded-lg bg-[#192234] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer"
-                  >
-                    Buka Cost &amp; Gaji
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('aging')}
-                    className="px-3 py-1.5 rounded-lg bg-[#192234] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer"
-                  >
-                    Buka Aging Tagihan
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 font-mono tabular-nums">
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-4">
-                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Margin Kotor (55%)</span>
-                  <span className="text-base xl:text-lg font-black text-white mt-1 block whitespace-nowrap">{formatRupiah(snap.profitSummary.marginValue)}</span>
-                  <span className="text-[11px] text-slate-400 whitespace-nowrap">Sell In: {formatRupiah(snap.profitSummary.sellInActual)}</span>
-                </div>
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-4">
-                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Total Beban (Ops + Gaji)</span>
-                  <span className="text-base xl:text-lg font-black text-[#FF6B00] mt-1 block whitespace-nowrap">{formatRupiah(snap.profitSummary.totalExpense)}</span>
-                  <span className="text-[11px] text-slate-400 whitespace-nowrap">Gaji: {formatRupiah(snap.profitSummary.salaryCost)}</span>
-                </div>
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-4">
-                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Sisa Profit Bersih</span>
-                  <span className={`text-base xl:text-lg font-black mt-1 block whitespace-nowrap ${snap.profitSummary.remainingProfitValue >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {formatRupiah(snap.profitSummary.remainingProfitValue)}
-                  </span>
-                  <span className="text-[11px] text-slate-400 whitespace-nowrap">{profitPctVsSellIn}% vs Sell In</span>
-                </div>
-                <div className="bg-[#121926] border border-[#1F293B] rounded-xl p-4">
-                  <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">Tagihan Belum Lunas</span>
-                  <span className="text-base xl:text-lg font-black text-[#00D2FF] mt-1 block whitespace-nowrap">{formatRupiah(snap.unpaidBillsAmount)}</span>
-                  <span className="text-[11px] text-slate-400 whitespace-nowrap">{snap.overdueBillsCount} Nota &gt; 30 Hari</span>
-                </div>
-              </div>
-
-              <MonthlyProfitHrPanel pnlData={monthlyProfitHrSummary} filterMonth={filters.BULAN} />
-            </div>
+            <FinanceBillsDashboardPanel
+              monthlyProfitHrSummary={monthlyProfitHrSummary}
+              profitSummary={snap.profitSummary}
+              unpaidBillsAmount={snap.unpaidBillsAmount}
+              overdueBillsCount={snap.overdueBillsCount}
+              filterMonth={filters.BULAN}
+              onNavigateTab={onNavigateTab}
+            />
           )}
 
-          {/* SUB-LENS: TARGET & ANALISA GAP */}
           {activeLens === 'targets_alerts' && targetsAlertsData && (
-            <div className="flex-1 flex flex-col gap-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-sm font-extrabold uppercase tracking-wider text-white">
-                    Target Management &amp; Diagnosa Gap Defisit
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Pemantauan target multi-level dan akar penyebab gap pencapaian
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('target_mgmt')}
-                    className="px-3 py-1.5 rounded-lg bg-[#FF6B00] text-white text-xs font-bold cursor-pointer"
-                  >
-                    Kelola Target
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onNavigateTab('gap')}
-                    className="px-3 py-1.5 rounded-lg bg-[#192234] text-slate-200 border border-[#2A3952] text-xs font-bold cursor-pointer"
-                  >
-                    Buka Analisa Gap
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 font-mono tabular-nums">
-                <div className="bg-[#121926] border border-[#1F293B] hover:border-rose-500/40 transition-colors rounded-xl p-3 flex flex-col justify-between gap-2.5">
-                  <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <span className="text-[10px] font-sans font-bold uppercase text-slate-400">
-                          Defisit Gap Target
-                        </span>
-                        <span
-                          className={`px-1.5 py-0.5 rounded-md text-[9.5px] font-sans font-bold border whitespace-nowrap ${
-                            snap.targetGapSummary.mode === 'spv'
-                              ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                              : snap.targetGapSummary.mode === 'store'
-                              ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                              : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
-                          }`}
-                        >
-                          {snap.targetGapSummary.mode === 'spv'
-                            ? 'Target ALL (SPV)'
-                            : snap.targetGapSummary.mode === 'store'
-                            ? 'Target Toko'
-                            : 'Target Sales'}
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => onNavigateTab('target_mgmt')}
-                        title="Edit Target SPV & Sales di Menu Kelola Target"
-                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-sans font-bold transition-colors cursor-pointer shrink-0"
-                      >
-                        <Edit3 className="w-2.5 h-2.5" />
-                        <span>Edit</span>
-                      </button>
-                    </div>
-
-                    {snap.targetGapSummary.activeTarget <= 0 ? (
-                      <span className="text-base xl:text-lg font-black text-slate-400 mt-1 block whitespace-nowrap">
-                        Rp 0
-                      </span>
-                    ) : snap.targetGapSummary.deficitAmount > 0 ? (
-                      <div className="flex items-baseline gap-2 mt-1 flex-wrap">
-                        <span className="text-base xl:text-lg font-black text-rose-400 whitespace-nowrap">
-                          -{formatRupiah(snap.targetGapSummary.deficitAmount)}
-                        </span>
-                        <span className="text-[10.5px] font-bold text-rose-300 whitespace-nowrap">
-                          (-{snap.targetGapSummary.gapPercentage.toFixed(1)}%)
-                        </span>
-                      </div>
-                    ) : (
-                      <div className="flex items-baseline gap-2 mt-1 flex-wrap">
-                        <span className="text-base xl:text-lg font-black text-emerald-400 whitespace-nowrap">
-                          +{formatRupiah(snap.targetGapSummary.surplusAmount)}
-                        </span>
-                        <span className="text-[10.5px] font-bold text-emerald-300 whitespace-nowrap">
-                          (Target Tercapai)
-                        </span>
-                      </div>
-                    )}
-
-                    <div className="mt-1.5 space-y-0.5 text-[11px] bg-[#0D131F] border border-[#1B2538] rounded-lg px-2.5 py-1.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-sans text-slate-400 truncate" title={snap.targetGapSummary.scopeLabel}>
-                          {snap.targetGapSummary.scopeLabel}
-                        </span>
-                        <span className="font-bold text-white whitespace-nowrap">
-                          {formatRupiah(snap.targetGapSummary.activeTarget)}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-sans text-slate-400">
-                          Realisasi {snap.targetGapSummary.activeMetricLabel} ({snap.targetGapSummary.achievementPct.toFixed(1)}%)
-                        </span>
-                        <span className="font-bold text-[#00D2FF] whitespace-nowrap">
-                          {formatRupiah(snap.targetGapSummary.activeActual)}
-                        </span>
-                      </div>
-                      {(snap.targetGapSummary.kaMgSellInActual || 0) > 0 &&
-                        snap.targetGapSummary.activeMetricLabel === 'Sell In' && (
-                          <div className="flex items-center justify-between gap-2 text-[10px] text-cyan-300/90">
-                            <span className="font-sans">Komposisi Sell In SPV:</span>
-                            <span className="whitespace-nowrap">
-                              Reg {formatCompactIdr(snap.targetGapSummary.regularSellInActual ?? 0)} + KA &amp; MG{' '}
-                              {formatCompactIdr(snap.targetGapSummary.kaMgSellInActual ?? 0)}
-                            </span>
-                          </div>
-                        )}
-                      {filters.KET === 'ALL' && snap.targetGapSummary.targetSellOut > 0 && (
-                        <div className="flex items-center justify-between gap-2 pt-0.5 border-t border-[#182234] text-[10px]">
-                          <span className="font-sans text-slate-400">
-                            Target Sell Out ({snap.targetGapSummary.sellOutDeficitAmount > 0 ? `Defisit -${formatCompactIdr(snap.targetGapSummary.sellOutDeficitAmount)}` : `Surplus +${formatCompactIdr(snap.targetGapSummary.sellOutSurplusAmount)}`})
-                          </span>
-                          <span className="text-slate-300 whitespace-nowrap">
-                            {formatCompactIdr(snap.targetGapSummary.actualSellOut)} / {formatCompactIdr(snap.targetGapSummary.targetSellOut)}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-
-                    <span className="text-[10.5px] text-slate-400 mt-1.5 block whitespace-nowrap">
-                      {snap.gapDiagnosis.lostStoresCount} Toko Pasif · Sumber: Kelola Target
-                    </span>
-                  </div>
-                  <div className="pt-2 border-t border-[#1F293B] flex flex-wrap items-center gap-1.5 font-sans">
-                    <button
-                      type="button"
-                      onClick={() => onNavigateTab('target_mgmt')}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#FF6B00]/15 hover:bg-[#FF6B00]/25 text-[#FFB067] border border-[#FF6B00]/30 text-[11px] font-bold transition-colors cursor-pointer"
-                    >
-                      <span>Edit Target di Kelola Target</span>
-                      <ArrowUpRight className="w-3 h-3" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onNavigateTab('gap')}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#192234] hover:bg-[#233049] text-slate-200 border border-[#2A3952] text-[11px] font-bold transition-colors cursor-pointer"
-                    >
-                      <span>Analisa Gap</span>
-                      <ChevronRight className="w-3 h-3" />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="bg-[#121926] border border-[#1F293B] hover:border-[#FF6B00]/40 transition-colors rounded-xl p-3 flex flex-col justify-between gap-2.5">
-                  <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[10px] font-sans font-bold uppercase text-slate-400">Total BA Terdaftar</span>
-                      <button
-                        type="button"
-                        onClick={() => onNavigateTab('pengaturan_master')}
-                        title="Buka & Edit Master BA, Trainer & Toko di Menu Awal"
-                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#FF6B00]/15 hover:bg-[#FF6B00]/25 text-[#FFA04D] border border-[#FF6B00]/30 text-[10px] font-sans font-bold transition-colors cursor-pointer"
-                      >
-                        <Edit3 className="w-2.5 h-2.5" />
-                        <span>Edit</span>
-                      </button>
-                    </div>
-                    <span className="text-base xl:text-lg font-black text-[#FF6B00] mt-1 block whitespace-nowrap">{snap.registeredSheetBaCount} BA</span>
-                    <span className="text-[11px] text-slate-400 whitespace-nowrap">{snap.registeredSheetTrainerCount} Trainer Aktif (Google Sheet)</span>
-                  </div>
-                  <div className="pt-2 border-t border-[#1F293B] flex flex-wrap items-center gap-1.5 font-sans">
-                    <button
-                      type="button"
-                      onClick={() => onNavigateTab('target_mgmt')}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#FF6B00]/15 hover:bg-[#FF6B00]/25 text-[#FFB067] border border-[#FF6B00]/30 text-[11px] font-bold transition-colors cursor-pointer"
-                    >
-                      <span>Edit Target BA &amp; Trainer</span>
-                      <ArrowUpRight className="w-3 h-3" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onNavigateTab('pengaturan_master')}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#192234] hover:bg-[#233049] text-slate-200 border border-[#2A3952] text-[11px] font-bold transition-colors cursor-pointer"
-                    >
-                      <span>Edit Master BA &amp; Toko</span>
-                      <ChevronRight className="w-3 h-3" />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="bg-[#121926] border border-[#1F293B] hover:border-[#00D2FF]/40 transition-colors rounded-xl p-3 flex flex-col justify-between gap-2.5">
-                  <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[10px] font-sans font-bold uppercase text-slate-400">Kesiapan Status Produk</span>
-                      <button
-                        type="button"
-                        onClick={() => onNavigateTab('produk_fokus')}
-                        title="Buka & Edit Pengaturan Produk Fokus & Status SKU di Menu Awal"
-                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#00D2FF]/15 hover:bg-[#00D2FF]/25 text-[#67E8F9] border border-[#00D2FF]/30 text-[10px] font-sans font-bold transition-colors cursor-pointer"
-                      >
-                        <Edit3 className="w-2.5 h-2.5" />
-                        <span>Edit</span>
-                      </button>
-                    </div>
-                    <span className="text-base xl:text-lg font-black text-[#00D2FF] mt-1 block whitespace-nowrap">{targetsAlertsData.productStatusSummary.totalSkuCount} SKU</span>
-                    <span className="text-[11px] text-slate-400 whitespace-nowrap">Clearance/Risk: {targetsAlertsData.productStatusSummary.clearanceObsoleteShare.toFixed(1)}%</span>
-                  </div>
-                  <div className="pt-2 border-t border-[#1F293B] flex flex-wrap items-center gap-1.5 font-sans">
-                    <button
-                      type="button"
-                      onClick={() => onNavigateTab('produk_fokus')}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#00D2FF]/15 hover:bg-[#00D2FF]/25 text-[#67E8F9] border border-[#00D2FF]/30 text-[11px] font-bold transition-colors cursor-pointer"
-                    >
-                      <span>Edit Produk Fokus</span>
-                      <ArrowUpRight className="w-3 h-3" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onNavigateTab('sku')}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#192234] hover:bg-[#233049] text-slate-200 border border-[#2A3952] text-[11px] font-bold transition-colors cursor-pointer"
-                    >
-                      <span>Lihat Semua SKU</span>
-                      <ChevronRight className="w-3 h-3" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <TargetsGapPanel
-                storeGapDetails={targetsAlertsData.storeGapDetails}
-                totalStoreGapDeficit={targetsAlertsData.totalStoreGapDeficit}
-                gapPreviousPeriodName={targetsAlertsData.gapPreviousPeriodName}
-                gapCurrentPeriodName={targetsAlertsData.gapCurrentPeriodName}
-              />
-            </div>
+            <TargetsAlertsDashboardPanel
+              targetsAlertsData={targetsAlertsData}
+              targetGapSummary={snap.targetGapSummary}
+              lostStoresCount={snap.gapDiagnosis.lostStoresCount}
+              registeredSheetBaCount={snap.registeredSheetBaCount}
+              registeredSheetTrainerCount={snap.registeredSheetTrainerCount}
+              ketFilter={filters.KET}
+              onNavigateTab={onNavigateTab}
+            />
           )}
 
-          {/* SUB-LENS: ACHIEVE QUARTAL — HALL OF FAME */}
-          {activeLens === 'achieve_quartal' && achieveQuartalData && (
-            <div className="flex-1 flex flex-col gap-3">
-              <div className="bg-gradient-to-r from-[#0E1525] via-[#171E38] to-[#0E1525] text-white rounded-2xl p-4 sm:p-5 border border-[#24314D] shadow-lg">
-                {/* Header Hall of Fame */}
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-4 border-b border-[#24314D]">
-                  <div className="flex items-start gap-2.5">
-                    <div className="p-2 rounded-xl bg-amber-500/15 border border-amber-400/30 shrink-0">
-                      <Crown className="w-5 h-5 text-amber-400" />
-                    </div>
-                    <div>
-                      <h2 className="text-sm sm:text-base font-extrabold text-white tracking-wide uppercase">
-                        Hall of Fame • Juara Terhebat {achieveQuartalData.overall.quarterLabel}
-                      </h2>
-                      <p className="text-[11px] sm:text-xs text-slate-300 mt-0.5">
-                        Peringkat diurutkan dari pencapaian persentase (%) tertinggi • Mengikuti Filter Terintegrasi ({achieveQuartalData.activeKetDisplayLabel})
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="flex items-center gap-1 p-1 rounded-xl bg-[#0B101C] border border-[#24314D]">
-                      {(['Q1', 'Q2', 'Q3', 'Q4'] as QuarterPeriodKey[]).map((q) => (
-                        <button
-                          key={q}
-                          type="button"
-                          onClick={() => setSelectedQuarter(q)}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold transition-colors cursor-pointer ${
-                            selectedQuarter === q
-                              ? 'bg-[#FF6B00] text-white shadow-xs'
-                              : 'text-slate-300 hover:bg-white/10'
-                          }`}
-                        >
-                          {q}
-                        </button>
-                      ))}
-                    </div>
-
-                    <span
-                      className={`text-[11px] font-extrabold px-3 py-1 rounded-full border ${
-                        achieveQuartalData.isKetSellIn
-                          ? 'bg-blue-500/20 text-blue-200 border-blue-400/40'
-                          : achieveQuartalData.isKetSellOut
-                          ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40'
-                          : 'bg-indigo-500/20 text-indigo-200 border-indigo-400/40'
-                      }`}
-                    >
-                      Filter KET: {achieveQuartalData.activeKetDisplayLabel}
-                    </span>
-
-                    <span className="text-[11px] font-semibold px-3 py-1 rounded-full bg-amber-400/10 text-amber-300 border border-amber-400/30">
-                      {achieveQuartalData.overall.dateRangeLabel}
-                    </span>
-
-                    <button
-                      type="button"
-                      onClick={() => onNavigateTab('rangkuman_kuartal')}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#FF6B00] hover:bg-[#EA580C] text-white text-xs font-bold transition-colors cursor-pointer"
-                    >
-                      <span>Buka Menu Achieve Quartal</span>
-                      <ArrowUpRight className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-
-                {/* 3 Champion Podium Cards */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 mt-4">
-                  {/* Top Sales */}
-                  <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
-                        <Medal className="w-4 h-4 text-blue-400" />
-                        Top Sales Champion
-                      </span>
-                      <span className="text-[11px] font-black px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-400/30">
-                        Peringkat 1
-                      </span>
-                    </div>
-                    <div className="mt-3">
-                      <h4 className="text-base font-extrabold text-white truncate">
-                        {achieveQuartalData.topSales?.name || 'Tidak ada data'}
-                      </h4>
-                      <p className="text-xs text-slate-300 mt-0.5">
-                        {achieveQuartalData.isKetSellIn
-                          ? 'Realisasi Sell In:'
-                          : achieveQuartalData.isKetSellOut
-                          ? 'Realisasi Sell Out:'
-                          : 'Omset Kuartal:'}{' '}
-                        <span className="font-bold text-amber-300 font-mono">
-                          {formatRupiah(achieveQuartalData.topSales?.actual || 0, true)}
-                        </span>
-                      </p>
-                      <div className="mt-2 flex items-center justify-between text-xs font-mono tabular-nums">
-                        <span className="text-slate-400 font-sans">
-                          Target: {formatRupiah(achieveQuartalData.topSales?.target || 0, true)}
-                        </span>
-                        <span className="font-black text-emerald-400">
-                          {formatPercent(achieveQuartalData.topSales?.percent || 0)}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Top BA */}
-                  <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-bold uppercase tracking-wider text-pink-400 flex items-center gap-1.5">
-                        <Medal className="w-4 h-4 text-pink-400" />
-                        Top Beauty Advisor Star
-                      </span>
-                      <span className="text-[11px] font-black px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 border border-pink-400/30">
-                        Peringkat 1
-                      </span>
-                    </div>
-                    <div className="mt-3">
-                      <h4 className="text-base font-extrabold text-white truncate">
-                        {achieveQuartalData.topBa?.name || 'Tidak ada data'}
-                      </h4>
-                      <p className="text-xs text-slate-300 mt-0.5 truncate">
-                        Outlet:{' '}
-                        <span className="font-bold text-pink-300">
-                          {achieveQuartalData.topBa?.store || '-'}
-                        </span>
-                      </p>
-                      <p className="text-xs text-slate-300 mt-0.5">
-                        {achieveQuartalData.isKetSellIn
-                          ? 'Realisasi Sell In:'
-                          : achieveQuartalData.isKetSellOut
-                          ? 'Realisasi Sell Out:'
-                          : 'Omset Kuartal:'}{' '}
-                        <span className="font-bold text-amber-300 font-mono">
-                          {formatRupiah(achieveQuartalData.topBa?.actual || 0, true)}
-                        </span>
-                      </p>
-                      <div className="mt-1.5 flex items-center justify-between text-xs font-mono tabular-nums">
-                        <span className="text-slate-400 font-sans">
-                          Target: {formatRupiah(achieveQuartalData.topBa?.target || 0, true)}
-                        </span>
-                        <span className="font-black text-emerald-400">
-                          {formatPercent(achieveQuartalData.topBa?.percent || 0)}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Top Trainer */}
-                  <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-bold uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
-                        <Medal className="w-4 h-4 text-purple-400" />
-                        Top Trainer of The Quarter
-                      </span>
-                      <span className="text-[11px] font-black px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-400/30">
-                        Peringkat 1
-                      </span>
-                    </div>
-                    <div className="mt-3">
-                      <h4 className="text-base font-extrabold text-white truncate">
-                        {achieveQuartalData.topTrainer?.name || 'Tidak ada data'}
-                      </h4>
-                      <p className="text-xs text-slate-300 mt-0.5">
-                        {achieveQuartalData.isKetSellIn
-                          ? 'Realisasi Sell In:'
-                          : achieveQuartalData.isKetSellOut
-                          ? 'Realisasi Sell Out:'
-                          : 'Realisasi Area:'}{' '}
-                        <span className="font-bold text-purple-300 font-mono">
-                          {formatRupiah(achieveQuartalData.topTrainer?.actual || 0, true)}
-                        </span>
-                      </p>
-                      <div className="mt-2 flex items-center justify-between text-xs font-mono tabular-nums">
-                        <span className="text-slate-400 font-sans">
-                          KPI: {achieveQuartalData.topTrainer?.score || 0} Poin
-                        </span>
-                        <span className="font-black text-emerald-400">
-                          {formatPercent(achieveQuartalData.topTrainer?.percent || 0)}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Leaderboard Table Mengikuti Filter Terintegrasi */}
-                <div className="mt-5 pt-4 border-t border-[#24314D]">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
-                    <div>
-                      <h4 className="text-xs font-extrabold text-amber-300 uppercase tracking-wider">
-                        Rincian Pencapaian {achieveQuartalData.overall.quarterLabel} —{' '}
-                        {achieveQuartalData.isKetSellIn
-                          ? 'Semua Pencapaian SELL IN'
-                          : achieveQuartalData.isKetSellOut
-                          ? 'Semua Pencapaian SELL OUT'
-                          : 'Semua Pencapaian SELL IN & SELL OUT'}
-                      </h4>
-                      <p className="text-[11px] text-slate-400">
-                        Urutan peringkat berdasarkan persentase pencapaian (%) tertinggi • Filter KET ({achieveQuartalData.activeKetDisplayLabel})
-                        {hallOfFameTab === 'ba' && (achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
-                          <span className="text-amber-300 font-semibold">
-                            {' '}· Klik nilai Target Sell In pada Nama BA &amp; Toko untuk edit langsung
-                          </span>
-                        )}
-                      </p>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="relative">
-                        <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                        <input
-                          type="text"
-                          value={quartalSearch}
-                          onChange={(e) => setQuartalSearch(e.target.value)}
-                          placeholder="Cari nama / area / toko..."
-                          className="pl-8 pr-7 py-1.5 rounded-lg bg-[#0B101C] border border-[#24314D] focus:border-amber-400 text-xs text-white placeholder:text-slate-500 outline-none w-44 sm:w-52"
-                        />
-                        {quartalSearch && (
-                          <button
-                            type="button"
-                            onClick={() => setQuartalSearch('')}
-                            className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white cursor-pointer"
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-1 p-1 bg-white/10 rounded-xl border border-white/10">
-                        {([
-                          { id: 'sales', label: `Sales (${achieveQuartalData.filteredSales.length})` },
-                          { id: 'ba', label: `BA (${achieveQuartalData.filteredBa.length})` },
-                          { id: 'trainer', label: `Trainer (${achieveQuartalData.filteredTrainer.length})` },
-                        ] as const).map((tab) => (
-                          <button
-                            key={tab.id}
-                            type="button"
-                            onClick={() => {
-                              setEditingBaSellInName(null);
-                              setHallOfFameTab(tab.id);
-                            }}
-                            className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
-                              hallOfFameTab === tab.id
-                                ? 'bg-amber-400 text-slate-950 shadow-xs'
-                                : 'text-slate-300 hover:bg-white/10'
-                            }`}
-                          >
-                            {tab.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="bg-[#090E1A]/80 border border-white/10 rounded-xl overflow-x-auto max-h-[540px] overflow-y-auto">
-                    <table className="w-full text-xs text-left border-collapse">
-                      <thead className="sticky top-0 z-10 bg-[#0F172A]">
-                        <tr className="border-b border-white/10 text-slate-300 font-bold">
-                          <th className="py-2.5 px-3 w-12 text-center">Rank</th>
-                          <th className="py-2.5 px-3">
-                            {hallOfFameTab === 'sales'
-                              ? 'Personil Sales'
-                              : hallOfFameTab === 'ba'
-                              ? 'Nama BA & Toko'
-                              : 'Nama Trainer'}
-                          </th>
-                          <th className="py-2.5 px-3">Area</th>
-                          {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
-                            <>
-                              <th className="py-2.5 px-3 text-right">
-                                Target Sell In
-                                {hallOfFameTab === 'ba' && (
-                                  <span className="ml-1 text-[9px] font-semibold text-amber-300 normal-case">
-                                    (Edit)
-                                  </span>
-                                )}
-                              </th>
-                              <th className="py-2.5 px-3 text-right">Realisasi Sell In</th>
-                              <th className="py-2.5 px-3 text-center">% Sell In</th>
-                            </>
-                          )}
-                          {(achieveQuartalData.isKetSellOut || !achieveQuartalData.isKetSellIn) && (
-                            <>
-                              <th className="py-2.5 px-3 text-right">Target Sell Out</th>
-                              <th className="py-2.5 px-3 text-right">Realisasi Sell Out</th>
-                              <th className="py-2.5 px-3 text-center">% Sell Out</th>
-                            </>
-                          )}
-                          {!achieveQuartalData.isKetSellIn && !achieveQuartalData.isKetSellOut && (
-                            <th className="py-2.5 px-3 text-center">% Peringkat</th>
-                          )}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-white/5 font-mono tabular-nums">
-                        {hallOfFameTab === 'sales' &&
-                          (achieveQuartalData.filteredSales.length > 0 ? (
-                            achieveQuartalData.filteredSales.map((s, idx) => (
-                              <tr key={s.salesName} className="hover:bg-white/5 transition-colors">
-                                <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
-                                <td className="py-2 px-3 font-sans font-bold text-white">{s.salesName}</td>
-                                <td className="py-2 px-3 font-sans text-slate-400">{s.coverArea}</td>
-                                {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
-                                  <>
-                                    <td className="py-2 px-3 text-right text-slate-300">
-                                      {formatRupiah(s.quarterTargetSellIn, true)}
-                                    </td>
-                                    <td className="py-2 px-3 text-right font-bold text-sky-300">
-                                      {formatRupiah(s.quarterActualSellIn, true)}
-                                    </td>
-                                    <td className="py-2 px-3 text-center font-bold text-emerald-300">
-                                      {formatPercent(s.quarterAchievementSellInPercent, false)}
-                                    </td>
-                                  </>
-                                )}
-                                {(achieveQuartalData.isKetSellOut || !achieveQuartalData.isKetSellIn) && (
-                                  <>
-                                    <td className="py-2 px-3 text-right text-slate-300">
-                                      {formatRupiah(s.quarterTargetSellOut, true)}
-                                    </td>
-                                    <td className="py-2 px-3 text-right font-bold text-emerald-300">
-                                      {formatRupiah(s.quarterActualSellOut, true)}
-                                    </td>
-                                    <td className="py-2 px-3 text-center font-bold text-emerald-300">
-                                      {formatPercent(s.quarterAchievementSellOutPercent, false)}
-                                    </td>
-                                  </>
-                                )}
-                                {!achieveQuartalData.isKetSellIn && !achieveQuartalData.isKetSellOut && (
-                                  <td className="py-2 px-3 text-center font-extrabold text-amber-300">
-                                    {formatPercent(s.quarterAchievementPercent, false)}
-                                  </td>
-                                )}
-                              </tr>
-                            ))
-                          ) : (
-                            <tr>
-                              <td colSpan={10} className="py-8 text-center font-sans text-slate-400">
-                                Tidak ada data Sales pada filter yang dipilih.
-                              </td>
-                            </tr>
-                          ))}
-
-                        {hallOfFameTab === 'ba' &&
-                          (achieveQuartalData.filteredBa.length > 0 ? (
-                            achieveQuartalData.filteredBa.map((b, idx) => {
-                              const isEditingTarget = editingBaSellInName === b.baName;
-                              return (
-                                <tr key={`${b.baName}-${b.storeName}`} className="hover:bg-white/5 transition-colors">
-                                  <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
-                                  <td className="py-2 px-3 font-sans max-w-[260px]">
-                                    <span className="font-bold text-white block">{b.baName}</span>
-                                    <span className="text-[10px] text-slate-400 leading-snug block">{b.storeName}</span>
-                                  </td>
-                                  <td className="py-2 px-3 font-sans text-slate-400">{b.coverArea}</td>
-                                  {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
-                                    <>
-                                      <td className="py-2 px-3 text-right whitespace-nowrap">
-                                        {isEditingTarget ? (
-                                          <div className="inline-flex items-center justify-end gap-1">
-                                            <input
-                                              type="text"
-                                              inputMode="numeric"
-                                              autoFocus
-                                              value={editingBaSellInDraft}
-                                              onChange={(e) => setEditingBaSellInDraft(e.target.value)}
-                                              onKeyDown={(e) => {
-                                                if (e.key === 'Enter') handleSaveBaSellInTarget(b.baName);
-                                                if (e.key === 'Escape') setEditingBaSellInName(null);
-                                              }}
-                                              className="w-28 px-2 py-1 rounded bg-[#0B101C] border border-amber-400 text-right text-xs font-mono font-bold text-white outline-none"
-                                              placeholder="Nominal Rp"
-                                            />
-                                            <button
-                                              type="button"
-                                              onClick={() => handleSaveBaSellInTarget(b.baName)}
-                                              className="p-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer"
-                                              title="Simpan Target Sell In"
-                                            >
-                                              <Check className="w-3 h-3" />
-                                            </button>
-                                            <button
-                                              type="button"
-                                              onClick={() => setEditingBaSellInName(null)}
-                                              className="p-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 cursor-pointer"
-                                              title="Batal"
-                                            >
-                                              <X className="w-3 h-3" />
-                                            </button>
-                                          </div>
-                                        ) : (
-                                          <button
-                                            type="button"
-                                            onClick={() => {
-                                              setEditingBaSellInName(b.baName);
-                                              setEditingBaSellInDraft(String(Math.round(b.quarterTargetSellIn || 0)));
-                                            }}
-                                            title="Klik untuk edit Target Sell In BA & Toko ini"
-                                            className="inline-flex items-center gap-1.5 text-slate-200 hover:text-amber-300 border-b border-dashed border-slate-500 hover:border-amber-400 pb-0.5 cursor-pointer transition-colors group"
-                                          >
-                                            <span className={b.isCustomQuarterTarget ? 'text-amber-300 font-bold' : ''}>
-                                              {formatRupiah(b.quarterTargetSellIn, true)}
-                                            </span>
-                                            <Edit3 className="w-3 h-3 text-slate-400 group-hover:text-amber-300 shrink-0" />
-                                          </button>
-                                        )}
-                                      </td>
-                                      <td className="py-2 px-3 text-right font-bold text-sky-300">
-                                        {formatRupiah(b.quarterActualSellIn, true)}
-                                      </td>
-                                      <td className="py-2 px-3 text-center font-bold text-emerald-300">
-                                        {formatPercent(b.quarterAchievementSellInPercent, false)}
-                                      </td>
-                                    </>
-                                  )}
-                                  {(achieveQuartalData.isKetSellOut || !achieveQuartalData.isKetSellIn) && (
-                                    <>
-                                      <td className="py-2 px-3 text-right text-slate-300">
-                                        <span className="block">{formatRupiah(b.quarterTargetSellOut, true)}</span>
-                                        <span className="text-[9.5px] text-slate-400 font-sans block">
-                                          NL: {formatRupiah(b.quarterTargetNonLavojoy ?? 0, true)} • Lav: {formatRupiah(b.quarterTargetLavojoy ?? 0, true)}
-                                        </span>
-                                      </td>
-                                      <td className="py-2 px-3 text-right font-bold text-emerald-300">
-                                        <span className="block">{formatRupiah(b.quarterActualSellOut, true)}</span>
-                                        <span className="text-[9.5px] text-slate-400 font-sans font-normal block">
-                                          NL: {formatRupiah(b.quarterActualNonLavojoy ?? 0, true)} • Lav: {formatRupiah(b.quarterActualLavojoy ?? 0, true)} • Fokus: {b.focusActualPcs}/{b.focusTargetPcs} pcs
-                                        </span>
-                                      </td>
-                                      <td className="py-2 px-3 text-center font-bold text-emerald-300">
-                                        {formatPercent(b.quarterAchievementSellOutPercent, false)}
-                                      </td>
-                                    </>
-                                  )}
-                                  {!achieveQuartalData.isKetSellIn && !achieveQuartalData.isKetSellOut && (
-                                    <td className="py-2 px-3 text-center font-extrabold text-amber-300">
-                                      {formatPercent(b.quarterAchievementPercent, false)}
-                                    </td>
-                                  )}
-                                </tr>
-                              );
-                            })
-                          ) : (
-                            <tr>
-                              <td colSpan={10} className="py-8 text-center font-sans text-slate-400">
-                                Tidak ada data BA pada filter yang dipilih.
-                              </td>
-                            </tr>
-                          ))}
-
-                        {hallOfFameTab === 'trainer' &&
-                          (achieveQuartalData.filteredTrainer.length > 0 ? (
-                            achieveQuartalData.filteredTrainer.map((t, idx) => (
-                              <tr key={t.trainerName} className="hover:bg-white/5 transition-colors">
-                                <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
-                                <td className="py-2 px-3 font-sans font-bold text-white">{t.trainerName}</td>
-                                <td className="py-2 px-3 font-sans text-slate-400">{t.areaCovered}</td>
-                                {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
-                                  <>
-                                    <td className="py-2 px-3 text-right text-slate-300">
-                                      {formatRupiah(t.quarterTargetSellIn, true)}
-                                    </td>
-                                    <td className="py-2 px-3 text-right font-bold text-sky-300">
-                                      {formatRupiah(t.quarterActualSellIn, true)}
-                                    </td>
-                                    <td className="py-2 px-3 text-center font-bold text-emerald-300">
-                                      {formatPercent(t.quarterAchievementSellInPercent, false)}
-                                    </td>
-                                  </>
-                                )}
-                                {(achieveQuartalData.isKetSellOut || !achieveQuartalData.isKetSellIn) && (
-                                  <>
-                                    <td className="py-2 px-3 text-right text-slate-300">
-                                      {formatRupiah(t.quarterTargetSellOut, true)}
-                                    </td>
-                                    <td className="py-2 px-3 text-right font-bold text-emerald-300">
-                                      {formatRupiah(t.quarterActualSellOut, true)}
-                                    </td>
-                                    <td className="py-2 px-3 text-center font-bold text-emerald-300">
-                                      {formatPercent(t.quarterAchievementSellOutPercent, false)}
-                                    </td>
-                                  </>
-                                )}
-                                {!achieveQuartalData.isKetSellIn && !achieveQuartalData.isKetSellOut && (
-                                  <td className="py-2 px-3 text-center font-extrabold text-amber-300">
-                                    {formatPercent(t.quarterAchievementPercent, false)}
-                                  </td>
-                                )}
-                              </tr>
-                            ))
-                          ) : (
-                            <tr>
-                              <td colSpan={10} className="py-8 text-center font-sans text-slate-400">
-                                Tidak ada data Trainer pada filter yang dipilih.
-                              </td>
-                            </tr>
-                          ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            </div>
+          {activeLens === 'achieve_quartal' && rawQuarterSummary && (
+            <AchieveQuartalDashboardPanel
+              rawQuarter={rawQuarterSummary}
+              filters={filters}
+              selectedQuarter={selectedQuarter}
+              onSelectQuarter={setSelectedQuarter}
+              selectedYear={snap.selectedYear}
+              onNavigateTab={onNavigateTab}
+              onTargetsUpdated={handleTargetsUpdated}
+            />
           )}
 
-          {/* SUB-LENS: KPI SALES */}
           {activeLens === 'kpi_sales' && (
             <KpiSalesDashboardPanel
               filters={filters}
@@ -8491,7 +5598,6 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
             />
           )}
 
-          {/* SUB-LENS: KPI TRAINER */}
           {activeLens === 'kpi_trainer' && (
             <KpiTrainerDashboardPanel
               filters={filters}
@@ -8514,3 +5620,4 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     </div>
   );
 };
+
