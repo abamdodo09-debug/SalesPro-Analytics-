@@ -44,7 +44,7 @@ import {
   STORAGE_KEY_SALES_BONUSES_V2,
   loadSalesBonusOverrides,
 } from '../utils/costCalculations';
-import { resolveWeeklyBaStores } from '../utils/weeklyBaRegistry';
+import { normalizeStoreAlnum, resolveWeeklyBaStores } from '../utils/weeklyBaRegistry';
 import { loadKpiTrainerData } from '../services/kpiTrainerService';
 import {
   loadSalesTargets,
@@ -681,7 +681,16 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, all
   }, []);
 
   const filteredWeeklyBaStores = useMemo(() => {
-    const rawList = resolveWeeklyBaStores(allSellOutScopedRecords);
+    const rawList = resolveWeeklyBaStores(allSellOutScopedRecords, { allowMultiBaPerStore: true });
+    const scopedStoreAlnums =
+      filters.searchQuery && filters.searchQuery.trim()
+        ? new Set(
+            allSellOutScopedRecords
+              .map((r) => normalizeStoreAlnum(r.NAMA_STORE))
+              .filter(Boolean)
+          )
+        : null;
+
     return rawList.filter((s) => {
       if (filters.SALES && filters.SALES !== 'ALL') {
         if ((s.salesName || '').trim().toUpperCase() !== filters.SALES.trim().toUpperCase()) return false;
@@ -709,7 +718,8 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, all
           s.salesName.toLowerCase().includes(q) ||
           (s.trainerName || '').toLowerCase().includes(q) ||
           (s.coverArea || '').toLowerCase().includes(q) ||
-          (s.region || '').toLowerCase().includes(q);
+          (s.region || '').toLowerCase().includes(q) ||
+          Boolean(scopedStoreAlnums && scopedStoreAlnums.has(normalizeStoreAlnum(s.storeName)));
         if (!match) return false;
       }
       return true;
@@ -793,6 +803,23 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, all
   // BA & Trainer summaries remain aliases / consistent with costSummary
   const baCostSummary = costSummary;
   const trainerCostSummary = costSummary;
+
+  const baCountPerStoreMap = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const b of baCostSummary.baList) {
+      const baKey = (b.baName || '').trim().toUpperCase().replace(/\s+/g, ' ') || b.baNumber;
+      const stores =
+        b.storeDetails && b.storeDetails.length > 0
+          ? b.storeDetails.map((sd) => sd.storeName.trim().toUpperCase())
+          : [b.storeName.trim().toUpperCase()];
+      for (const st of stores) {
+        if (!st) continue;
+        if (!map.has(st)) map.set(st, new Set<string>());
+        map.get(st)!.add(baKey);
+      }
+    }
+    return map;
+  }, [baCostSummary.baList]);
 
   // Simulator result calculation
   const simSalesResult = useMemo(() => {
@@ -949,17 +976,22 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, all
   // Save BA Edit
   const handleSaveEditBa = () => {
     if (!editingBa) return;
-    const baUpper = (editingBa.baName || '').trim().toUpperCase();
+    const baUpper = (editingBa.baName || '').trim().toUpperCase().replace(/\s+/g, ' ');
     const isRealBaName =
       baUpper &&
-      !['-', 'NON BA', 'NON-BA', '- (NON-BA)', 'STANDBY', 'BA COUNTER'].includes(baUpper);
+      !['-', 'NON BA', 'NON-BA', '- (NON-BA)', 'STANDBY', 'BA COUNTER', 'NO BA', 'TANPA BA'].includes(baUpper);
     const primaryKey = isRealBaName ? editingBa.baName.trim() : editingBa.storeName;
 
     setSingleTargetOverride('baNonLavojoy', primaryKey, editBaNonLavojoyTarget, filters.BULAN);
     setSingleTargetOverride('baLavojoy', primaryKey, editBaLavojoyTarget, filters.BULAN);
 
+    const editingStoreUpper = (editingBa.storeName || '').trim().toUpperCase();
+    const isSharedStore = (baCountPerStoreMap.get(editingStoreUpper)?.size || 0) > 1;
     const isSingleStore = !editingBa.storeDetails || editingBa.storeDetails.length <= 1;
-    if (isSingleStore && editingBa.storeName && editingBa.storeName !== primaryKey) {
+    const shouldAlsoWriteStoreKey =
+      isSingleStore && !isSharedStore && Boolean(editingBa.storeName) && editingBa.storeName !== primaryKey;
+
+    if (shouldAlsoWriteStoreKey) {
       setSingleTargetOverride('baNonLavojoy', editingBa.storeName, editBaNonLavojoyTarget, filters.BULAN);
       setSingleTargetOverride('baLavojoy', editingBa.storeName, editBaLavojoyTarget, filters.BULAN);
     }
@@ -967,12 +999,12 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, all
     setCustomBaNonLavojoyTargets((prev) => ({
       ...prev,
       [primaryKey]: editBaNonLavojoyTarget,
-      ...(isSingleStore && editingBa.storeName ? { [editingBa.storeName]: editBaNonLavojoyTarget } : {}),
+      ...(shouldAlsoWriteStoreKey ? { [editingBa.storeName]: editBaNonLavojoyTarget } : {}),
     }));
     setCustomBaLavojoyTargets((prev) => ({
       ...prev,
       [primaryKey]: editBaLavojoyTarget,
-      ...(isSingleStore && editingBa.storeName ? { [editingBa.storeName]: editBaLavojoyTarget } : {}),
+      ...(shouldAlsoWriteStoreKey ? { [editingBa.storeName]: editBaLavojoyTarget } : {}),
     }));
     setEditingBa(null);
   };
@@ -2580,15 +2612,18 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, all
             <div className="flex flex-wrap items-center gap-2.5">
               <div className="text-xs text-slate-500 font-mono tabular-nums">
                 {(() => {
-                  const totalStores = baCostSummary.baList.reduce(
-                    (acc, b) => acc + (b.storeDetails ? b.storeDetails.length : 1),
-                    0
-                  );
+                  const uniqueStores = new Set(
+                    baCostSummary.baList.flatMap((b) =>
+                      b.storeDetails && b.storeDetails.length > 0
+                        ? b.storeDetails.map((sd) => sd.storeName.trim().toUpperCase())
+                        : [b.storeName.trim().toUpperCase()]
+                    )
+                  ).size;
                   return (
                     <>
                       Total BA: <strong className="text-slate-800">{baCostSummary.baCount}</strong>
-                      {totalStores > baCostSummary.baCount && (
-                        <span className="text-slate-500"> ({totalStores} Toko)</span>
+                      {uniqueStores > 0 && (
+                        <span className="text-slate-500"> ({uniqueStores} Toko)</span>
                       )}{' '}
                       | Total Beban:{' '}
                       <strong className="text-teal-700 font-bold">{formatRupiah(baCostSummary.totalBaCost)}</strong>
@@ -2770,6 +2805,9 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, all
                 ) : (
                   filteredBaList.map((item, idx) => {
                     const isMergedMultiStore = Boolean(item.storeDetails && item.storeDetails.length > 1);
+                    const singleStoreBaCount = !isMergedMultiStore
+                      ? baCountPerStoreMap.get((item.storeName || '').trim().toUpperCase())?.size || 1
+                      : 1;
                     return (
                     <tr key={`${item.baName}__${item.storeName}__${idx}`} className="hover:bg-teal-50/20 transition-colors">
                       <td className="py-3 px-3 font-mono text-slate-400 tabular-nums">{idx + 1}</td>
@@ -2785,7 +2823,10 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, all
                       <td className="py-3 px-3 align-top">
                         {isMergedMultiStore && item.storeDetails ? (
                           <div className="space-y-1.5 min-w-[210px]">
-                            {item.storeDetails.map((sd, sIdx) => (
+                            {item.storeDetails.map((sd, sIdx) => {
+                              const storePeerCount =
+                                baCountPerStoreMap.get(sd.storeName.trim().toUpperCase())?.size || 1;
+                              return (
                               <div
                                 key={`${sd.storeName}_${sIdx}`}
                                 className={sIdx > 0 ? 'pt-1.5 border-t border-slate-100' : ''}
@@ -2795,18 +2836,29 @@ export const CostAreaAnalysis: React.FC<CostAreaAnalysisProps> = ({ records, all
                                 </div>
                                 <div className="text-[10px] text-slate-500">
                                   {sd.coverArea} ({sd.region})
+                                  {storePeerCount > 1 && (
+                                    <span className="ml-1 text-indigo-700 font-semibold">
+                                      · {storePeerCount} BA di toko ini
+                                    </span>
+                                  )}
                                 </div>
                                 <div className="text-[10px] font-mono tabular-nums text-slate-500">
                                   Non-Lav: <span className="text-slate-700 font-semibold">{formatRupiah(sd.sellOutNonLavojoy)}</span> · Lav:{' '}
                                   <span className="text-purple-700 font-semibold">{formatRupiah(sd.sellOutLavojoy)}</span>
                                 </div>
                               </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         ) : (
                           <>
                             <div className="font-bold text-slate-800">{item.storeName}</div>
                             <div className="text-[10px] text-slate-500">{item.coverArea} ({item.region})</div>
+                            {singleStoreBaCount > 1 && (
+                              <div className="text-[10px] font-semibold text-indigo-700 mt-0.5">
+                                {singleStoreBaCount} BA dalam 1 toko · Pencapaian sesuai Nama BA
+                              </div>
+                            )}
                           </>
                         )}
                       </td>

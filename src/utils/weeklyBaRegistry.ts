@@ -808,7 +808,11 @@ export const DEFAULT_WEEKLY_STORES: WeeklyStoreConfig[] = [
  * 4. Menambahkan toko ekstra dari Google Sheet SELL OUT yang memiliki BA & tidak dihapus.
  * 5. Menduplikasi-hapus berdasarkan nama toko agar 1 toko = 1 BA (tidak terhitung gaji ganda).
  */
-export function resolveWeeklyBaStores(sellOutRecords: TransactionRecord[] = []): WeeklyStoreConfig[] {
+export function resolveWeeklyBaStores(
+  sellOutRecords: TransactionRecord[] = [],
+  options?: { allowMultiBaPerStore?: boolean }
+): WeeklyStoreConfig[] {
+  const allowMultiBaPerStore = Boolean(options?.allowMultiBaPerStore);
   let baseStores: WeeklyStoreConfig[] = DEFAULT_WEEKLY_STORES;
   try {
     const rawStores = localStorage.getItem(STORAGE_KEY_WEEKLY_STORES);
@@ -858,7 +862,7 @@ export function resolveWeeklyBaStores(sellOutRecords: TransactionRecord[] = []):
     if (alnum) sheetBaByAlnum.set(alnum, baTrim);
   }
 
-  // Deduplikasi per storeName (case-insensitive) agar 1 toko tidak dihitung gaji ganda
+  // Deduplikasi per storeName (atau per storeName + baName jika allowMultiBaPerStore = true)
   const uniqueMap = new Map<string, WeeklyStoreConfig>();
   const sourceAliasSet = new Set<string>();
   for (const s of filteredBase) {
@@ -869,10 +873,16 @@ export function resolveWeeklyBaStores(sellOutRecords: TransactionRecord[] = []):
     }
     const liveBa = !s.isBaCustom ? (sheetBaByStore.get(sLower) || sheetBaByAlnum.get(sAlnum)) : undefined;
     const resolvedItem: WeeklyStoreConfig = liveBa ? { ...s, baName: liveBa } : { ...s };
-    if (!uniqueMap.has(sLower)) {
-      uniqueMap.set(sLower, resolvedItem);
+    const baNorm = (resolvedItem.baName || '').trim().toUpperCase().replace(/\s+/g, ' ');
+    const dedupKey = allowMultiBaPerStore ? `${sLower}::${baNorm}` : sLower;
+    if (!uniqueMap.has(dedupKey)) {
+      uniqueMap.set(dedupKey, resolvedItem);
     }
   }
+
+  const seenStoreLowers = new Set<string>(
+    Array.from(uniqueMap.values()).map((v) => v.storeName.trim().toLowerCase())
+  );
 
   // Tambahkan toko tambahan dari Google Sheet SELL OUT (yang memiliki BA & tidak dihapus)
   for (const r of sellOutRecords) {
@@ -882,7 +892,7 @@ export function resolveWeeklyBaStores(sellOutRecords: TransactionRecord[] = []):
     if (isStoreExcludedFromIlhamsyah(r.SALES, r.NAMA_STORE)) continue;
     const sLower = r.NAMA_STORE.trim().toLowerCase();
     if (deletedSet.has(sLower)) continue;
-    if (uniqueMap.has(sLower) || sourceAliasSet.has(sLower)) continue;
+    if (sourceAliasSet.has(sLower)) continue;
 
     const baTrim = (r.BA || '').trim();
     const baUpper = baTrim.toUpperCase();
@@ -890,8 +900,13 @@ export function resolveWeeklyBaStores(sellOutRecords: TransactionRecord[] = []):
       continue;
     }
 
-    uniqueMap.set(sLower, {
-      id: `gs-store-${sLower.replace(/\s+/g, '-')}`,
+    const baNorm = baTrim.replace(/\s+/g, ' ').toUpperCase();
+    const dedupKey = allowMultiBaPerStore ? `${sLower}::${baNorm}` : sLower;
+    if (allowMultiBaPerStore ? uniqueMap.has(dedupKey) : seenStoreLowers.has(sLower)) continue;
+    seenStoreLowers.add(sLower);
+
+    uniqueMap.set(dedupKey, {
+      id: `gs-store-${sLower.replace(/\s+/g, '-')}-${baNorm.replace(/\s+/g, '-').toLowerCase()}`,
       storeName: r.NAMA_STORE.trim(),
       baName: baTrim,
       salesName: (r.SALES && r.SALES !== '-' ? r.SALES.trim() : 'SALES UMUM'),

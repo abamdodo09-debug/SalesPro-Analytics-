@@ -16,6 +16,7 @@ import {
   normalizeStoreAlnum,
   resolveWeeklyBaStores,
 } from './weeklyBaRegistry';
+import { isPlaceholderBaNameKeaktifan } from '../services/keaktifanDataService';
 
 export const DEFAULT_TRAINER_BASE_SALARY = 3900000;
 export const DEFAULT_TRAINER_TRANSPORT_ALLOWANCE = 500000;
@@ -33,9 +34,30 @@ const isGenericBaPlaceholder = (normalizedKey: string): boolean =>
   normalizedKey === 'NON-BA' ||
   normalizedKey === '- (NON-BA)' ||
   normalizedKey === 'STANDBY' ||
+  normalizedKey === 'BA STANDBY' ||
   normalizedKey === 'BA COUNTER' ||
+  normalizedKey === 'NO BA' ||
+  normalizedKey === 'TANPA BA' ||
+  normalizedKey === 'TIDAK ADA BA' ||
   normalizedKey === 'KOSONG' ||
   normalizedKey === 'VACANT';
+
+const isPlaceholderBaEntry = (rawBa?: string, storeName?: string): boolean => {
+  const norm = normalizeBaKey(rawBa || '');
+  return isGenericBaPlaceholder(norm) || isPlaceholderBaNameKeaktifan(rawBa, storeName);
+};
+
+const splitConfiguredBaNames = (rawBa?: string): string[] => {
+  const raw = (rawBa || '').trim();
+  if (!raw) return ['BA COUNTER'];
+  const parts = raw
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.length <= 1) return [raw];
+  const validParts = parts.filter((p) => !isGenericBaPlaceholder(normalizeBaKey(p)));
+  return validParts.length > 0 ? validParts : [parts[0]];
+};
 
 export interface SalesBaProductivityOverride {
   customTotalSellOut?: number;
@@ -621,17 +643,22 @@ export function aggregateAreaCost(
     options?.salesBaProductivityOverrides ?? loadSalesBaProductivityOverrides()
   );
 
-  // Resolve Weekly BA Store registry if provided or requested
+  // Resolve Weekly BA Store registry if provided or requested (pertahankan multi-BA per toko)
   let weeklyBaList: WeeklyStoreConfig[] | undefined = undefined;
   if (options?.weeklyBaStoresOverride !== undefined) {
     const dedup = new Map<string, WeeklyStoreConfig>();
     for (const ws of options.weeklyBaStoresOverride) {
-      const k = (ws.storeName || '').trim().toLowerCase();
-      if (k && !dedup.has(k)) dedup.set(k, ws);
+      const storeKey = (ws.storeName || '').trim().toLowerCase();
+      if (!storeKey) continue;
+      const baNorm = normalizeBaKey(ws.baName || '');
+      const compositeKey = isGenericBaPlaceholder(baNorm)
+        ? `${storeKey}::__NO_BA__`
+        : `${storeKey}::${baNorm}`;
+      if (!dedup.has(compositeKey)) dedup.set(compositeKey, ws);
     }
     weeklyBaList = Array.from(dedup.values());
   } else if (options?.syncBaFromWeeklyRegistry) {
-    weeklyBaList = resolveWeeklyBaStores(baSellOutSource);
+    weeklyBaList = resolveWeeklyBaStores(baSellOutSource, { allowMultiBaPerStore: true });
   }
 
   // 1. Group by Sales Representative (SELL IN)
@@ -645,7 +672,7 @@ export function aggregateAreaCost(
     }
   > = {};
 
-  // 2. Group by Store with BA (Toko yang ada BA)
+  // 2. Group by (Nama BA, Store Name) agar 2+ BA dalam 1 toko tetap terpisah pencapaiannya
   const baStoreMap: Record<
     string,
     {
@@ -665,31 +692,78 @@ export function aggregateAreaCost(
 
   const baLookupByLower = new Map<string, string>();
   const baLookupByAlnum = new Map<string, string>();
+  const weeklyTemplatesByLower = new Map<string, WeeklyStoreConfig[]>();
+  const weeklyTemplatesByAlnum = new Map<string, WeeklyStoreConfig[]>();
   const weeklyTrainerByStoreLower = new Map<string, string>();
+  const fallbackBucketKeyByStoreUpper = new Map<string, string>();
+  const autoSeededKeysByStoreUpper = new Map<string, Set<string>>();
 
   if (weeklyBaList) {
     weeklyBaList.forEach((ws, idx) => {
       const storeName = ws.storeName.trim();
+      const storeLower = storeName.toLowerCase();
+      const storeUpper = storeName.toUpperCase();
+      const storeAlnum = normalizeStoreAlnum(storeName);
       const salesName = (ws.salesName || '-').trim().toUpperCase();
-      baStoreMap[storeName] = {
-        baName: ws.baName || 'BA COUNTER',
-        baNumber: ws.id ? ws.id.toUpperCase() : `BA-${String(idx + 1).padStart(3, '0')}`,
-        storeName,
-        coverArea: ws.coverArea || '-',
-        region: ws.region || '-',
-        salesName,
-        spv: 'WIDODO',
-        sellOutNonLavojoy: 0,
-        sellOutLavojoy: 0,
-        sellOutActual: 0,
-        focusActualPcs: 0,
-      };
-      baLookupByLower.set(storeName.toLowerCase(), storeName);
-      const alnum = normalizeStoreAlnum(storeName);
-      if (alnum) baLookupByAlnum.set(alnum, storeName);
-      if (ws.trainerName) {
-        weeklyTrainerByStoreLower.set(storeName.toLowerCase(), ws.trainerName.trim().toUpperCase());
+
+      if (!baLookupByLower.has(storeLower)) {
+        baLookupByLower.set(storeLower, storeName);
       }
+      if (storeAlnum && !baLookupByAlnum.has(storeAlnum)) {
+        baLookupByAlnum.set(storeAlnum, storeName);
+      }
+      if (!weeklyTemplatesByLower.has(storeLower)) {
+        weeklyTemplatesByLower.set(storeLower, []);
+      }
+      weeklyTemplatesByLower.get(storeLower)!.push(ws);
+      if (storeAlnum) {
+        if (!weeklyTemplatesByAlnum.has(storeAlnum)) {
+          weeklyTemplatesByAlnum.set(storeAlnum, []);
+        }
+        weeklyTemplatesByAlnum.get(storeAlnum)!.push(ws);
+      }
+      if (ws.trainerName && !weeklyTrainerByStoreLower.has(storeLower)) {
+        weeklyTrainerByStoreLower.set(storeLower, ws.trainerName.trim().toUpperCase());
+      }
+
+      const baCandidates = splitConfiguredBaNames(ws.baName);
+      baCandidates.forEach((candidateBa, bIdx) => {
+        const baNorm = normalizeBaKey(candidateBa);
+        const bucketKey = isGenericBaPlaceholder(baNorm)
+          ? `__NO_BA__::${storeUpper}`
+          : `${baNorm}::${storeUpper}`;
+
+        if (!baStoreMap[bucketKey]) {
+          baStoreMap[bucketKey] = {
+            baName: candidateBa || 'BA COUNTER',
+            baNumber: ws.id
+              ? baCandidates.length > 1
+                ? `${ws.id.toUpperCase()}-${bIdx + 1}`
+                : ws.id.toUpperCase()
+              : `BA-${String(idx + 1).padStart(3, '0')}`,
+            storeName,
+            coverArea: ws.coverArea || '-',
+            region: ws.region || '-',
+            salesName,
+            spv: 'WIDODO',
+            sellOutNonLavojoy: 0,
+            sellOutLavojoy: 0,
+            sellOutActual: 0,
+            focusActualPcs: 0,
+          };
+        }
+
+        if (!fallbackBucketKeyByStoreUpper.has(storeUpper)) {
+          fallbackBucketKeyByStoreUpper.set(storeUpper, bucketKey);
+        }
+
+        if (!ws.isBaCustom) {
+          if (!autoSeededKeysByStoreUpper.has(storeUpper)) {
+            autoSeededKeysByStoreUpper.set(storeUpper, new Set<string>());
+          }
+          autoSeededKeysByStoreUpper.get(storeUpper)!.add(bucketKey);
+        }
+      });
 
       if (salesName && salesName !== '-' && salesName !== 'ALL' && salesName !== 'OPERASIONAL' && salesName !== 'SALES UMUM') {
         if (!salesMap[salesName]) {
@@ -796,6 +870,10 @@ export function aggregateAreaCost(
   }
 
   // PASS B: BA SELL OUT (Cut-off tgl 26 bulan lalu s/d 25 bulan berjalan)
+  const storesWithRealTxBa = new Set<string>();
+  const bucketsWithTx = new Set<string>();
+  let dynamicBaSeq = 1;
+
   for (const r of baSellOutSource) {
     const val = r.VALUE || 0;
     const ketUpper = (r.KET || '').trim().toUpperCase();
@@ -805,39 +883,100 @@ export function aggregateAreaCost(
     if (weeklyBaList) {
       const rawStore = (r.NAMA_STORE || '').trim();
       if (!rawStore) continue;
-      const matchedKey =
-        baLookupByLower.get(rawStore.toLowerCase()) ||
-        baLookupByAlnum.get(normalizeStoreAlnum(rawStore));
-      if (!matchedKey || !baStoreMap[matchedKey]) continue;
+      const rawStoreLower = rawStore.toLowerCase();
+      const rawStoreAlnum = normalizeStoreAlnum(rawStore);
+      const matchedStoreName =
+        baLookupByLower.get(rawStoreLower) ||
+        baLookupByAlnum.get(rawStoreAlnum);
+      if (!matchedStoreName) continue;
 
-      if (r.BA && r.BA !== '-' && r.BA.trim().length > 0) {
-        const baTrim = r.BA.trim();
-        const baNorm = normalizeBaKey(baTrim);
-        if (!isGenericBaPlaceholder(baNorm)) {
-          baStoreMap[matchedKey].baName = baTrim;
+      const matchedStoreUpper = matchedStoreName.toUpperCase();
+      const rawBaTrim = (r.BA || '').trim();
+      const rawBaNorm = normalizeBaKey(rawBaTrim);
+      const hasValidTxBa = !isPlaceholderBaEntry(rawBaTrim, matchedStoreName);
+
+      let targetBucketKey: string | undefined;
+      if (hasValidTxBa) {
+        targetBucketKey = `${rawBaNorm}::${matchedStoreUpper}`;
+        storesWithRealTxBa.add(matchedStoreUpper);
+
+        if (!baStoreMap[targetBucketKey]) {
+          const templates =
+            weeklyTemplatesByLower.get(matchedStoreName.toLowerCase()) ||
+            weeklyTemplatesByAlnum.get(normalizeStoreAlnum(matchedStoreName)) ||
+            [];
+          const matchingTpl =
+            templates.find((t) => normalizeBaKey(t.baName) === rawBaNorm) || templates[0];
+          const tplSales =
+            matchingTpl?.salesName &&
+            matchingTpl.salesName !== '-' &&
+            matchingTpl.salesName.toUpperCase() !== 'SALES UMUM'
+              ? matchingTpl.salesName.trim().toUpperCase()
+              : undefined;
+          const txSales =
+            r.SALES && r.SALES !== '-' ? r.SALES.trim().toUpperCase() : undefined;
+
+          baStoreMap[targetBucketKey] = {
+            baName: rawBaTrim,
+            baNumber:
+              (r.BA_Number && r.BA_Number.trim() && r.BA_Number.trim() !== '-'
+                ? r.BA_Number.trim()
+                : undefined) ||
+              `BA-${String(dynamicBaSeq++).padStart(3, '0')}`,
+            storeName: matchedStoreName,
+            coverArea:
+              (matchingTpl?.coverArea && matchingTpl.coverArea !== '-'
+                ? matchingTpl.coverArea
+                : r.COVER_AREA) || '-',
+            region:
+              (matchingTpl?.region && matchingTpl.region !== '-'
+                ? matchingTpl.region
+                : r.REGION) || '-',
+            salesName: tplSales || txSales || '-',
+            spv: (r.SPV && r.SPV !== '-' ? r.SPV : 'WIDODO'),
+            sellOutNonLavojoy: 0,
+            sellOutLavojoy: 0,
+            sellOutActual: 0,
+            focusActualPcs: 0,
+          };
+        } else if (
+          r.BA_Number &&
+          r.BA_Number.trim() &&
+          r.BA_Number.trim() !== '-' &&
+          /^WS-|^GS-STORE-|^BA-\d+$/i.test(baStoreMap[targetBucketKey].baNumber)
+        ) {
+          baStoreMap[targetBucketKey].baNumber = r.BA_Number.trim();
         }
+      } else {
+        targetBucketKey = fallbackBucketKeyByStoreUpper.get(matchedStoreUpper);
       }
+
+      if (!targetBucketKey || !baStoreMap[targetBucketKey]) continue;
+      bucketsWithTx.add(targetBucketKey);
 
       const isLavojoy = (r.BRAND || '').trim().toLowerCase() === 'lavojoy';
       if (isLavojoy) {
-        baStoreMap[matchedKey].sellOutLavojoy += val;
+        baStoreMap[targetBucketKey].sellOutLavojoy += val;
       } else {
-        baStoreMap[matchedKey].sellOutNonLavojoy += val;
+        baStoreMap[targetBucketKey].sellOutNonLavojoy += val;
       }
-      baStoreMap[matchedKey].sellOutActual += val;
+      baStoreMap[targetBucketKey].sellOutActual += val;
 
       if (isFocusProduct(r.PRODUK_FOCUS || r)) {
-        baStoreMap[matchedKey].focusActualPcs += (r.QTY || 0);
+        baStoreMap[targetBucketKey].focusActualPcs += (r.QTY || 0);
       }
     } else {
-      const baNorm = normalizeBaKey(r.BA || '');
+      const baTrim = (r.BA || '').trim();
+      const baNorm = normalizeBaKey(baTrim);
       if (isGenericBaPlaceholder(baNorm)) continue;
-      const storeKey = r.NAMA_STORE;
-      if (!baStoreMap[storeKey]) {
-        baStoreMap[storeKey] = {
-          baName: r.BA,
-          baNumber: r.BA_Number || 'BA-' + Math.floor(Math.random() * 900 + 100),
-          storeName: storeKey,
+      const storeName = (r.NAMA_STORE || '').trim();
+      if (!storeName) continue;
+      const bucketKey = `${baNorm}::${storeName.toUpperCase()}`;
+      if (!baStoreMap[bucketKey]) {
+        baStoreMap[bucketKey] = {
+          baName: baTrim,
+          baNumber: r.BA_Number || `BA-${String(dynamicBaSeq++).padStart(3, '0')}`,
+          storeName,
           coverArea: r.COVER_AREA || '-',
           region: r.REGION || '-',
           salesName: r.SALES || '-',
@@ -848,26 +987,39 @@ export function aggregateAreaCost(
           focusActualPcs: 0,
         };
       }
-      if (r.SALES && r.SALES !== '-' && baStoreMap[storeKey].salesName === '-') {
-        baStoreMap[storeKey].salesName = r.SALES;
+      if (r.SALES && r.SALES !== '-' && baStoreMap[bucketKey].salesName === '-') {
+        baStoreMap[bucketKey].salesName = r.SALES;
       }
-      if (r.SPV && r.SPV !== '-' && baStoreMap[storeKey].spv === '-') {
-        baStoreMap[storeKey].spv = r.SPV;
+      if (r.SPV && r.SPV !== '-' && baStoreMap[bucketKey].spv === '-') {
+        baStoreMap[bucketKey].spv = r.SPV;
       }
 
       const isLavojoy = (r.BRAND || '').trim().toLowerCase() === 'lavojoy';
       if (isLavojoy) {
-        baStoreMap[storeKey].sellOutLavojoy += val;
+        baStoreMap[bucketKey].sellOutLavojoy += val;
       } else {
-        baStoreMap[storeKey].sellOutNonLavojoy += val;
+        baStoreMap[bucketKey].sellOutNonLavojoy += val;
       }
-      baStoreMap[storeKey].sellOutActual += val;
+      baStoreMap[bucketKey].sellOutActual += val;
 
       const isFocus = isFocusProduct(r.PRODUK_FOCUS || r);
       if (isFocus && (r.KET === 'SELL OUT' || !r.KET || r.KET === 'SELL IN')) {
-        baStoreMap[storeKey].focusActualPcs += (r.QTY || 0);
+        baStoreMap[bucketKey].focusActualPcs += (r.QTY || 0);
       }
     }
+  }
+
+  // Hapus template BA bawaan (!isBaCustom) yang 0 transaksi jika pada periode ini toko tsb sudah memiliki transaksi BA aktual dari sheet
+  if (weeklyBaList && storesWithRealTxBa.size > 0) {
+    storesWithRealTxBa.forEach((storeUpper) => {
+      const seededSet = autoSeededKeysByStoreUpper.get(storeUpper);
+      if (!seededSet) return;
+      seededSet.forEach((seededKey) => {
+        if (!bucketsWithTx.has(seededKey)) {
+          delete baStoreMap[seededKey];
+        }
+      });
+    });
   }
 
   // PASS C: Trainer SELL OUT & Produk Fokus (Cut-off tgl 26 bulan lalu s/d 25 bulan berjalan)
@@ -1132,15 +1284,23 @@ export function aggregateAreaCost(
     })
     .sort((a, b) => b.sellOutActual - a.sellOutActual);
 
-  // Map BA per store for sales lookup (daftarkan semua toko gabungan milik BA tsb)
-  const baByStoreLookup: Record<string, BaSalaryItem> = {};
+  // Map BA per store for sales lookup (mendukung 1 toko dengan 2+ BA)
+  const baByStoreLookup: Record<string, BaSalaryItem[]> = {};
+  const registerBaStoreLookup = (storeKeyRaw: string, ba: BaSalaryItem) => {
+    if (!storeKeyRaw) return;
+    const keys = [storeKeyRaw, storeKeyRaw.trim().toUpperCase()];
+    for (const k of keys) {
+      if (!baByStoreLookup[k]) baByStoreLookup[k] = [];
+      if (!baByStoreLookup[k].includes(ba)) {
+        baByStoreLookup[k].push(ba);
+      }
+    }
+  };
   for (const ba of baList) {
-    baByStoreLookup[ba.storeName] = ba;
-    baByStoreLookup[ba.storeName.trim().toUpperCase()] = ba;
+    registerBaStoreLookup(ba.storeName, ba);
     if (ba.storeDetails) {
       for (const sd of ba.storeDetails) {
-        baByStoreLookup[sd.storeName] = ba;
-        baByStoreLookup[sd.storeName.trim().toUpperCase()] = ba;
+        registerBaStoreLookup(sd.storeName, ba);
       }
     }
   }
@@ -1194,8 +1354,9 @@ export function aggregateAreaCost(
         }
       } else {
         data.coveredStores.forEach((storeName) => {
-          const ba = baByStoreLookup[storeName] || baByStoreLookup[storeName.trim().toUpperCase()];
-          if (ba) {
+          const basInStore =
+            baByStoreLookup[storeName] || baByStoreLookup[storeName.trim().toUpperCase()] || [];
+          for (const ba of basInStore) {
             const baKey = isGenericBaPlaceholder(normalizeBaKey(ba.baName))
               ? ba.storeName.trim().toLowerCase()
               : normalizeBaKey(ba.baName);
