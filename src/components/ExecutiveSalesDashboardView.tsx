@@ -123,6 +123,7 @@ interface ExecutiveSalesDashboardViewProps {
   onNavigateTab: (tab: ActiveTab) => void;
   isFullScreen?: boolean;
   onToggleFullScreen?: () => void;
+  isActive?: boolean;
 }
 
 let cachedKpiSalesItems: KpiSalesScorecardItem[] | null = null;
@@ -5067,10 +5068,12 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
   onNavigateTab,
   isFullScreen = false,
   onToggleFullScreen,
+  isActive = true,
 }) => {
   // 2-tier lens state for instant 0ms sidebar button feedback
   const [uiLens, setUiLens] = useState<SidebarLens>('overview');
   const [activeLens, setActiveLens] = useState<SidebarLens>('overview');
+  const [visitedLenses, setVisitedLenses] = useState<Set<SidebarLens>>(() => new Set(['overview']));
   const [isPendingLens, startLensTransition] = useTransition();
 
   // Periode Tanggal Filter (e.g. Tgl 1-10 OKTOBER vs NOVEMBER)
@@ -5120,6 +5123,12 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
   const handleSelectLens = useCallback((lens: SidebarLens) => {
     setUiLens(lens);
     startLensTransition(() => {
+      setVisitedLenses((prev) => {
+        if (prev.has(lens)) return prev;
+        const next = new Set(prev);
+        next.add(lens);
+        return next;
+      });
       setActiveLens(lens);
     });
   }, []);
@@ -5231,30 +5240,39 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     lensCache.quarterRawByQ = {};
   }
 
+  const needTrenBulanan = activeLens === 'tren_bulanan' || visitedLenses.has('tren_bulanan');
+  const needMarketShare = activeLens === 'market_share' || visitedLenses.has('market_share');
+  const needProductMix = activeLens === 'product_mix' || visitedLenses.has('product_mix');
+  const needChannelGrowth = activeLens === 'channel_growth' || visitedLenses.has('channel_growth');
+  const needPromoBa = activeLens === 'promo_ba' || visitedLenses.has('promo_ba');
+  const needFinanceBills = activeLens === 'finance_bills' || visitedLenses.has('finance_bills');
+  const needTargetsAlerts = activeLens === 'targets_alerts' || visitedLenses.has('targets_alerts');
+  const needAchieveQuartal = activeLens === 'achieve_quartal' || visitedLenses.has('achieve_quartal');
+
   // Tren Pencapaian Bulanan & Rincian Data state & cached memo
   const [trendTimeframeMode, setTrendTimeframeMode] = useState<TimeframeMode>('bulanan');
   const trendRecords = useMemo(() => {
-    if (activeLens !== 'tren_bulanan') return [];
+    if (!needTrenBulanan) return [];
     if (!lensCacheRef.current.trendRecords) {
       lensCacheRef.current.trendRecords = deferredDayRange
         ? filterRecordsByDayRange(filteredRecords, deferredDayRange)
         : filteredRecords;
     }
     return lensCacheRef.current.trendRecords;
-  }, [activeLens, filteredRecords, deferredDayRange]);
+  }, [needTrenBulanan, filteredRecords, deferredDayRange]);
 
   const trendChartData = useMemo(() => {
-    if (activeLens !== 'tren_bulanan') return [];
+    if (!needTrenBulanan) return [];
     const existing = lensCacheRef.current.trendByMode[trendTimeframeMode];
     if (existing) return existing;
     const computed = aggregateTimeframe(trendRecords, trendTimeframeMode);
     lensCacheRef.current.trendByMode[trendTimeframeMode] = computed;
     return computed;
-  }, [activeLens, trendRecords, trendTimeframeMode]);
+  }, [needTrenBulanan, trendRecords, trendTimeframeMode]);
 
   const monthlySpvTargetsData = useMemo(() => {
     void quartalRefreshTick;
-    if (activeLens !== 'tren_bulanan') return null;
+    if (!needTrenBulanan) return null;
     if (!lensCacheRef.current.monthlySpvTargets) {
       lensCacheRef.current.monthlySpvTargets = buildMonthlySpvTargetsMap(allRecords, {
         TAHUN: filters.TAHUN,
@@ -5266,7 +5284,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     }
     return lensCacheRef.current.monthlySpvTargets;
   }, [
-    activeLens,
+    needTrenBulanan,
     allRecords,
     filters.TAHUN,
     filters.SPV,
@@ -5277,25 +5295,25 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
   ]);
 
   const marketShareData = useMemo(() => {
-    if (activeLens !== 'market_share') return null;
+    if (!needMarketShare) return null;
     if (lensCacheRef.current.marketShare?.tick === quartalRefreshTick) {
       return lensCacheRef.current.marketShare.data;
     }
     const data = buildMarketShareLensData();
     lensCacheRef.current.marketShare = { tick: quartalRefreshTick, data };
     return data;
-  }, [activeLens, quartalRefreshTick]);
+  }, [needMarketShare, quartalRefreshTick]);
 
   const productMixData = useMemo(() => {
-    if (activeLens !== 'product_mix') return null;
+    if (!needProductMix) return null;
     if (!lensCacheRef.current.productMix) {
       lensCacheRef.current.productMix = buildProductMixLensData(filteredRecords, deferredDayRange);
     }
     return lensCacheRef.current.productMix;
-  }, [activeLens, filteredRecords, deferredDayRange]);
+  }, [needProductMix, filteredRecords, deferredDayRange]);
 
   const channelGrowthRows = useMemo(() => {
-    if (activeLens !== 'channel_growth') return null;
+    if (!needChannelGrowth) return null;
     if (!lensCacheRef.current.channelGrowth) {
       lensCacheRef.current.channelGrowth = buildChannelGrowthLensData(
         allRecords,
@@ -5305,20 +5323,20 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
       );
     }
     return lensCacheRef.current.channelGrowth;
-  }, [activeLens, allRecords, snap.selectedYear, filters, deferredDayRange]);
+  }, [needChannelGrowth, allRecords, snap.selectedYear, filters, deferredDayRange]);
 
   const promoBaData = useMemo(() => {
-    if (activeLens !== 'promo_ba') return null;
+    if (!needPromoBa) return null;
     if (lensCacheRef.current.promoBa?.tick === quartalRefreshTick) {
       return lensCacheRef.current.promoBa.data;
     }
     const data = buildPromoBaLensData();
     lensCacheRef.current.promoBa = { tick: quartalRefreshTick, data };
     return data;
-  }, [activeLens, quartalRefreshTick]);
+  }, [needPromoBa, quartalRefreshTick]);
 
   const monthlyProfitHrSummary = useMemo(() => {
-    if (activeLens !== 'finance_bills') return null;
+    if (!needFinanceBills) return null;
     if (!lensCacheRef.current.monthlyProfit) {
       lensCacheRef.current.monthlyProfit = buildMonthlyProfitHrSummary(
         allRecords,
@@ -5328,10 +5346,10 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
       );
     }
     return lensCacheRef.current.monthlyProfit;
-  }, [activeLens, allRecords, filters, snap.selectedYear, deferredDayRange]);
+  }, [needFinanceBills, allRecords, filters, snap.selectedYear, deferredDayRange]);
 
   const targetsAlertsData = useMemo(() => {
-    if (activeLens !== 'targets_alerts') return null;
+    if (!needTargetsAlerts) return null;
     if (!lensCacheRef.current.targetsAlerts) {
       lensCacheRef.current.targetsAlerts = buildTargetsAlertsLensData(
         allRecords,
@@ -5342,7 +5360,7 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
       );
     }
     return lensCacheRef.current.targetsAlerts;
-  }, [activeLens, allRecords, filteredRecords, filters, snap.gapDiagnosis, deferredDayRange]);
+  }, [needTargetsAlerts, allRecords, filteredRecords, filters, snap.gapDiagnosis, deferredDayRange]);
 
   const [selectedQuarter, setSelectedQuarter] = useState<QuarterPeriodKey>('Q4');
 
@@ -5356,48 +5374,205 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
     }
   }, [filters.BULAN]);
 
+  const computeQuarterSummaryForSelected = useCallback(
+    (qKey: QuarterPeriodKey) => {
+      const hasProductSubFilters =
+        filters.BRAND !== 'ALL' ||
+        (filters.KATEGORI && filters.KATEGORI !== 'ALL') ||
+        (filters.STATUS_PRODUK && filters.STATUS_PRODUK !== 'ALL') ||
+        filters.SKU !== 'ALL';
+
+      let baseQuarterRecords = allRecords;
+      if (hasProductSubFilters) {
+        baseQuarterRecords = filterRecords(allRecords, {
+          ...filters,
+          BULAN: 'ALL',
+          TAHUN: 'ALL',
+          SALES: 'ALL',
+          TRAINER: 'ALL',
+          SPV: 'ALL',
+          REGION: 'ALL',
+          NAMA_STORE: 'ALL',
+          KET: 'ALL',
+          searchQuery: '',
+        });
+      }
+      if (deferredDayRange && (deferredDayRange.startDay || deferredDayRange.endDay)) {
+        baseQuarterRecords = filterRecordsByDayRange(baseQuarterRecords, deferredDayRange);
+      }
+
+      const activeKet = (filters.KET || 'ALL').toUpperCase().trim();
+      return calculateQuarterlySummary(
+        baseQuarterRecords,
+        qKey,
+        snap.selectedYear,
+        filters.REGION,
+        filters.SPV,
+        activeKet
+      );
+    },
+    [allRecords, filters, snap.selectedYear, deferredDayRange]
+  );
+
   const rawQuarterSummary = useMemo(() => {
-    if (activeLens !== 'achieve_quartal') return null;
+    if (!needAchieveQuartal) return null;
     const cachedQ = lensCacheRef.current.quarterRawByQ[selectedQuarter];
     if (cachedQ) return cachedQ;
-
-    const hasProductSubFilters =
-      filters.BRAND !== 'ALL' ||
-      (filters.KATEGORI && filters.KATEGORI !== 'ALL') ||
-      (filters.STATUS_PRODUK && filters.STATUS_PRODUK !== 'ALL') ||
-      filters.SKU !== 'ALL';
-
-    let baseQuarterRecords = allRecords;
-    if (hasProductSubFilters) {
-      baseQuarterRecords = filterRecords(allRecords, {
-        ...filters,
-        BULAN: 'ALL',
-        TAHUN: 'ALL',
-        SALES: 'ALL',
-        TRAINER: 'ALL',
-        SPV: 'ALL',
-        REGION: 'ALL',
-        NAMA_STORE: 'ALL',
-        KET: 'ALL',
-        searchQuery: '',
-      });
-    }
-    if (deferredDayRange && (deferredDayRange.startDay || deferredDayRange.endDay)) {
-      baseQuarterRecords = filterRecordsByDayRange(baseQuarterRecords, deferredDayRange);
-    }
-
-    const activeKet = (filters.KET || 'ALL').toUpperCase().trim();
-    const rawQuarter = calculateQuarterlySummary(
-      baseQuarterRecords,
-      selectedQuarter,
-      snap.selectedYear,
-      filters.REGION,
-      filters.SPV,
-      activeKet
-    );
+    const rawQuarter = computeQuarterSummaryForSelected(selectedQuarter);
     lensCacheRef.current.quarterRawByQ[selectedQuarter] = rawQuarter;
     return rawQuarter;
-  }, [activeLens, allRecords, filters, selectedQuarter, snap.selectedYear, deferredDayRange, quartalRefreshTick]);
+  }, [needAchieveQuartal, selectedQuarter, computeQuarterSummaryForSelected, quartalRefreshTick]);
+
+  // Cancellable idle pre-warmer: silently warms unvisited lens caches in short idle slices
+  // without causing re-renders, so clicking any unvisited menu feels instantaneous.
+  useEffect(() => {
+    if (!isActive || activeLens !== 'overview') return;
+
+    let cancelled = false;
+    let idleHandle: number | null = null;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+    const tasks: Array<() => void> = [
+      () => {
+        if (!lensCacheRef.current.monthlySpvTargets) {
+          lensCacheRef.current.monthlySpvTargets = buildMonthlySpvTargetsMap(allRecords, {
+            TAHUN: filters.TAHUN,
+            SPV: filters.SPV,
+            REGION: filters.REGION,
+            SALES: filters.SALES,
+            NAMA_STORE: filters.NAMA_STORE,
+          });
+        }
+        if (!lensCacheRef.current.trendRecords) {
+          lensCacheRef.current.trendRecords = deferredDayRange
+            ? filterRecordsByDayRange(filteredRecords, deferredDayRange)
+            : filteredRecords;
+        }
+        if (!lensCacheRef.current.trendByMode[trendTimeframeMode]) {
+          lensCacheRef.current.trendByMode[trendTimeframeMode] = aggregateTimeframe(
+            lensCacheRef.current.trendRecords,
+            trendTimeframeMode
+          );
+        }
+      },
+      () => {
+        if (!lensCacheRef.current.productMix) {
+          lensCacheRef.current.productMix = buildProductMixLensData(filteredRecords, deferredDayRange);
+        }
+      },
+      () => {
+        if (!lensCacheRef.current.channelGrowth) {
+          lensCacheRef.current.channelGrowth = buildChannelGrowthLensData(
+            allRecords,
+            snap.selectedYear,
+            filters,
+            deferredDayRange
+          );
+        }
+      },
+      () => {
+        if (!lensCacheRef.current.targetsAlerts) {
+          lensCacheRef.current.targetsAlerts = buildTargetsAlertsLensData(
+            allRecords,
+            filteredRecords,
+            filters,
+            snap.gapDiagnosis,
+            deferredDayRange
+          );
+        }
+      },
+      () => {
+        if (!lensCacheRef.current.monthlyProfit) {
+          lensCacheRef.current.monthlyProfit = buildMonthlyProfitHrSummary(
+            allRecords,
+            filters,
+            snap.selectedYear,
+            deferredDayRange
+          );
+        }
+      },
+      () => {
+        if (lensCacheRef.current.marketShare?.tick !== quartalRefreshTick) {
+          lensCacheRef.current.marketShare = {
+            tick: quartalRefreshTick,
+            data: buildMarketShareLensData(),
+          };
+        }
+        if (lensCacheRef.current.promoBa?.tick !== quartalRefreshTick) {
+          lensCacheRef.current.promoBa = {
+            tick: quartalRefreshTick,
+            data: buildPromoBaLensData(),
+          };
+        }
+      },
+      () => {
+        getCachedKpiSalesItems();
+        getCachedKpiTrainerItems();
+      },
+      () => {
+        if (!lensCacheRef.current.quarterRawByQ[selectedQuarter]) {
+          lensCacheRef.current.quarterRawByQ[selectedQuarter] =
+            computeQuarterSummaryForSelected(selectedQuarter);
+        }
+      },
+    ];
+
+    let idx = 0;
+    const runNext = () => {
+      if (cancelled || idx >= tasks.length) return;
+      try {
+        tasks[idx]();
+      } catch {
+        // Ignore background warmup errors; on-demand memo remains authoritative
+      }
+      idx += 1;
+      if (!cancelled && idx < tasks.length) {
+        scheduleNext();
+      }
+    };
+
+    const scheduleNext = () => {
+      if (cancelled) return;
+      const win = window as Window & {
+        requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      };
+      if (typeof win.requestIdleCallback === 'function') {
+        idleHandle = win.requestIdleCallback(() => {
+          timeoutHandle = setTimeout(runNext, 90);
+        }, { timeout: 600 });
+      } else {
+        timeoutHandle = setTimeout(runNext, 140);
+      }
+    };
+
+    timeoutHandle = setTimeout(scheduleNext, 260);
+
+    return () => {
+      cancelled = true;
+      const win = window as Window & {
+        cancelIdleCallback?: (id: number) => void;
+      };
+      if (idleHandle !== null && typeof win.cancelIdleCallback === 'function') {
+        win.cancelIdleCallback(idleHandle);
+      }
+      if (timeoutHandle !== null) {
+        clearTimeout(timeoutHandle);
+      }
+    };
+  }, [
+    isActive,
+    activeLens,
+    allRecords,
+    filteredRecords,
+    filters,
+    deferredDayRange,
+    snap.selectedYear,
+    snap.gapDiagnosis,
+    trendTimeframeMode,
+    selectedQuarter,
+    quartalRefreshTick,
+    computeQuarterSummaryForSelected,
+  ]);
 
   const sidebarItems = useMemo<
     ReadonlyArray<{
@@ -5806,126 +5981,186 @@ export const ExecutiveSalesDashboardView: React.FC<ExecutiveSalesDashboardViewPr
             </div>
           </div>
 
-          {/* ACTIVE LENS CONTENT (All 12 panels isolated with React.memo for 0ms sidebar highlight) */}
-          {activeLens === 'overview' && (
-            <OverviewDashboardPanel
-              snap={snap}
-              onOpenTrendView={handleOpenTrendView}
-              onNavigateTab={onNavigateTab}
-            />
+          {/* ACTIVE LENS CONTENT (Visited panels stay mounted via CSS hidden + React.memo for 0ms re-switch) */}
+          {(activeLens === 'overview' || visitedLenses.has('overview')) && (
+            <div
+              className={activeLens === 'overview' ? 'flex-1 flex flex-col' : 'hidden'}
+              data-capture-hide={activeLens !== 'overview' ? 'true' : undefined}
+            >
+              <OverviewDashboardPanel
+                snap={snap}
+                onOpenTrendView={handleOpenTrendView}
+                onNavigateTab={onNavigateTab}
+              />
+            </div>
           )}
 
-          {activeLens === 'tren_bulanan' && (
-            <TrenBulananDashboardPanel
-              trendChartData={trendChartData}
-              trendTimeframeMode={trendTimeframeMode}
-              onTrendTimeframeModeChange={setTrendTimeframeMode}
-              filters={filters}
-              effectiveFilteredCount={snap.effectiveFilteredCount}
-              monthlySpvTargetsData={monthlySpvTargetsData}
-              onShowAllMonths={handleShowAllMonths}
-              onOpenTargetMgmt={handleOpenTargetMgmt}
-            />
+          {needTrenBulanan && (
+            <div
+              className={activeLens === 'tren_bulanan' ? 'flex-1 flex flex-col' : 'hidden'}
+              data-capture-hide={activeLens !== 'tren_bulanan' ? 'true' : undefined}
+            >
+              <TrenBulananDashboardPanel
+                trendChartData={trendChartData}
+                trendTimeframeMode={trendTimeframeMode}
+                onTrendTimeframeModeChange={setTrendTimeframeMode}
+                filters={filters}
+                effectiveFilteredCount={snap.effectiveFilteredCount}
+                monthlySpvTargetsData={monthlySpvTargetsData}
+                onShowAllMonths={handleShowAllMonths}
+                onOpenTargetMgmt={handleOpenTargetMgmt}
+              />
+            </div>
           )}
 
-          {activeLens === 'regional' && (
-            <RegionalSalesPanel
-              sales={snap.targetMatrix.sales}
-              areas={snap.targetMatrix.areas}
-              spvs={snap.targetMatrix.spvs}
-              ketFilter={filters.KET}
-              selectedMonthLabel={snap.selectedMonthLabel}
-              onChangeKet={handleChangeKet}
-              onNavigateTab={onNavigateTab}
-            />
+          {(activeLens === 'regional' || visitedLenses.has('regional')) && (
+            <div
+              className={activeLens === 'regional' ? 'flex-1 flex flex-col' : 'hidden'}
+              data-capture-hide={activeLens !== 'regional' ? 'true' : undefined}
+            >
+              <RegionalSalesPanel
+                sales={snap.targetMatrix.sales}
+                areas={snap.targetMatrix.areas}
+                spvs={snap.targetMatrix.spvs}
+                ketFilter={filters.KET}
+                selectedMonthLabel={snap.selectedMonthLabel}
+                onChangeKet={handleChangeKet}
+                onNavigateTab={onNavigateTab}
+              />
+            </div>
           )}
 
-          {activeLens === 'market_share' && marketShareData && (
-            <MarketShareDashboardPanel
-              marketShareData={marketShareData}
-              onOpenMarketShareMg={handleOpenMarketShareMg}
-            />
+          {needMarketShare && marketShareData && (
+            <div
+              className={activeLens === 'market_share' ? 'flex-1 flex flex-col' : 'hidden'}
+              data-capture-hide={activeLens !== 'market_share' ? 'true' : undefined}
+            >
+              <MarketShareDashboardPanel
+                marketShareData={marketShareData}
+                onOpenMarketShareMg={handleOpenMarketShareMg}
+              />
+            </div>
           )}
 
-          {activeLens === 'product_mix' && productMixData && (
-            <ProductMixDashboardPanel
-              productMixData={productMixData}
-              onNavigateTab={onNavigateTab}
-            />
+          {needProductMix && productMixData && (
+            <div
+              className={activeLens === 'product_mix' ? 'flex-1 flex flex-col' : 'hidden'}
+              data-capture-hide={activeLens !== 'product_mix' ? 'true' : undefined}
+            >
+              <ProductMixDashboardPanel
+                productMixData={productMixData}
+                onNavigateTab={onNavigateTab}
+              />
+            </div>
           )}
 
-          {activeLens === 'channel_growth' && channelGrowthRows && (
-            <ChannelGrowthDashboardPanel
-              channelGrowthRows={channelGrowthRows}
-              onNavigateTab={onNavigateTab}
-            />
+          {needChannelGrowth && channelGrowthRows && (
+            <div
+              className={activeLens === 'channel_growth' ? 'flex-1 flex flex-col' : 'hidden'}
+              data-capture-hide={activeLens !== 'channel_growth' ? 'true' : undefined}
+            >
+              <ChannelGrowthDashboardPanel
+                channelGrowthRows={channelGrowthRows}
+                onNavigateTab={onNavigateTab}
+              />
+            </div>
           )}
 
-          {activeLens === 'promo_ba' && promoBaData && (
-            <PromoBaDashboardPanel
-              promoBaData={promoBaData}
-              promoTotalActual={snap.promoTotalActual}
-              promoStoreCount={snap.promoStoreCount}
-              promoDaysCount={snap.promoDaysCount}
-              baTotalDenda={snap.baTotalDenda}
-              baIncidentsCount={snap.baIncidentsCount}
-              salesVisitsCount={snap.salesVisitsCount}
-              trainerVisitsCount={snap.trainerVisitsCount}
-              onNavigateTab={onNavigateTab}
-              onOpenPromo={handleOpenPromo}
-            />
+          {needPromoBa && promoBaData && (
+            <div
+              className={activeLens === 'promo_ba' ? 'flex-1 flex flex-col' : 'hidden'}
+              data-capture-hide={activeLens !== 'promo_ba' ? 'true' : undefined}
+            >
+              <PromoBaDashboardPanel
+                promoBaData={promoBaData}
+                promoTotalActual={snap.promoTotalActual}
+                promoStoreCount={snap.promoStoreCount}
+                promoDaysCount={snap.promoDaysCount}
+                baTotalDenda={snap.baTotalDenda}
+                baIncidentsCount={snap.baIncidentsCount}
+                salesVisitsCount={snap.salesVisitsCount}
+                trainerVisitsCount={snap.trainerVisitsCount}
+                onNavigateTab={onNavigateTab}
+                onOpenPromo={handleOpenPromo}
+              />
+            </div>
           )}
 
-          {activeLens === 'finance_bills' && monthlyProfitHrSummary && (
-            <FinanceBillsDashboardPanel
-              monthlyProfitHrSummary={monthlyProfitHrSummary}
-              profitSummary={snap.profitSummary}
-              unpaidBillsAmount={snap.unpaidBillsAmount}
-              overdueBillsCount={snap.overdueBillsCount}
-              filterMonth={filters.BULAN}
-              onNavigateTab={onNavigateTab}
-            />
+          {needFinanceBills && monthlyProfitHrSummary && (
+            <div
+              className={activeLens === 'finance_bills' ? 'flex-1 flex flex-col' : 'hidden'}
+              data-capture-hide={activeLens !== 'finance_bills' ? 'true' : undefined}
+            >
+              <FinanceBillsDashboardPanel
+                monthlyProfitHrSummary={monthlyProfitHrSummary}
+                profitSummary={snap.profitSummary}
+                unpaidBillsAmount={snap.unpaidBillsAmount}
+                overdueBillsCount={snap.overdueBillsCount}
+                filterMonth={filters.BULAN}
+                onNavigateTab={onNavigateTab}
+              />
+            </div>
           )}
 
-          {activeLens === 'targets_alerts' && targetsAlertsData && (
-            <TargetsAlertsDashboardPanel
-              targetsAlertsData={targetsAlertsData}
-              targetGapSummary={snap.targetGapSummary}
-              lostStoresCount={snap.gapDiagnosis.lostStoresCount}
-              registeredSheetBaCount={snap.registeredSheetBaCount}
-              registeredSheetTrainerCount={snap.registeredSheetTrainerCount}
-              ketFilter={filters.KET}
-              onChangeKet={handleChangeKet}
-              onNavigateTab={onNavigateTab}
-            />
+          {needTargetsAlerts && targetsAlertsData && (
+            <div
+              className={activeLens === 'targets_alerts' ? 'flex-1 flex flex-col' : 'hidden'}
+              data-capture-hide={activeLens !== 'targets_alerts' ? 'true' : undefined}
+            >
+              <TargetsAlertsDashboardPanel
+                targetsAlertsData={targetsAlertsData}
+                targetGapSummary={snap.targetGapSummary}
+                lostStoresCount={snap.gapDiagnosis.lostStoresCount}
+                registeredSheetBaCount={snap.registeredSheetBaCount}
+                registeredSheetTrainerCount={snap.registeredSheetTrainerCount}
+                ketFilter={filters.KET}
+                onChangeKet={handleChangeKet}
+                onNavigateTab={onNavigateTab}
+              />
+            </div>
           )}
 
-          {activeLens === 'achieve_quartal' && rawQuarterSummary && (
-            <AchieveQuartalDashboardPanel
-              rawQuarter={rawQuarterSummary}
-              filters={filters}
-              selectedQuarter={selectedQuarter}
-              onSelectQuarter={setSelectedQuarter}
-              selectedYear={snap.selectedYear}
-              onNavigateTab={onNavigateTab}
-              onTargetsUpdated={handleTargetsUpdated}
-            />
+          {needAchieveQuartal && rawQuarterSummary && (
+            <div
+              className={activeLens === 'achieve_quartal' ? 'flex-1 flex flex-col' : 'hidden'}
+              data-capture-hide={activeLens !== 'achieve_quartal' ? 'true' : undefined}
+            >
+              <AchieveQuartalDashboardPanel
+                rawQuarter={rawQuarterSummary}
+                filters={filters}
+                selectedQuarter={selectedQuarter}
+                onSelectQuarter={setSelectedQuarter}
+                selectedYear={snap.selectedYear}
+                onNavigateTab={onNavigateTab}
+                onTargetsUpdated={handleTargetsUpdated}
+              />
+            </div>
           )}
 
-          {activeLens === 'kpi_sales' && (
-            <KpiSalesDashboardPanel
-              filters={filters}
-              selectedYear={snap.selectedYear}
-              onNavigateTab={onNavigateTab}
-            />
+          {(activeLens === 'kpi_sales' || visitedLenses.has('kpi_sales')) && (
+            <div
+              className={activeLens === 'kpi_sales' ? 'flex-1 flex flex-col' : 'hidden'}
+              data-capture-hide={activeLens !== 'kpi_sales' ? 'true' : undefined}
+            >
+              <KpiSalesDashboardPanel
+                filters={filters}
+                selectedYear={snap.selectedYear}
+                onNavigateTab={onNavigateTab}
+              />
+            </div>
           )}
 
-          {activeLens === 'kpi_trainer' && (
-            <KpiTrainerDashboardPanel
-              filters={filters}
-              selectedYear={snap.selectedYear}
-              onNavigateTab={onNavigateTab}
-            />
+          {(activeLens === 'kpi_trainer' || visitedLenses.has('kpi_trainer')) && (
+            <div
+              className={activeLens === 'kpi_trainer' ? 'flex-1 flex flex-col' : 'hidden'}
+              data-capture-hide={activeLens !== 'kpi_trainer' ? 'true' : undefined}
+            >
+              <KpiTrainerDashboardPanel
+                filters={filters}
+                selectedYear={snap.selectedYear}
+                onNavigateTab={onNavigateTab}
+              />
+            </div>
           )}
 
           {/* BOTTOM QUIET FOOTER */}

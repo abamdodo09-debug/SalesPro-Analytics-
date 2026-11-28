@@ -790,6 +790,9 @@ export function saveKpiSalesData(items: KpiSalesScorecardItem[]): void {
   try {
     const onlyValid = items.filter((item) => VALID_KPI_SALES_NAMES.includes(item.salesName));
     localStorage.setItem(KPI_SALES_OVERRIDES_KEY, JSON.stringify(onlyValid));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('salespro-targets-updated', { detail: { category: 'kpi_sales' } }));
+    }
   } catch (e) {
     console.warn('Failed to save KPI sales data to localStorage', e);
   }

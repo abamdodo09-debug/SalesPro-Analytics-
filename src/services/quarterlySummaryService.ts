@@ -5,12 +5,13 @@ import {
   SalesQuarterlySummaryItem,
   BaQuarterlySummaryItem,
   TrainerQuarterlySummaryItem,
+  StoreQuarterlySummaryItem,
   QuarterlyOverallSummary,
 } from '../types/dashboard';
 import { loadKpiSalesData, loadBaIncidents } from './agingAndKpiService';
 import { loadKpiTrainerData } from './kpiTrainerService';
 import { DEFAULT_TRAINERS_DATA } from '../utils/costCalculations';
-import { getTrainerForRecord, isFocusProduct } from '../utils/analytics';
+import { getTrainerForRecord, isFocusProduct, parseTransactionDate, getRecordDayOfMonth } from '../utils/analytics';
 import { SALES_MASTER_6_CONFIG } from './kpiSalesData';
 import {
   loadSalesTargets,
@@ -30,6 +31,7 @@ import {
   notifyTargetsUpdated,
   computeMonthlyStoreSellInLookup,
   findStoreSellInInLookup,
+  getTargetsRevision,
 } from './targetManagementService';
 import { loadFocusOverrides, DEFAULT_FOCUS_TARGET_PCS } from './focusProductService';
 import { loadMasterStoreList } from './masterStoreService';
@@ -310,8 +312,16 @@ const ALL_MONTH_NAMES = [
   'JULI', 'AGUSTUS', 'SEPTEMBER', 'OKTOBER', 'NOVEMBER', 'DESEMBER',
 ];
 
+const recordMonthYearCache = new WeakMap<
+  TransactionRecord,
+  { monthIndex: number; year: number } | null
+>();
+
 // Helper parsing transaction record dates safely (checks explicit BULAN first to stay 100% consistent with Kelola Target)
 export function parseRecordMonthYear(record: TransactionRecord): { monthIndex: number; year: number } | null {
+  const cached = recordMonthYearCache.get(record);
+  if (cached !== undefined) return cached;
+
   let parsedTanggal: { monthIndex: number; year: number } | null = null;
   if (record.TANGGAL) {
     const trimmed = record.TANGGAL.trim();
@@ -330,23 +340,82 @@ export function parseRecordMonthYear(record: TransactionRecord): { monthIndex: n
     }
   }
 
+  let result: { monthIndex: number; year: number } | null = parsedTanggal;
   if (record.BULAN) {
     const bUpper = record.BULAN.trim().toUpperCase();
     const fullIdx = ALL_MONTH_NAMES.findIndex((m) => bUpper.includes(m));
     if (fullIdx !== -1) {
       const yr = record.TAHUN || parsedTanggal?.year || 2026;
-      return { monthIndex: fullIdx, year: yr };
-    }
-    const metaMatch = MONTH_OPTIONS_2026.find((meta) =>
-      meta.aliases.some((alias) => bUpper === alias || bUpper.includes(alias))
-    );
-    if (metaMatch) {
-      const yr = record.TAHUN || parsedTanggal?.year || 2026;
-      return { monthIndex: metaMatch.monthIndex, year: yr };
+      result = { monthIndex: fullIdx, year: yr };
+    } else {
+      const metaMatch = MONTH_OPTIONS_2026.find((meta) =>
+        meta.aliases.some((alias) => bUpper === alias || bUpper.includes(alias))
+      );
+      if (metaMatch) {
+        const yr = record.TAHUN || parsedTanggal?.year || 2026;
+        result = { monthIndex: metaMatch.monthIndex, year: yr };
+      }
     }
   }
 
-  return parsedTanggal;
+  recordMonthYearCache.set(record, result);
+  return result;
+}
+
+export function formatBaCutOffRangeLabel(quarter: QuarterPeriodKey, year: number): string {
+  if (quarter === 'Q1') return `26 Des ${year - 1} - 25 Mar ${year}`;
+  if (quarter === 'Q2') return `26 Mar - 25 Jun ${year}`;
+  if (quarter === 'Q3') return `26 Jun - 25 Sep ${year}`;
+  return `26 Sep - 25 Des ${year}`;
+}
+
+const baCutOffYmdWindowCache = new Map<string, Array<[number, number]>>();
+
+function getBaCutOffYmdWindows(qMonths: number[], year: number): Array<[number, number]> {
+  const key = `${year}|${qMonths.join(',')}`;
+  const cached = baCutOffYmdWindowCache.get(key);
+  if (cached) return cached;
+  const windows: Array<[number, number]> = qMonths.map((mIdx) => {
+    const s = new Date(year, mIdx - 1, 26);
+    const e = new Date(year, mIdx, 25);
+    return [
+      s.getFullYear() * 10000 + s.getMonth() * 100 + s.getDate(),
+      e.getFullYear() * 10000 + e.getMonth() * 100 + e.getDate(),
+    ];
+  });
+  baCutOffYmdWindowCache.set(key, windows);
+  return windows;
+}
+
+// Cut-off Sell Out BA: tanggal 26 bulan sebelumnya s/d tanggal 25 bulan berjalan
+export function resolveBaCutOffQuarterPos(
+  record: TransactionRecord,
+  qMonths: number[],
+  year: number
+): number {
+  let txYmd: number;
+  const txDate = parseTransactionDate(record);
+
+  if (txDate) {
+    txYmd = txDate.getFullYear() * 10000 + txDate.getMonth() * 100 + txDate.getDate();
+  } else {
+    const dt = parseRecordMonthYear(record);
+    if (!dt) return -1;
+    const day = getRecordDayOfMonth(record);
+    if (day === null) {
+      return dt.year === year ? qMonths.indexOf(dt.monthIndex) : -1;
+    }
+    txYmd = dt.year * 10000 + dt.monthIndex * 100 + day;
+  }
+
+  const windows = getBaCutOffYmdWindows(qMonths, year);
+  for (let qPos = 0; qPos < windows.length; qPos++) {
+    const [startYmd, endYmd] = windows[qPos];
+    if (txYmd >= startYmd && txYmd <= endYmd) {
+      return qPos;
+    }
+  }
+  return -1;
 }
 
 function classifyKet(ketRaw?: string): 'SELL IN' | 'SELL OUT' | 'OTHER' {
@@ -366,6 +435,39 @@ function classifyKet(ketRaw?: string): 'SELL IN' | 'SELL OUT' | 'OTHER' {
   return 'OTHER';
 }
 
+export interface QuarterlySummaryResult {
+  overall: QuarterlyOverallSummary;
+  salesList: SalesQuarterlySummaryItem[];
+  baList: BaQuarterlySummaryItem[];
+  trainerList: TrainerQuarterlySummaryItem[];
+  storeList: StoreQuarterlySummaryItem[];
+}
+
+const quarterlySummaryLru: Array<{
+  records: TransactionRecord[];
+  key: string;
+  result: QuarterlySummaryResult;
+}> = [];
+
+function getQuarterlyStorageSignature(): string {
+  try {
+    return [
+      getTargetsRevision(),
+      localStorage.getItem(STORAGE_KEY_QUARTERLY_TARGETS) || '',
+      localStorage.getItem(STORAGE_KEY_QUARTERLY_ACTUAL_SELLIN) || '',
+      localStorage.getItem('salespro_kpi_sales_overrides_v7') || '',
+      localStorage.getItem('salespro_custom_kpi_trainer_v5') || '',
+      localStorage.getItem('salespro_ba_punishment_v2') || '',
+      localStorage.getItem('salespro_master_store_config_v2') || '',
+      localStorage.getItem('salespro_ba_focus_overrides_v2') || '',
+      localStorage.getItem('salespro_weekly_ba_stores_v1') || '',
+      localStorage.getItem('salespro_weekly_ba_deleted_v1') || '',
+    ].join('§');
+  } catch {
+    return String(getTargetsRevision());
+  }
+}
+
 // Compute complete quarterly summary for Sales, BA & Trainer
 export function calculateQuarterlySummary(
   records: TransactionRecord[],
@@ -374,16 +476,23 @@ export function calculateQuarterlySummary(
   filterArea: string = 'ALL',
   filterSpv: string = 'ALL',
   filterKet: string = 'ALL'
-): {
-  overall: QuarterlyOverallSummary;
-  salesList: SalesQuarterlySummaryItem[];
-  baList: BaQuarterlySummaryItem[];
-  trainerList: TrainerQuarterlySummaryItem[];
-} {
+): QuarterlySummaryResult {
   const qInfo = QUARTER_MONTHS[quarter] || QUARTER_MONTHS.Q4;
   const qMonths = qInfo.months;
   const qMonthNames = qInfo.monthNames;
   const activeKet = (filterKet || 'ALL').toUpperCase().trim();
+
+  const cacheKey = `${quarter}|${year}|${filterArea}|${filterSpv}|${activeKet}|${getQuarterlyStorageSignature()}`;
+  for (let i = 0; i < quarterlySummaryLru.length; i++) {
+    const entry = quarterlySummaryLru[i];
+    if (entry.records === records && entry.key === cacheKey) {
+      if (i > 0) {
+        quarterlySummaryLru.splice(i, 1);
+        quarterlySummaryLru.unshift(entry);
+      }
+      return entry.result;
+    }
+  }
 
   // Filter records by area & SPV (KET is tracked separately for Sell In & Sell Out & Active)
   const scopedRecords = records.filter((r) => {
@@ -405,6 +514,14 @@ export function calculateQuarterlySummary(
   const baIncidentsAll = loadBaIncidents();
   const quarterlyOverrides = loadQuarterlyTargetOverrides();
   const quarterlyActualSellInOverrides = loadQuarterlyActualSellInOverrides();
+
+  // Hoist per-month target maps once for the 3 quarter months instead of reloading per entity
+  const qSalesInMaps = qMonthNames.map((mName) => loadSalesTargets(mName));
+  const qSalesOutMaps = qMonthNames.map((mName) => loadSalesSellOutTargets(mName));
+  const qBaNonMaps = qMonthNames.map((mName) => loadBaNonLavojoyTargets(mName));
+  const qBaLavMaps = qMonthNames.map((mName) => loadBaLavojoyTargets(mName));
+  const qBaFocusMaps = qMonthNames.map((mName) => loadBaFocusTargets(mName));
+  const qTrainerMaps = qMonthNames.map((mName) => loadTrainerTargets(mName));
 
   // -------------------------------------------------------------
   // 1. SALES QUARTERLY SUMMARY (STRICTLY 6 REGISTERED SALES)
@@ -473,8 +590,8 @@ export function calculateQuarterlySummary(
 
     const baseMonths = qMonths.map((mIdx, i) => {
       const mName = qMonthNames[i];
-      const mSalesInMap = loadSalesTargets(mName);
-      const mSalesOutMap = loadSalesSellOutTargets(mName);
+      const mSalesInMap = qSalesInMaps[i];
+      const mSalesOutMap = qSalesOutMaps[i];
       const upperSales = sName.toUpperCase().trim();
       const matchedInKey = Object.keys(mSalesInMap).find((k) => k.toUpperCase().trim() === upperSales);
       const matchedOutKey = Object.keys(mSalesOutMap).find((k) => k.toUpperCase().trim() === upperSales);
@@ -778,7 +895,19 @@ export function calculateQuarterlySummary(
         entry.storeName = validRecStore;
       }
 
-      if (dt && dt.year === year) {
+      if (isSellOutLike) {
+        const cutOffPos = resolveBaCutOffQuarterPos(r, qMonths, year);
+        if (cutOffPos !== -1) {
+          const existingQUpper = new Set(Array.from(entry.quarterStoreNames).map((s) => s.toUpperCase()));
+          if (!existingQUpper.has(validRecStore.toUpperCase())) {
+            entry.quarterStoreNames.add(validRecStore);
+          }
+          entry.monthlyAnyRowStores[cutOffPos].add(validRecStore);
+          entry.monthlySellOutStores[cutOffPos].add(validRecStore);
+        } else if (dt && dt.year === year && dt.monthIndex < qMonths[0]) {
+          entry.preQuarterStores.push({ monthIdx: dt.monthIndex, store: validRecStore });
+        }
+      } else if (dt && dt.year === year) {
         const qPos = qMonths.indexOf(dt.monthIndex);
         if (qPos !== -1) {
           const existingQUpper = new Set(Array.from(entry.quarterStoreNames).map((s) => s.toUpperCase()));
@@ -786,9 +915,6 @@ export function calculateQuarterlySummary(
             entry.quarterStoreNames.add(validRecStore);
           }
           entry.monthlyAnyRowStores[qPos].add(validRecStore);
-          if (isSellOutLike) {
-            entry.monthlySellOutStores[qPos].add(validRecStore);
-          }
         } else if (dt.monthIndex < qMonths[0]) {
           entry.preQuarterStores.push({ monthIdx: dt.monthIndex, store: validRecStore });
         }
@@ -1111,14 +1237,9 @@ export function calculateQuarterlySummary(
   };
 
   // Pass 2: Akumulasi Realisasi Kuartal mengikuti Daftar Target Beauty Advisor & Google Sheet terhubung:
-  // - SELL IN ditarik berdasarkan NAMA TOKO pada bulan transaksi tersebut
-  // - SELL OUT (Non-Lavojoy & Lavojoy) & Produk Fokus (Pcs) mengikuti Nama BA terdaftar persis seperti Daftar Target BA
+  // - SELL IN ditarik berdasarkan NAMA TOKO pada bulan kalender transaksi tersebut
+  // - SELL OUT BA (Non-Lavojoy & Lavojoy) & Produk Fokus (Pcs) mengikuti Cut-off Sell Out BA (26–25)
   scopedRecords.forEach((r) => {
-    const dt = parseRecordMonthYear(r);
-    if (!dt || dt.year !== year) return;
-    const qMonthPosition = qMonths.indexOf(dt.monthIndex);
-    if (qMonthPosition === -1) return;
-
     const val = r.VALUE || 0;
     const qty = Math.max(0, r.QTY || 0);
     const ketRawUpper = (r.KET || '').toUpperCase().trim();
@@ -1133,6 +1254,11 @@ export function calculateQuarterlySummary(
         : undefined;
 
     if (ketType === 'SELL IN') {
+      const dt = parseRecordMonthYear(r);
+      if (!dt || dt.year !== year) return;
+      const qMonthPosition = qMonths.indexOf(dt.monthIndex);
+      if (qMonthPosition === -1) return;
+
       const storeMatchedBas = findBasByStoreNameInMonth(
         qMonthPosition,
         resolved.resolvedStore || r.NAMA_STORE
@@ -1168,24 +1294,27 @@ export function calculateQuarterlySummary(
       return;
     }
 
+    const cutOffPos = resolveBaCutOffQuarterPos(r, qMonths, year);
+    if (cutOffPos === -1) return;
+
     if (!matchedBaFromRow) return;
     const item = baMap.get(matchedBaFromRow);
     if (!item) return;
 
     if (isSellOutRow) {
-      item.monthlySellOutActual[qMonthPosition] += val;
+      item.monthlySellOutActual[cutOffPos] += val;
       const isLavojoyBrand = (r.BRAND || '').toLowerCase().includes('lavojoy');
       if (isLavojoyBrand) {
-        item.monthlySellOutLavojoyActual[qMonthPosition] += val;
+        item.monthlySellOutLavojoyActual[cutOffPos] += val;
       } else {
-        item.monthlySellOutNonLavojoyActual[qMonthPosition] += val;
+        item.monthlySellOutNonLavojoyActual[cutOffPos] += val;
       }
     }
     if (activeKet === 'ALL' || (isSellOutRow && activeKet === 'SELL OUT') || ketType === activeKet) {
-      item.monthlyAllActual[qMonthPosition] += val;
+      item.monthlyAllActual[cutOffPos] += val;
     }
     if (isSellOutRow && isFocusProduct(r.PRODUK_FOCUS || r)) {
-      item.monthlyFocusActual[qMonthPosition] += qty;
+      item.monthlyFocusActual[cutOffPos] += qty;
     }
   });
 
@@ -1230,9 +1359,9 @@ export function calculateQuarterlySummary(
 
     const baseMonths = qMonths.map((mIdx, i) => {
       const mName = qMonthNames[i];
-      const baNonMap = loadBaNonLavojoyTargets(mName);
-      const baLavMap = loadBaLavojoyTargets(mName);
-      const baFocusMap = loadBaFocusTargets(mName);
+      const baNonMap = qBaNonMaps[i];
+      const baLavMap = qBaLavMaps[i];
+      const baFocusMap = qBaFocusMaps[i];
 
       // Mengikuti persis Daftar Target Beauty Advisor (Non-Lavojoy + Lavojoy & Produk Fokus Pcs)
       const customNonLav = findTargetMapEntry(baNonMap);
@@ -1524,7 +1653,7 @@ export function calculateQuarterlySummary(
 
     const baseMonths = qMonths.map((mIdx, i) => {
       const mName = qMonthNames[i];
-      const trMonthTargets = loadTrainerTargets(mName);
+      const trMonthTargets = qTrainerMaps[i];
       const tOv = trMonthTargets[trn.id] || trMonthTargets[trn.trainerName] || {};
       const mTargetSellOut =
         tOv.targetSellOut !== undefined && tOv.targetSellOut > 0 ? tOv.targetSellOut : baseTargetSellOut;
@@ -1688,6 +1817,116 @@ export function calculateQuarterlySummary(
   });
 
   // -------------------------------------------------------------
+  // 3B. STORE QUARTERLY SELL IN RANKING (TOP TOKO PERINGKAT 1)
+  // -------------------------------------------------------------
+  const storeAggMap = new Map<
+    string,
+    {
+      storeName: string;
+      salesName: string;
+      spvName: string;
+      coverArea: string;
+      region: string;
+      trainerName: string;
+      baName: string;
+      monthlySellInActual: [number, number, number];
+    }
+  >();
+
+  scopedRecords.forEach((r) => {
+    if (classifyKet(r.KET) !== 'SELL IN') return;
+    const dt = parseRecordMonthYear(r);
+    if (!dt || dt.year !== year) return;
+    const qPos = qMonths.indexOf(dt.monthIndex);
+    if (qPos === -1) return;
+
+    const resolved = resolveBaAndStoreFromRecord(r);
+    const displayStore = normalizeStoreDisplay(resolved.resolvedStore || r.NAMA_STORE);
+    const upperSt = displayStore.toUpperCase();
+    if (!displayStore || upperSt === '-' || upperSt === 'ALL' || upperSt === 'COUNTER TOKO') return;
+
+    const storeKey = normalizeStoreAlnum(displayStore) || upperSt;
+    if (!storeAggMap.has(storeKey)) {
+      const canonicalSales = canonicalizeRegisteredSalesName(r.SALES) || (r.SALES || '-').trim().toUpperCase();
+      storeAggMap.set(storeKey, {
+        storeName: displayStore,
+        salesName: canonicalSales || '-',
+        spvName: resolved.resolvedSpv || r.SPV || '-',
+        coverArea: resolved.resolvedArea || r.COVER_AREA || '-',
+        region: resolved.resolvedRegion || r.REGION || '-',
+        trainerName: getTrainerForRecord(r).trim().toUpperCase(),
+        baName: !isPlaceholderBaToken(resolved.resolvedBaName) ? resolved.resolvedBaName : '',
+        monthlySellInActual: [0, 0, 0],
+      });
+    }
+
+    const stEntry = storeAggMap.get(storeKey)!;
+    stEntry.monthlySellInActual[qPos] += r.VALUE || 0;
+    if (!stEntry.baName && !isPlaceholderBaToken(resolved.resolvedBaName)) {
+      stEntry.baName = resolved.resolvedBaName;
+    }
+    if ((!stEntry.salesName || stEntry.salesName === '-') && r.SALES) {
+      stEntry.salesName = canonicalizeRegisteredSalesName(r.SALES) || r.SALES.trim().toUpperCase();
+    }
+  });
+
+  const storeList: StoreQuarterlySummaryItem[] = [];
+  storeAggMap.forEach((st) => {
+    const monthlySellInTarget: [number, number, number] = [0, 0, 0];
+    let salesName = st.salesName;
+    let spvName = st.spvName;
+    let coverArea = st.coverArea;
+    let region = st.region;
+    let baName = st.baName;
+
+    qMonthNames.forEach((mName, idx) => {
+      const matched = findStoreSellInInLookup(storeSellInLookupByMonth[mName], st.storeName);
+      if (matched) {
+        monthlySellInTarget[idx] = matched.targetSellIn || 0;
+        if ((!salesName || salesName === '-') && matched.salesName) salesName = matched.salesName;
+        if ((!spvName || spvName === '-') && matched.spv) spvName = matched.spv;
+        if ((!coverArea || coverArea === '-' || coverArea === 'AREA BARU') && matched.coverArea) {
+          coverArea = matched.coverArea;
+        }
+        if ((!region || region === '-' || region === 'PEKAN BARU') && matched.region) {
+          region = matched.region;
+        }
+        if (!baName && matched.baName && !isPlaceholderBaToken(matched.baName)) {
+          baName = matched.baName;
+        }
+      }
+    });
+
+    const quarterTargetSellIn =
+      monthlySellInTarget[0] + monthlySellInTarget[1] + monthlySellInTarget[2];
+    const quarterActualSellIn =
+      st.monthlySellInActual[0] + st.monthlySellInActual[1] + st.monthlySellInActual[2];
+    const quarterAchievementSellInPercent =
+      quarterTargetSellIn > 0 ? (quarterActualSellIn / quarterTargetSellIn) * 100 : 0;
+
+    storeList.push({
+      storeName: st.storeName,
+      salesName,
+      spvName,
+      coverArea,
+      region,
+      trainerName: st.trainerName,
+      baName,
+      quarterTargetSellIn,
+      quarterActualSellIn,
+      quarterAchievementSellInPercent,
+      monthlySellInTarget,
+      monthlySellInActual: st.monthlySellInActual,
+    });
+  });
+
+  storeList.sort((a, b) => {
+    const pctDiff = b.quarterAchievementSellInPercent - a.quarterAchievementSellInPercent;
+    if (Math.abs(pctDiff) > 0.0001) return pctDiff;
+    return b.quarterActualSellIn - a.quarterActualSellIn;
+  });
+
+  // -------------------------------------------------------------
   // 4. OVERALL EXECUTIVE SUMMARY
   // -------------------------------------------------------------
   const totalTargetArea = salesList.reduce((acc, s) => acc + s.quarterTarget, 0);
@@ -1733,6 +1972,19 @@ export function calculateQuarterlySummary(
         }
       : null;
 
+  const topStore =
+    storeList.length > 0
+      ? {
+          storeName: storeList[0].storeName,
+          salesName: storeList[0].salesName,
+          coverArea: storeList[0].coverArea,
+          baName: storeList[0].baName || undefined,
+          actualSellIn: storeList[0].quarterActualSellIn,
+          targetSellIn: storeList[0].quarterTargetSellIn,
+          percent: storeList[0].quarterAchievementSellInPercent,
+        }
+      : null;
+
   const topTrainer =
     trainerList.length > 0
       ? {
@@ -1749,6 +2001,7 @@ export function calculateQuarterlySummary(
     year,
     quarterLabel: `${qInfo.label} • ${year}`,
     dateRangeLabel: qInfo.dateRange,
+    baSellOutDateRangeLabel: formatBaCutOffRangeLabel(quarter, year),
     activeKetFilter: activeKet,
     totalTargetArea,
     totalTargetSellIn,
@@ -1767,15 +2020,22 @@ export function calculateQuarterlySummary(
     avgTrainerKpiScore,
     topSales,
     topBa,
+    topStore,
     topTrainer,
   };
 
-  return {
+  const result: QuarterlySummaryResult = {
     overall,
     salesList,
     baList,
     trainerList,
+    storeList,
   };
+  quarterlySummaryLru.unshift({ records, key: cacheKey, result });
+  if (quarterlySummaryLru.length > 6) {
+    quarterlySummaryLru.pop();
+  }
+  return result;
 }
 
 export function exportQuarterlyToExcel(

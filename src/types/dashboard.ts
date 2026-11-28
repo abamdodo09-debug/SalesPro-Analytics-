@@ -1126,11 +1126,27 @@ export interface TrainerQuarterlySummaryItem {
   monthlyBreakdown: QuarterlyMonthDetail[];
 }
 
+export interface StoreQuarterlySummaryItem {
+  storeName: string;
+  salesName: string;
+  spvName: string;
+  coverArea: string;
+  region: string;
+  trainerName: string;
+  baName: string;
+  quarterTargetSellIn: number;
+  quarterActualSellIn: number;
+  quarterAchievementSellInPercent: number;
+  monthlySellInTarget: [number, number, number];
+  monthlySellInActual: [number, number, number];
+}
+
 export interface QuarterlyOverallSummary {
   quarter: QuarterPeriodKey;
   year: number;
   quarterLabel: string;
   dateRangeLabel: string;
+  baSellOutDateRangeLabel?: string;
   activeKetFilter: string;
   totalTargetArea: number;
   totalTargetSellIn: number;
@@ -1149,6 +1165,15 @@ export interface QuarterlyOverallSummary {
   avgTrainerKpiScore: number;
   topSales: { name: string; actual: number; target?: number; percent: number } | null;
   topBa: { name: string; store: string; actual: number; target?: number; percent: number } | null;
+  topStore?: {
+    storeName: string;
+    salesName: string;
+    coverArea: string;
+    baName?: string;
+    actualSellIn: number;
+    targetSellIn: number;
+    percent: number;
+  } | null;
   topTrainer: { name: string; actual?: number; target?: number; percent?: number; score: number } | null;
 }
 

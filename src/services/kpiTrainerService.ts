@@ -404,6 +404,9 @@ export function saveKpiTrainerData(items: KpiTrainerScorecardItem[]): void {
       ['ARA', 'RATIH'].includes((item.trainerName || '').toUpperCase().trim())
     );
     localStorage.setItem(STORAGE_KEY_KPI_TRAINER, JSON.stringify(valid));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('salespro-targets-updated', { detail: { category: 'kpi_trainer' } }));
+    }
   } catch (e) {
     console.warn('Failed to save KPI Trainer to localStorage', e);
   }

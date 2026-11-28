@@ -46,6 +46,7 @@ import {
   DEFAULT_BA_LAVOJOY_TARGET,
   buildMonthlySpvTargetsMap,
   normalizeMonthKey,
+  getTargetsRevision,
 } from './targetManagementService';
 import {
   calculateStoreBaContribution,
@@ -419,7 +420,9 @@ type MonthlyProfitSummaryCacheEntry = {
   filterSig: string;
   selectedYear: number;
   daySig: string;
+  targetsRev: number;
   summariesByMonth: Record<string, ProfitAreaSummary | null>;
+  unmappedSummary: ProfitAreaSummary | null;
 };
 
 let lastMonthlyProfitCache: MonthlyProfitSummaryCacheEntry | null = null;
@@ -441,6 +444,36 @@ function buildProfitFilterSig(filters: DashboardFilters): string {
   ].join('|');
 }
 
+function getExtraExecStorageSignature(): string {
+  try {
+    return [
+      localStorage.getItem('salespro_store_invoices_v2') || '',
+      localStorage.getItem('salespro_ba_punishment_v2') || '',
+      localStorage.getItem('salespro_online_promo_manual_v2') || '',
+      localStorage.getItem('salespro_mg_stores_v1') || '',
+      localStorage.getItem('salespro_mg_market_share_v1') || '',
+      localStorage.getItem('salespro_sales_visits_v1') || '',
+      localStorage.getItem('salespro_trainer_visits_v1') || '',
+      localStorage.getItem('salespro_manual_ka_mg_monthly_v1') || '',
+      localStorage.getItem('salespro_master_store_config_v2') || '',
+      localStorage.getItem('salespro_ka_mg_sales_override_v1') || '',
+      localStorage.getItem('salespro_ba_focus_overrides_v2') || '',
+      localStorage.getItem('salespro_monthly_pnl_overrides_v2') || '',
+      localStorage.getItem('salespro_weekly_ba_stores_v1') || '',
+      localStorage.getItem('salespro_weekly_ba_deleted_v1') || '',
+    ].join('§');
+  } catch {
+    return '';
+  }
+}
+
+const executiveCoreSnapshotLru: Array<{
+  allRecords: TransactionRecord[];
+  filteredRecords: TransactionRecord[];
+  key: string;
+  result: ExecutiveCoreSnapshot;
+}> = [];
+
 export function buildExecutiveCoreSnapshot(
   allRecords: TransactionRecord[],
   filteredRecords: TransactionRecord[],
@@ -448,6 +481,31 @@ export function buildExecutiveCoreSnapshot(
   dayRange?: ExecutiveDayRange
 ): ExecutiveCoreSnapshot {
   const normDay = normalizeDayRange(dayRange);
+  const targetsRev = getTargetsRevision();
+  const extraStorageSig = getExtraExecStorageSignature();
+  const fullCoreKey = [
+    buildProfitFilterSig(filters),
+    filters.BULAN || 'ALL',
+    normDay.label || '',
+    targetsRev,
+    extraStorageSig,
+  ].join('||');
+
+  for (let i = 0; i < executiveCoreSnapshotLru.length; i++) {
+    const entry = executiveCoreSnapshotLru[i];
+    if (
+      entry.allRecords === allRecords &&
+      entry.filteredRecords === filteredRecords &&
+      entry.key === fullCoreKey
+    ) {
+      if (i > 0) {
+        executiveCoreSnapshotLru.splice(i, 1);
+        executiveCoreSnapshotLru.unshift(entry);
+      }
+      return entry.result;
+    }
+  }
+
   const effectiveFilteredRecords = normDay.active
     ? filterRecordsByDayRange(filteredRecords, dayRange)
     : filteredRecords;
@@ -886,52 +944,76 @@ export function buildExecutiveCoreSnapshot(
   if (normMonthKey === 'ALL') {
     const canApplyOverrides = canApplyMonthlyPnlOverrides(filters, dayRange);
     const savedPnlOverrides = canApplyOverrides ? loadSavedMonthlyPnlOverrides() : {};
-    const monthBuckets = new Map<string, TransactionRecord[]>();
-    MONTHS_12.forEach((m) => monthBuckets.set(m, []));
-    const unmappedRecs: TransactionRecord[] = [];
+    const curFilterSig = buildProfitFilterSig(filters);
+    const curDaySig = normDay.label || '';
 
-    for (let i = 0; i < effectiveFilteredRecords.length; i++) {
-      const r = effectiveFilteredRecords[i];
-      const mKey = resolveRecordMonthAndYear(r).month || (r.BULAN || '').trim().toUpperCase();
-      const arr = monthBuckets.get(mKey);
-      if (arr) arr.push(r);
-      else unmappedRecs.push(r);
-    }
+    const canReuseMonthlyCache =
+      lastMonthlyProfitCache !== null &&
+      lastMonthlyProfitCache.allRecords === allRecords &&
+      lastMonthlyProfitCache.filterSig === curFilterSig &&
+      lastMonthlyProfitCache.selectedYear === selectedYear &&
+      lastMonthlyProfitCache.daySig === curDaySig &&
+      lastMonthlyProfitCache.targetsRev === targetsRev;
 
-    const entries: MonthlyProfitSummaryEntry[] = MONTHS_12.map((mKey) => {
-      const mRecs = monthBuckets.get(mKey) || [];
-      const summaryForMonth =
-        mRecs.length > 0
-          ? calculateProfitArea(
-              mRecs,
-              0.55,
-              0.33,
-              loadSalesTargets(mKey),
-              loadBaNonLavojoyTargets(mKey),
-              loadBaLavojoyTargets(mKey),
-              {},
-              {},
-              DEFAULT_SALES_TARGET,
-              DEFAULT_BA_NON_LAVOJOY_TARGET,
-              DEFAULT_BA_LAVOJOY_TARGET,
-              undefined,
-              trainerConfigs,
-              loadTrainerTargets(mKey),
-              `${mKey} ${selectedYear}`,
-              loadBaFocusTargets(mKey)
-            )
-          : null;
-      return {
+    if (canReuseMonthlyCache) {
+      const entries: MonthlyProfitSummaryEntry[] = MONTHS_12.map((mKey) => ({
         monthKey: mKey,
-        summary: summaryForMonth,
+        summary: lastMonthlyProfitCache!.summariesByMonth[mKey] || null,
         override: canApplyOverrides ? savedPnlOverrides[mKey] : undefined,
-      };
-    });
+      }));
+      if (lastMonthlyProfitCache!.unmappedSummary) {
+        entries.push({
+          monthKey: 'LAINNYA',
+          summary: lastMonthlyProfitCache!.unmappedSummary,
+        });
+      }
+      profitSummary = combineMonthlyProfitAreaSummaries(entries, 0.55, 0.33);
+    } else {
+      const monthBuckets = new Map<string, TransactionRecord[]>();
+      MONTHS_12.forEach((m) => monthBuckets.set(m, []));
+      const unmappedRecs: TransactionRecord[] = [];
 
-    if (unmappedRecs.length > 0) {
-      entries.push({
-        monthKey: 'LAINNYA',
-        summary: calculateProfitArea(
+      for (let i = 0; i < effectiveFilteredRecords.length; i++) {
+        const r = effectiveFilteredRecords[i];
+        const mKey = resolveRecordMonthAndYear(r).month || (r.BULAN || '').trim().toUpperCase();
+        const arr = monthBuckets.get(mKey);
+        if (arr) arr.push(r);
+        else unmappedRecs.push(r);
+      }
+
+      const entries: MonthlyProfitSummaryEntry[] = MONTHS_12.map((mKey) => {
+        const mRecs = monthBuckets.get(mKey) || [];
+        const summaryForMonth =
+          mRecs.length > 0
+            ? calculateProfitArea(
+                mRecs,
+                0.55,
+                0.33,
+                loadSalesTargets(mKey),
+                loadBaNonLavojoyTargets(mKey),
+                loadBaLavojoyTargets(mKey),
+                {},
+                {},
+                DEFAULT_SALES_TARGET,
+                DEFAULT_BA_NON_LAVOJOY_TARGET,
+                DEFAULT_BA_LAVOJOY_TARGET,
+                undefined,
+                trainerConfigs,
+                loadTrainerTargets(mKey),
+                `${mKey} ${selectedYear}`,
+                loadBaFocusTargets(mKey)
+              )
+            : null;
+        return {
+          monthKey: mKey,
+          summary: summaryForMonth,
+          override: canApplyOverrides ? savedPnlOverrides[mKey] : undefined,
+        };
+      });
+
+      let unmappedSummary: ProfitAreaSummary | null = null;
+      if (unmappedRecs.length > 0) {
+        unmappedSummary = calculateProfitArea(
           unmappedRecs,
           0.55,
           0.33,
@@ -948,23 +1030,29 @@ export function buildExecutiveCoreSnapshot(
           loadTrainerTargets('ALL'),
           `NOVEMBER ${selectedYear}`,
           loadBaFocusTargets('ALL')
-        ),
+        );
+        entries.push({
+          monthKey: 'LAINNYA',
+          summary: unmappedSummary,
+        });
+      }
+
+      const summariesByMonth: Record<string, ProfitAreaSummary | null> = {};
+      entries.forEach((e) => {
+        if (e.monthKey !== 'LAINNYA') summariesByMonth[e.monthKey] = e.summary;
       });
+      lastMonthlyProfitCache = {
+        allRecords,
+        filterSig: curFilterSig,
+        selectedYear,
+        daySig: curDaySig,
+        targetsRev,
+        summariesByMonth,
+        unmappedSummary,
+      };
+
+      profitSummary = combineMonthlyProfitAreaSummaries(entries, 0.55, 0.33);
     }
-
-    const summariesByMonth: Record<string, ProfitAreaSummary | null> = {};
-    entries.forEach((e) => {
-      if (e.monthKey !== 'LAINNYA') summariesByMonth[e.monthKey] = e.summary;
-    });
-    lastMonthlyProfitCache = {
-      allRecords,
-      filterSig: buildProfitFilterSig(filters),
-      selectedYear,
-      daySig: normDay.label || '',
-      summariesByMonth,
-    };
-
-    profitSummary = combineMonthlyProfitAreaSummaries(entries, 0.55, 0.33);
   } else {
     profitSummary = calculateProfitArea(
       effectiveFilteredRecords,
@@ -1297,7 +1385,7 @@ export function buildExecutiveCoreSnapshot(
     });
   }
 
-  return {
+  const coreSnapshotResult: ExecutiveCoreSnapshot = {
     selectedYear,
     selectedMonthLabel,
     activeDayRangeLabel: normDay.label,
@@ -1383,13 +1471,37 @@ export function buildExecutiveCoreSnapshot(
     gapDiagnosis,
     alerts,
   };
+
+  executiveCoreSnapshotLru.unshift({
+    allRecords,
+    filteredRecords,
+    key: fullCoreKey,
+    result: coreSnapshotResult,
+  });
+  if (executiveCoreSnapshotLru.length > 4) {
+    executiveCoreSnapshotLru.pop();
+  }
+
+  return coreSnapshotResult;
 }
 
 // =========================================================================
 // LAZY LENS-SCOPED BUILDERS (Executed ONLY when that sub-menu is active!)
 // =========================================================================
 
+let lastMarketShareCache: { sig: string; result: MarketShareLensData } | null = null;
+
 export function buildMarketShareLensData(): MarketShareLensData {
+  let sig = '';
+  try {
+    sig = `${localStorage.getItem('salespro_mg_market_share_v1') || ''}|${localStorage.getItem('salespro_mg_stores_v1') || ''}`;
+  } catch {
+    sig = '';
+  }
+  if (lastMarketShareCache && lastMarketShareCache.sig === sig) {
+    return lastMarketShareCache.result;
+  }
+
   const mgItems = loadMgMarketShareItems();
   const mgStoreOptions = loadMgStoreOptions();
   const mgMonthlyRecap = aggregateMonthlyMgRecap(mgItems);
@@ -1405,7 +1517,7 @@ export function buildMarketShareLensData(): MarketShareLensData {
     mgTotalStoreOmset > 0
       ? Math.round((mgTotalActual / mgTotalStoreOmset) * 1000) / 10
       : 0;
-  return {
+  const result: MarketShareLensData = {
     mgTotalActual,
     mgTotalStoreOmset,
     mgAvgSharePct,
@@ -1415,6 +1527,8 @@ export function buildMarketShareLensData(): MarketShareLensData {
     mgStoreOptions,
     mgStoreAnalytics,
   };
+  lastMarketShareCache = { sig, result };
+  return result;
 }
 
 const DASHBOARD_TOP_CATEGORIES = [
@@ -1470,10 +1584,28 @@ function mapRecordToDashboardTopCategory(r: TransactionRecord): DashboardTopCate
   return null;
 }
 
+const productMixLensLru: Array<{
+  filteredRecords: TransactionRecord[];
+  daySig: string;
+  result: ProductMixLensData;
+}> = [];
+
 export function buildProductMixLensData(
   filteredRecords: TransactionRecord[],
   dayRange?: ExecutiveDayRange
 ): ProductMixLensData {
+  const daySig = normalizeDayRange(dayRange).label || '';
+  for (let i = 0; i < productMixLensLru.length; i++) {
+    const entry = productMixLensLru[i];
+    if (entry.filteredRecords === filteredRecords && entry.daySig === daySig) {
+      if (i > 0) {
+        productMixLensLru.splice(i, 1);
+        productMixLensLru.unshift(entry);
+      }
+      return entry.result;
+    }
+  }
+
   const effective = filterRecordsByDayRange(filteredRecords, dayRange);
 
   // 1. Strictly aggregate the 5 requested Top Kategori Produk
@@ -1714,12 +1846,23 @@ export function buildProductMixLensData(
     })
     .slice(0, 10);
 
-  return {
+  const result: ProductMixLensData = {
     topCategories,
     topSkus,
     slowMovingSkus,
   };
+  productMixLensLru.unshift({ filteredRecords, daySig, result });
+  if (productMixLensLru.length > 4) {
+    productMixLensLru.pop();
+  }
+  return result;
 }
+
+const channelGrowthLensLru: Array<{
+  allRecords: TransactionRecord[];
+  key: string;
+  result: MonthlyStoreBaSellInRow[];
+}> = [];
 
 export function buildChannelGrowthLensData(
   allRecords: TransactionRecord[],
@@ -1728,6 +1871,24 @@ export function buildChannelGrowthLensData(
   dayRange?: ExecutiveDayRange
 ): MonthlyStoreBaSellInRow[] {
   const norm = normalizeDayRange(dayRange);
+  const key = [
+    selectedYear,
+    buildProfitFilterSig(filters),
+    norm.label || '',
+    getTargetsRevision(),
+    getExtraExecStorageSignature(),
+  ].join('||');
+  for (let i = 0; i < channelGrowthLensLru.length; i++) {
+    const entry = channelGrowthLensLru[i];
+    if (entry.allRecords === allRecords && entry.key === key) {
+      if (i > 0) {
+        channelGrowthLensLru.splice(i, 1);
+        channelGrowthLensLru.unshift(entry);
+      }
+      return entry.result;
+    }
+  }
+
   const scopedRecords = norm.active
     ? filterRecordsByDayRange(allRecords, dayRange)
     : allRecords;
@@ -1737,14 +1898,31 @@ export function buildChannelGrowthLensData(
     filters.REGION === 'ALL' ? 'ALL' : filters.REGION,
     filters
   );
+  channelGrowthLensLru.unshift({ allRecords, key, result: months });
+  if (channelGrowthLensLru.length > 4) {
+    channelGrowthLensLru.pop();
+  }
   return months;
 }
 
+let lastPromoBaCache: { sig: string; result: PromoBaLensData } | null = null;
+
 export function buildPromoBaLensData(): PromoBaLensData {
+  let sig = '';
+  try {
+    sig = localStorage.getItem('salespro_online_promo_manual_v2') || '';
+  } catch {
+    sig = '';
+  }
+  if (lastPromoBaCache && lastPromoBaCache.sig === sig) {
+    return lastPromoBaCache.result;
+  }
   const promoItems = loadOnlinePromoReports();
-  return {
+  const result: PromoBaLensData = {
     promoMonthlyRecap: aggregateMonthlyOnlinePromoRecap(promoItems),
   };
+  lastPromoBaCache = { sig, result };
+  return result;
 }
 
 type StoredMonthlyPnlOverride = MonthlyProfitOverrideInput & {
@@ -1784,6 +1962,12 @@ function canApplyMonthlyPnlOverrides(
   );
 }
 
+const monthlyProfitHrLru: Array<{
+  allRecords: TransactionRecord[];
+  key: string;
+  result: MonthlyProfitHrSummary;
+}> = [];
+
 export function buildMonthlyProfitHrSummary(
   allRecords: TransactionRecord[],
   filters: DashboardFilters,
@@ -1791,16 +1975,40 @@ export function buildMonthlyProfitHrSummary(
   dayRange?: ExecutiveDayRange
 ): MonthlyProfitHrSummary {
   const canApplyOverrides = canApplyMonthlyPnlOverrides(filters, dayRange);
-  const savedPnlOverrides = canApplyOverrides ? loadSavedMonthlyPnlOverrides() : {};
-
+  const rawOverridesStr = canApplyOverrides
+    ? (() => {
+        try {
+          return localStorage.getItem('salespro_monthly_pnl_overrides_v2') || '';
+        } catch {
+          return '';
+        }
+      })()
+    : '';
   const normDay = normalizeDayRange(dayRange);
   const filterSig = buildProfitFilterSig(filters);
+  const targetsRev = getTargetsRevision();
+  const lruKey = `${selectedYear}||${filterSig}||${normDay.label || ''}||${targetsRev}||${rawOverridesStr}`;
+
+  for (let i = 0; i < monthlyProfitHrLru.length; i++) {
+    const entry = monthlyProfitHrLru[i];
+    if (entry.allRecords === allRecords && entry.key === lruKey) {
+      if (i > 0) {
+        monthlyProfitHrLru.splice(i, 1);
+        monthlyProfitHrLru.unshift(entry);
+      }
+      return entry.result;
+    }
+  }
+
+  const savedPnlOverrides = canApplyOverrides ? loadSavedMonthlyPnlOverrides() : {};
+
   const canReuseCache =
     lastMonthlyProfitCache !== null &&
     lastMonthlyProfitCache.allRecords === allRecords &&
     lastMonthlyProfitCache.filterSig === filterSig &&
     lastMonthlyProfitCache.selectedYear === selectedYear &&
-    lastMonthlyProfitCache.daySig === (normDay.label || '');
+    lastMonthlyProfitCache.daySig === (normDay.label || '') &&
+    lastMonthlyProfitCache.targetsRev === targetsRev;
 
   const nonMonthBase = canReuseCache
     ? []
@@ -1936,7 +2144,7 @@ export function buildMonthlyProfitHrSummary(
   const totalYearlyNetProfit = monthlyProfitList.reduce((acc, d) => acc + d.netProfit, 0);
   const dividerMonthsCount = activeProfitMonths.length > 0 ? activeProfitMonths.length : 12;
 
-  return {
+  const result: MonthlyProfitHrSummary = {
     year: selectedYear,
     monthlyList: monthlyProfitList,
     maxProfitItem,
@@ -1952,7 +2160,20 @@ export function buildMonthlyProfitHrSummary(
         : 0,
     activeMonthCount: activeProfitMonths.length,
   };
+  monthlyProfitHrLru.unshift({ allRecords, key: lruKey, result });
+  if (monthlyProfitHrLru.length > 4) {
+    monthlyProfitHrLru.pop();
+  }
+  return result;
 }
+
+const targetsAlertsLensLru: Array<{
+  allRecords: TransactionRecord[];
+  filteredRecords: TransactionRecord[];
+  coreGapDiagnosis?: SalesGapDiagnosis;
+  key: string;
+  result: TargetsAlertsLensData;
+}> = [];
 
 export function buildTargetsAlertsLensData(
   allRecords: TransactionRecord[],
@@ -1961,19 +2182,48 @@ export function buildTargetsAlertsLensData(
   coreGapDiagnosis?: SalesGapDiagnosis,
   dayRange?: ExecutiveDayRange
 ): TargetsAlertsLensData {
+  const norm = normalizeDayRange(dayRange);
+  const key = `${buildProfitFilterSig(filters)}||${filters.BULAN || 'ALL'}||${norm.label || ''}||${getTargetsRevision()}`;
+  for (let i = 0; i < targetsAlertsLensLru.length; i++) {
+    const entry = targetsAlertsLensLru[i];
+    if (
+      entry.allRecords === allRecords &&
+      entry.filteredRecords === filteredRecords &&
+      entry.coreGapDiagnosis === coreGapDiagnosis &&
+      entry.key === key
+    ) {
+      if (i > 0) {
+        targetsAlertsLensLru.splice(i, 1);
+        targetsAlertsLensLru.unshift(entry);
+      }
+      return entry.result;
+    }
+  }
+
   const effective = filterRecordsByDayRange(filteredRecords, dayRange);
   const storeGapDiagnosis =
     coreGapDiagnosis ||
     diagnoseSalesGap(allRecords, effective, filters, undefined, dayRange);
   const productStatusSummary = calculateProductStatusAnalysis(effective);
 
-  return {
+  const result: TargetsAlertsLensData = {
     productStatusSummary,
     storeGapDetails: storeGapDiagnosis.storeGapDetails || [],
     totalStoreGapDeficit: storeGapDiagnosis.totalStoreGapDeficit || 0,
     gapPreviousPeriodName: storeGapDiagnosis.previousPeriodName || 'Periode Lalu',
     gapCurrentPeriodName: storeGapDiagnosis.currentPeriodName || 'Periode Ini',
   };
+  targetsAlertsLensLru.unshift({
+    allRecords,
+    filteredRecords,
+    coreGapDiagnosis,
+    key,
+    result,
+  });
+  if (targetsAlertsLensLru.length > 4) {
+    targetsAlertsLensLru.pop();
+  }
+  return result;
 }
 
 // Backwards-compatible unified snapshot builder

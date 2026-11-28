@@ -6,6 +6,7 @@ import {
   DashboardFilters,
   QuarterPeriodKey,
   SalesQuarterlySummaryItem,
+  StoreQuarterlySummaryItem,
   TrainerQuarterlySummaryItem,
 } from '../types/dashboard';
 import { SALES_MASTER_6_CONFIG } from '../services/kpiSalesData';
@@ -15,6 +16,7 @@ import {
 } from '../services/quarterlySummaryService';
 import { syncQuarterBaSellInToStores } from '../services/targetManagementService';
 import { formatPercent, formatRupiah } from '../utils/analytics';
+import { normalizeStoreAlnum } from '../utils/weeklyBaRegistry';
 
 interface AchieveQuartalDashboardPanelProps {
   rawQuarter: ReturnType<typeof calculateQuarterlySummary>;
@@ -36,7 +38,7 @@ export const AchieveQuartalDashboardPanel: React.FC<AchieveQuartalDashboardPanel
     onNavigateTab,
     onTargetsUpdated,
   }) => {
-    const [hallOfFameTab, setHallOfFameTab] = useState<'sales' | 'ba' | 'trainer'>('sales');
+    const [hallOfFameTab, setHallOfFameTab] = useState<'sales' | 'store' | 'ba' | 'trainer'>('sales');
     const [quartalSearch, setQuartalSearch] = useState<string>('');
     const deferredQuartalSearch = useDeferredValue(quartalSearch);
     const [editingBaSellInName, setEditingBaSellInName] = useState<string | null>(null);
@@ -150,6 +152,56 @@ export const AchieveQuartalDashboardPanel: React.FC<AchieveQuartalDashboardPanel
           return b.quarterActual - a.quarterActual;
         });
 
+      const filteredStores: StoreQuarterlySummaryItem[] = (rawQuarter.storeList || [])
+        .filter((st) => {
+          if (filters.SALES && filters.SALES !== 'ALL') {
+            const fSales = filters.SALES.trim().toUpperCase();
+            const canonical = fSales === 'ALBERT' ? 'ALBERT FERNANDO' : fSales;
+            if ((st.salesName || '').toUpperCase() !== canonical) return false;
+          }
+          if (filters.TRAINER && filters.TRAINER !== 'ALL') {
+            const fTrainer = filters.TRAINER.trim().toUpperCase();
+            const cfg = SALES_MASTER_6_CONFIG[st.salesName];
+            const trainerMatch =
+              (st.trainerName || '').toUpperCase().includes(fTrainer) ||
+              (cfg ? cfg.trainerCovered.toUpperCase().includes(fTrainer) : false);
+            if (!trainerMatch) return false;
+          }
+          if (filters.SPV && filters.SPV !== 'ALL' && (st.spvName || '').toUpperCase() !== filters.SPV.toUpperCase()) {
+            return false;
+          }
+          if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL') {
+            const targetNorm = normalizeStoreAlnum(filters.NAMA_STORE);
+            const targetUp = filters.NAMA_STORE.trim().toUpperCase();
+            const stNorm = normalizeStoreAlnum(st.storeName);
+            if (st.storeName.trim().toUpperCase() !== targetUp && (!targetNorm || stNorm !== targetNorm)) {
+              return false;
+            }
+          }
+          if (filters.REGION && filters.REGION !== 'ALL') {
+            const targetReg = filters.REGION.toUpperCase().trim();
+            if (
+              (st.region || '').toUpperCase().trim() !== targetReg &&
+              (st.coverArea || '').toUpperCase().trim() !== targetReg
+            ) {
+              return false;
+            }
+          }
+          if (!effSearch) return true;
+          return (
+            st.storeName.toLowerCase().includes(effSearch) ||
+            (st.salesName && st.salesName.toLowerCase().includes(effSearch)) ||
+            (st.coverArea && st.coverArea.toLowerCase().includes(effSearch)) ||
+            (st.region && st.region.toLowerCase().includes(effSearch)) ||
+            (st.baName && st.baName.toLowerCase().includes(effSearch))
+          );
+        })
+        .sort((a, b) => {
+          const diff = b.quarterAchievementSellInPercent - a.quarterAchievementSellInPercent;
+          if (Math.abs(diff) > 0.0001) return diff;
+          return b.quarterActualSellIn - a.quarterActualSellIn;
+        });
+
       const isKetSellIn = activeKet === 'SELL IN';
       const isKetSellOut = activeKet === 'SELL OUT';
       const activeKetDisplayLabel = isKetSellIn
@@ -179,6 +231,18 @@ export const AchieveQuartalDashboardPanel: React.FC<AchieveQuartalDashboardPanel
           }
         : null;
 
+      const topStore = filteredStores[0]
+        ? {
+            storeName: filteredStores[0].storeName,
+            salesName: filteredStores[0].salesName,
+            coverArea: filteredStores[0].coverArea,
+            baName: filteredStores[0].baName || undefined,
+            actualSellIn: filteredStores[0].quarterActualSellIn,
+            targetSellIn: filteredStores[0].quarterTargetSellIn,
+            percent: filteredStores[0].quarterAchievementSellInPercent,
+          }
+        : null;
+
       const topTrainer = filteredTrainer[0]
         ? {
             name: filteredTrainer[0].trainerName,
@@ -193,8 +257,10 @@ export const AchieveQuartalDashboardPanel: React.FC<AchieveQuartalDashboardPanel
         filteredSales,
         filteredBa,
         filteredTrainer,
+        filteredStores,
         topSales,
         topBa,
+        topStore,
         topTrainer,
         isKetSellIn,
         isKetSellOut,
@@ -329,46 +395,87 @@ export const AchieveQuartalDashboardPanel: React.FC<AchieveQuartalDashboardPanel
               </div>
             </div>
 
-            <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-pink-400 flex items-center gap-1.5">
-                  <Medal className="w-4 h-4 text-pink-400" />
-                  Top Beauty Advisor Star
-                </span>
-                <span className="text-[11px] font-black px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 border border-pink-400/30">
-                  Peringkat 1
-                </span>
-              </div>
-              <div className="mt-3">
-                <h4 className="text-base font-extrabold text-white truncate">
-                  {achieveQuartalData.topBa?.name || 'Tidak ada data'}
-                </h4>
-                <p className="text-xs text-slate-300 mt-0.5 truncate">
-                  Outlet:{' '}
-                  <span className="font-bold text-pink-300">
-                    {achieveQuartalData.topBa?.store || '-'}
+            {achieveQuartalData.isKetSellOut ? (
+              <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-pink-400 flex items-center gap-1.5">
+                    <Medal className="w-4 h-4 text-pink-400" />
+                    Top Beauty Advisor Star
                   </span>
-                </p>
-                <p className="text-xs text-slate-300 mt-0.5">
-                  {achieveQuartalData.isKetSellIn
-                    ? 'Realisasi Sell In:'
-                    : achieveQuartalData.isKetSellOut
-                    ? 'Realisasi Sell Out:'
-                    : 'Omset Kuartal:'}{' '}
-                  <span className="font-bold text-amber-300 font-mono">
-                    {formatRupiah(achieveQuartalData.topBa?.actual || 0, true)}
-                  </span>
-                </p>
-                <div className="mt-1.5 flex items-center justify-between text-xs font-mono tabular-nums">
-                  <span className="text-slate-400 font-sans">
-                    Target: {formatRupiah(achieveQuartalData.topBa?.target || 0, true)}
-                  </span>
-                  <span className="font-black text-emerald-400">
-                    {formatPercent(achieveQuartalData.topBa?.percent || 0)}
+                  <span className="text-[11px] font-black px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 border border-pink-400/30">
+                    Peringkat 1
                   </span>
                 </div>
+                <div className="mt-3">
+                  <h4 className="text-base font-extrabold text-white truncate">
+                    {achieveQuartalData.topBa?.name || 'Tidak ada data'}
+                  </h4>
+                  <p className="text-xs text-slate-300 mt-0.5 truncate">
+                    Outlet:{' '}
+                    <span className="font-bold text-pink-300">
+                      {achieveQuartalData.topBa?.store || '-'}
+                    </span>
+                  </p>
+                  <p className="text-xs text-slate-300 mt-0.5">
+                    Realisasi Sell Out (26–25):{' '}
+                    <span className="font-bold text-amber-300 font-mono">
+                      {formatRupiah(achieveQuartalData.topBa?.actual || 0, true)}
+                    </span>
+                  </p>
+                  <div className="mt-1.5 flex items-center justify-between text-xs font-mono tabular-nums">
+                    <span className="text-slate-400 font-sans">
+                      Target: {formatRupiah(achieveQuartalData.topBa?.target || 0, true)}
+                    </span>
+                    <span className="font-black text-emerald-400">
+                      {formatPercent(achieveQuartalData.topBa?.percent || 0)}
+                    </span>
+                  </div>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
+                    <Medal className="w-4 h-4 text-sky-400" />
+                    Top Toko Champion (Sell In)
+                  </span>
+                  <span className="text-[11px] font-black px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-400/30">
+                    Peringkat 1
+                  </span>
+                </div>
+                <div className="mt-3">
+                  <h4 className="text-base font-extrabold text-white truncate">
+                    {achieveQuartalData.topStore?.storeName || 'Tidak ada data'}
+                  </h4>
+                  <p className="text-xs text-slate-300 mt-0.5 truncate">
+                    Sales:{' '}
+                    <span className="font-bold text-sky-300">
+                      {achieveQuartalData.topStore?.salesName || '-'}
+                    </span>{' '}
+                    · {achieveQuartalData.topStore?.coverArea || '-'}
+                  </p>
+                  <p className="text-xs text-slate-300 mt-0.5">
+                    Realisasi Sell In:{' '}
+                    <span className="font-bold text-amber-300 font-mono">
+                      {formatRupiah(achieveQuartalData.topStore?.actualSellIn || 0, true)}
+                    </span>
+                  </p>
+                  <div className="mt-1.5 flex items-center justify-between text-xs font-mono tabular-nums">
+                    <span className="text-slate-400 font-sans">
+                      Target: {formatRupiah(achieveQuartalData.topStore?.targetSellIn || 0, true)}
+                    </span>
+                    <span className="font-black text-emerald-400">
+                      {formatPercent(achieveQuartalData.topStore?.percent || 0)}
+                    </span>
+                  </div>
+                  {!achieveQuartalData.isKetSellIn && (
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      Top Beauty Advisor Star tampil saat filter KET = SELL OUT
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
 
             <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden">
               <div className="flex items-center justify-between gap-2">
@@ -419,6 +526,11 @@ export const AchieveQuartalDashboardPanel: React.FC<AchieveQuartalDashboardPanel
                 </h4>
                 <p className="text-[11px] text-slate-400">
                   Urutan peringkat berdasarkan persentase pencapaian (%) tertinggi • Filter KET ({achieveQuartalData.activeKetDisplayLabel})
+                  {achieveQuartalData.overall.baSellOutDateRangeLabel && (
+                    <span className="text-emerald-300 font-semibold">
+                      {' '}· Cut-off Sell Out BA (26–25): {achieveQuartalData.overall.baSellOutDateRangeLabel}
+                    </span>
+                  )}
                   {hallOfFameTab === 'ba' && (achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
                     <span className="text-amber-300 font-semibold">
                       {' '}· Klik nilai Target Sell In pada Nama BA &amp; Toko untuk edit langsung
@@ -451,6 +563,7 @@ export const AchieveQuartalDashboardPanel: React.FC<AchieveQuartalDashboardPanel
                 <div className="flex items-center gap-1 p-1 bg-white/10 rounded-xl border border-white/10">
                   {([
                     { id: 'sales', label: `Sales (${achieveQuartalData.filteredSales.length})` },
+                    { id: 'store', label: `Toko (${achieveQuartalData.filteredStores.length})` },
                     { id: 'ba', label: `BA (${achieveQuartalData.filteredBa.length})` },
                     { id: 'trainer', label: `Trainer (${achieveQuartalData.filteredTrainer.length})` },
                   ] as const).map((tab) => (
@@ -482,34 +595,55 @@ export const AchieveQuartalDashboardPanel: React.FC<AchieveQuartalDashboardPanel
                     <th className="py-2.5 px-3">
                       {hallOfFameTab === 'sales'
                         ? 'Personil Sales'
+                        : hallOfFameTab === 'store'
+                        ? 'Nama Toko / Outlet'
                         : hallOfFameTab === 'ba'
                         ? 'Nama BA & Toko'
                         : 'Nama Trainer'}
                     </th>
-                    <th className="py-2.5 px-3">Area</th>
-                    {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
+                    <th className="py-2.5 px-3">
+                      {hallOfFameTab === 'store' ? 'Sales & Area' : 'Area'}
+                    </th>
+                    {hallOfFameTab === 'store' ? (
                       <>
-                        <th className="py-2.5 px-3 text-right">
-                          Target Sell In
-                          {hallOfFameTab === 'ba' && (
-                            <span className="ml-1 text-[9px] font-semibold text-amber-300 normal-case">
-                              (Edit)
-                            </span>
-                          )}
-                        </th>
+                        <th className="py-2.5 px-3 text-right">Target Sell In</th>
                         <th className="py-2.5 px-3 text-right">Realisasi Sell In</th>
                         <th className="py-2.5 px-3 text-center">% Sell In</th>
                       </>
-                    )}
-                    {(achieveQuartalData.isKetSellOut || !achieveQuartalData.isKetSellIn) && (
+                    ) : (
                       <>
-                        <th className="py-2.5 px-3 text-right">Target Sell Out</th>
-                        <th className="py-2.5 px-3 text-right">Realisasi Sell Out</th>
-                        <th className="py-2.5 px-3 text-center">% Sell Out</th>
+                        {(achieveQuartalData.isKetSellIn || !achieveQuartalData.isKetSellOut) && (
+                          <>
+                            <th className="py-2.5 px-3 text-right">
+                              Target Sell In
+                              {hallOfFameTab === 'ba' && (
+                                <span className="ml-1 text-[9px] font-semibold text-amber-300 normal-case">
+                                  (Edit)
+                                </span>
+                              )}
+                            </th>
+                            <th className="py-2.5 px-3 text-right">Realisasi Sell In</th>
+                            <th className="py-2.5 px-3 text-center">% Sell In</th>
+                          </>
+                        )}
+                        {(achieveQuartalData.isKetSellOut || !achieveQuartalData.isKetSellIn) && (
+                          <>
+                            <th className="py-2.5 px-3 text-right">Target Sell Out</th>
+                            <th className="py-2.5 px-3 text-right">
+                              Realisasi Sell Out
+                              {hallOfFameTab === 'ba' && (
+                                <span className="ml-1 text-[9px] font-semibold text-emerald-300 normal-case">
+                                  (26–25)
+                                </span>
+                              )}
+                            </th>
+                            <th className="py-2.5 px-3 text-center">% Sell Out</th>
+                          </>
+                        )}
+                        {!achieveQuartalData.isKetSellIn && !achieveQuartalData.isKetSellOut && (
+                          <th className="py-2.5 px-3 text-center">% Peringkat</th>
+                        )}
                       </>
-                    )}
-                    {!achieveQuartalData.isKetSellIn && !achieveQuartalData.isKetSellOut && (
-                      <th className="py-2.5 px-3 text-center">% Peringkat</th>
                     )}
                   </tr>
                 </thead>
@@ -558,6 +692,42 @@ export const AchieveQuartalDashboardPanel: React.FC<AchieveQuartalDashboardPanel
                       <tr>
                         <td colSpan={10} className="py-8 text-center font-sans text-slate-400">
                           Tidak ada data Sales pada filter yang dipilih.
+                        </td>
+                      </tr>
+                    ))}
+
+                  {hallOfFameTab === 'store' &&
+                    (achieveQuartalData.filteredStores.length > 0 ? (
+                      achieveQuartalData.filteredStores.map((st, idx) => (
+                        <tr key={`${st.storeName}-${idx}`} className="hover:bg-white/5 transition-colors">
+                          <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
+                          <td className="py-2 px-3 font-sans max-w-[260px]">
+                            <span className="font-bold text-white block">{st.storeName}</span>
+                            {st.baName && (
+                              <span className="text-[10px] text-slate-400 leading-snug block">
+                                BA: {st.baName}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 font-sans text-slate-400">
+                            <span className="text-slate-200 font-semibold block">{st.salesName}</span>
+                            <span className="text-[10px] text-slate-400 block">{st.coverArea}</span>
+                          </td>
+                          <td className="py-2 px-3 text-right text-slate-300">
+                            {formatRupiah(st.quarterTargetSellIn, true)}
+                          </td>
+                          <td className="py-2 px-3 text-right font-bold text-sky-300">
+                            {formatRupiah(st.quarterActualSellIn, true)}
+                          </td>
+                          <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                            {formatPercent(st.quarterAchievementSellInPercent, false)}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={6} className="py-8 text-center font-sans text-slate-400">
+                          Tidak ada data Toko Sell In pada filter yang dipilih.
                         </td>
                       </tr>
                     ))}

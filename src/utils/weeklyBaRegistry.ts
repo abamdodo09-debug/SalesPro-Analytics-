@@ -800,6 +800,14 @@ export const DEFAULT_WEEKLY_STORES: WeeklyStoreConfig[] = [
   },
 ];
 
+const weeklyBaStoresCache: Array<{
+  records: TransactionRecord[];
+  allowMultiBaPerStore: boolean;
+  rawStores: string | null;
+  rawDeleted: string | null;
+  result: WeeklyStoreConfig[];
+}> = [];
+
 /**
  * Mengambil daftar BA & Toko resmi yang sinkron dengan menu Weekly Sell Out BA:
  * 1. Membaca konfigurasi toko dari localStorage ('salespro_weekly_stores_config_v5') atau DEFAULT_WEEKLY_STORES.
@@ -813,9 +821,29 @@ export function resolveWeeklyBaStores(
   options?: { allowMultiBaPerStore?: boolean }
 ): WeeklyStoreConfig[] {
   const allowMultiBaPerStore = Boolean(options?.allowMultiBaPerStore);
+  let rawStores: string | null = null;
+  let rawDeleted: string | null = null;
+  try {
+    rawStores = localStorage.getItem(STORAGE_KEY_WEEKLY_STORES);
+    rawDeleted = localStorage.getItem(STORAGE_KEY_WEEKLY_DELETED_STORES);
+  } catch {
+    // ignore
+  }
+
+  for (let i = 0; i < weeklyBaStoresCache.length; i++) {
+    const c = weeklyBaStoresCache[i];
+    if (
+      c.records === sellOutRecords &&
+      c.allowMultiBaPerStore === allowMultiBaPerStore &&
+      c.rawStores === rawStores &&
+      c.rawDeleted === rawDeleted
+    ) {
+      return c.result;
+    }
+  }
+
   let baseStores: WeeklyStoreConfig[] = DEFAULT_WEEKLY_STORES;
   try {
-    const rawStores = localStorage.getItem(STORAGE_KEY_WEEKLY_STORES);
     if (rawStores) {
       const parsed = JSON.parse(rawStores);
       if (Array.isArray(parsed) && parsed.length > 0) {
@@ -828,7 +856,6 @@ export function resolveWeeklyBaStores(
 
   let deletedSet = new Set<string>();
   try {
-    const rawDeleted = localStorage.getItem(STORAGE_KEY_WEEKLY_DELETED_STORES);
     if (rawDeleted) {
       const parsedDel = JSON.parse(rawDeleted);
       if (Array.isArray(parsedDel)) {
@@ -917,5 +944,14 @@ export function resolveWeeklyBaStores(
     });
   }
 
-  return Array.from(uniqueMap.values());
+  const result = Array.from(uniqueMap.values());
+  weeklyBaStoresCache.unshift({
+    records: sellOutRecords,
+    allowMultiBaPerStore,
+    rawStores,
+    rawDeleted,
+    result,
+  });
+  if (weeklyBaStoresCache.length > 6) weeklyBaStoresCache.pop();
+  return result;
 }

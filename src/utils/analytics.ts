@@ -167,30 +167,45 @@ export const SKU_STATUS_MAP: Record<string, string> = {
   '672471': '新品 - New Products',
 };
 
+const SKU_STATUS_ENTRIES = Object.entries(SKU_STATUS_MAP);
+const productStatusCache = new WeakMap<object, string>();
+
 // Robust resolver for product lifecycle status
 export function resolveProductStatus(record: TransactionRecord): string {
+  const cached = productStatusCache.get(record);
+  if (cached !== undefined) return cached;
+
+  let resolved = '常规品 - Regular Products';
   if (record.STATUS_PRODUK && record.STATUS_PRODUK.trim()) {
     const raw = record.STATUS_PRODUK.trim();
-    // Check if matches known statuses directly
+    const rawLower = raw.toLowerCase();
     const matched = ALL_PRODUCT_STATUSES.find(
-      (s) => s.toLowerCase() === raw.toLowerCase() || s.includes(raw) || raw.includes(s.split(' - ')[0])
+      (s) => s.toLowerCase() === rawLower || s.includes(raw) || raw.includes(s.split(' - ')[0])
     );
-    if (matched) return matched;
-    return raw;
+    resolved = matched || raw;
+  } else if (record.NO_SKU && SKU_STATUS_MAP[record.NO_SKU]) {
+    resolved = SKU_STATUS_MAP[record.NO_SKU];
+  } else {
+    let skuMatched = '';
+    if (record.SKU) {
+      for (let i = 0; i < SKU_STATUS_ENTRIES.length; i++) {
+        const [noSku, status] = SKU_STATUS_ENTRIES[i];
+        if (record.SKU.includes(noSku)) {
+          skuMatched = status;
+          break;
+        }
+      }
+    }
+    if (skuMatched) {
+      resolved = skuMatched;
+    } else if (isNewProduct(record.PRODUK_NEW)) {
+      resolved = '新品 - New Products';
+    } else if (isFocusProduct(record.PRODUK_FOCUS)) {
+      resolved = '核心品 - Core Products';
+    }
   }
-  if (record.NO_SKU && SKU_STATUS_MAP[record.NO_SKU]) {
-    return SKU_STATUS_MAP[record.NO_SKU];
-  }
-  for (const [noSku, status] of Object.entries(SKU_STATUS_MAP)) {
-    if (record.SKU && record.SKU.includes(noSku)) return status;
-  }
-  if (isNewProduct(record.PRODUK_NEW)) {
-    return '新品 - New Products';
-  }
-  if (isFocusProduct(record.PRODUK_FOCUS)) {
-    return '核心品 - Core Products';
-  }
-  return '常规品 - Regular Products';
+  productStatusCache.set(record, resolved);
+  return resolved;
 }
 
 // Category Classifier from SKU & Brand Name (Intelligent Fallback)
@@ -312,12 +327,24 @@ export function detectCategoryFromSku(sku?: string, brand?: string): string {
   return 'Lip Makeup';
 }
 
+const categoryCache = new WeakMap<object, string>();
+
 // Resolver for record category with automatic fallback
 export function resolveCategory(record: Partial<TransactionRecord>): string {
-  if (record.KATEGORI && record.KATEGORI.trim() && record.KATEGORI.trim().toUpperCase() !== 'LAINNYA' && record.KATEGORI.trim().toUpperCase() !== 'UNKNOWN') {
-    return record.KATEGORI.trim();
+  if (record && typeof record === 'object') {
+    const cached = categoryCache.get(record);
+    if (cached !== undefined) return cached;
   }
-  return detectCategoryFromSku(record.SKU, record.BRAND);
+  const rawCat = record.KATEGORI ? record.KATEGORI.trim() : '';
+  const rawCatUpper = rawCat.toUpperCase();
+  const resolved =
+    rawCat && rawCatUpper !== 'LAINNYA' && rawCatUpper !== 'UNKNOWN'
+      ? rawCat
+      : detectCategoryFromSku(record.SKU, record.BRAND);
+  if (record && typeof record === 'object') {
+    categoryCache.set(record, resolved);
+  }
+  return resolved;
 }
 
 // Product type detection helpers
@@ -519,7 +546,13 @@ export function formatPercent(percent: number, showSign: boolean = true): string
   return `${sign}${percent.toFixed(1).replace('.', ',')}%`;
 }
 
-// Filter engine: cascades cross-filters (pre-normalized & O(1) fast-path when unfiltered)
+const filterRecordsLru: Array<{
+  records: TransactionRecord[];
+  sig: string;
+  result: TransactionRecord[];
+}> = [];
+
+// Filter engine: cascades cross-filters (pre-normalized, O(1) fast-path & small LRU cache)
 export function filterRecords(
   records: TransactionRecord[],
   filters: DashboardFilters
@@ -558,6 +591,14 @@ export function filterRecords(
     !q
   ) {
     return records;
+  }
+
+  const sig = `${fBulan}|${fTahun}|${fSales}|${fTrainer}|${fSpv}|${fBrand}|${fKategori}|${fStatus}|${fStore}|${fRegion}|${fKet}|${fSku}|${q}`;
+  for (let i = 0; i < filterRecordsLru.length; i++) {
+    const entry = filterRecordsLru[i];
+    if (entry.records === records && entry.sig === sig) {
+      return entry.result;
+    }
   }
 
   const out: TransactionRecord[] = [];
@@ -616,8 +657,28 @@ export function filterRecords(
 
     out.push(r);
   }
+  filterRecordsLru.unshift({ records, sig, result: out });
+  if (filterRecordsLru.length > 6) filterRecordsLru.pop();
   return out;
 }
+
+const cascadingOptionsLru: Array<{
+  allRecords: TransactionRecord[];
+  sig: string;
+  result: {
+    months: string[];
+    years: string[];
+    sales: string[];
+    trainers: string[];
+    spv: string[];
+    brands: string[];
+    categories: string[];
+    statusProduk: string[];
+    stores: string[];
+    regions: string[];
+    ket: string[];
+  };
+}> = [];
 
 // Get dynamic available filter options based on other active selections (cascading)
 export function getCascadingOptions(
@@ -645,6 +706,14 @@ export function getCascadingOptions(
     currentFilters.NAMA_STORE !== 'ALL' ? currentFilters.NAMA_STORE.trim().toUpperCase() : '';
   const fRegion = currentFilters.REGION !== 'ALL' ? currentFilters.REGION.trim().toUpperCase() : '';
   const fKet = currentFilters.KET !== 'ALL' ? currentFilters.KET.trim().toUpperCase() : '';
+
+  const cascSig = `${fBulan}|${fTahun}|${fSales}|${fTrainer}|${fSpv}|${fBrand}|${fKategori}|${fStatus}|${fStore}|${fRegion}|${fKet}`;
+  for (let i = 0; i < cascadingOptionsLru.length; i++) {
+    const entry = cascadingOptionsLru[i];
+    if (entry.allRecords === allRecords && entry.sig === cascSig) {
+      return entry.result;
+    }
+  }
 
   const monthsSet = new Set<string>();
   const yearsSet = new Set<string>();
@@ -779,7 +848,7 @@ export function getCascadingOptions(
     return priorityA - priorityB;
   });
 
-  return {
+  const cascResult = {
     months: availableMonths,
     years: availableYears,
     sales: availableSales,
@@ -792,6 +861,9 @@ export function getCascadingOptions(
     regions: availableRegions,
     ket: availableKet,
   };
+  cascadingOptionsLru.unshift({ allRecords, sig: cascSig, result: cascResult });
+  if (cascadingOptionsLru.length > 6) cascadingOptionsLru.pop();
+  return cascResult;
 }
 
 // Analisa Status Produk (Product Lifecycle & Merchandising Performance)
@@ -1162,10 +1234,25 @@ export function aggregateCategoryDetails(records: TransactionRecord[]): Category
   return results.sort((a, b) => b.totalValue - a.totalValue);
 }
 
+const txDateTsCache = new WeakMap<object, number | null>();
+const recordDayCache = new WeakMap<object, number | null>();
+
 // Robust date parser for Google Sheet records (handles YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY, ISO)
 export function parseTransactionDate(r: Partial<TransactionRecord>): Date | null {
+  if (r && typeof r === 'object') {
+    const cachedTs = txDateTsCache.get(r);
+    if (cachedTs !== undefined) {
+      return cachedTs === null ? null : new Date(cachedTs);
+    }
+  }
+
   const raw = String(r.TANGGAL || '').trim();
-  if (!raw) return null;
+  if (!raw) {
+    if (r && typeof r === 'object') txDateTsCache.set(r, null);
+    return null;
+  }
+
+  let resolved: Date | null = null;
 
   // ISO YYYY-MM-DD or YYYY-MM-DDTHH:mm...
   const isoMatch = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
@@ -1174,61 +1261,77 @@ export function parseTransactionDate(r: Partial<TransactionRecord>): Date | null
     const m = Number(isoMatch[2]);
     const d = Number(isoMatch[3]);
     if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
-      return new Date(y, m - 1, d);
+      resolved = new Date(y, m - 1, d);
     }
   }
 
-  // Slash or dash D/M/Y or M/D/Y
-  const slashMatch = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-  if (slashMatch) {
-    const partA = Number(slashMatch[1]);
-    const partB = Number(slashMatch[2]);
-    let year = Number(slashMatch[3]);
-    if (year < 100) year += 2000;
+  if (!resolved) {
+    // Slash or dash D/M/Y or M/D/Y
+    const slashMatch = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+    if (slashMatch) {
+      const partA = Number(slashMatch[1]);
+      const partB = Number(slashMatch[2]);
+      let year = Number(slashMatch[3]);
+      if (year < 100) year += 2000;
 
-    let day = partA;
-    let month = partB;
+      let day = partA;
+      let month = partB;
 
-    if (partA > 12) {
-      day = partA;
-      month = partB;
-    } else if (partB > 12) {
-      month = partA;
-      day = partB;
-    } else {
-      // Ambiguous (both <= 12): disambiguate using BULAN column if available
-      const expectedMonth = r.BULAN ? MONTH_ORDER[String(r.BULAN).trim().toUpperCase()] : undefined;
-      if (expectedMonth === partB) {
+      if (partA > 12) {
         day = partA;
         month = partB;
-      } else if (expectedMonth === partA) {
+      } else if (partB > 12) {
         month = partA;
         day = partB;
       } else {
-        // Default Indonesian DD/MM/YYYY
-        day = partA;
-        month = partB;
+        const expectedMonth = r.BULAN ? MONTH_ORDER[String(r.BULAN).trim().toUpperCase()] : undefined;
+        if (expectedMonth === partB) {
+          day = partA;
+          month = partB;
+        } else if (expectedMonth === partA) {
+          month = partA;
+          day = partB;
+        } else {
+          day = partA;
+          month = partB;
+        }
       }
-    }
 
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      return new Date(year, month - 1, day);
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        resolved = new Date(year, month - 1, day);
+      }
     }
   }
 
-  const parsed = new Date(raw);
-  return isNaN(parsed.getTime()) ? null : parsed;
+  if (!resolved) {
+    const parsed = new Date(raw);
+    if (!isNaN(parsed.getTime())) resolved = parsed;
+  }
+
+  if (r && typeof r === 'object') {
+    txDateTsCache.set(r, resolved ? resolved.getTime() : null);
+  }
+  return resolved;
 }
 
 export function getRecordDayOfMonth(r: Partial<TransactionRecord>): number | null {
-  const parsed = parseTransactionDate(r);
-  if (parsed) return parsed.getDate();
-  const dayOnlyMatch = String(r.TANGGAL || '').trim().match(/^(\d{1,2})$/);
-  if (dayOnlyMatch) {
-    const d = Number(dayOnlyMatch[1]);
-    if (d >= 1 && d <= 31) return d;
+  if (r && typeof r === 'object') {
+    const cached = recordDayCache.get(r);
+    if (cached !== undefined) return cached;
   }
-  return null;
+  const parsed = parseTransactionDate(r);
+  let dayVal: number | null = parsed ? parsed.getDate() : null;
+  if (dayVal === null) {
+    const dayOnlyMatch = String(r.TANGGAL || '').trim().match(/^(\d{1,2})$/);
+    if (dayOnlyMatch) {
+      const d = Number(dayOnlyMatch[1]);
+      if (d >= 1 && d <= 31) dayVal = d;
+    }
+  }
+  if (r && typeof r === 'object') {
+    recordDayCache.set(r, dayVal);
+  }
+  return dayVal;
 }
 
 function getWeekNumberFromDate(d: Date): number {
@@ -2101,19 +2204,21 @@ export function calculateComparisonGrowth(
   };
 }
 
+const trainerForRecordCache = new WeakMap<TransactionRecord, string>();
+
 export function getTrainerForRecord(r: TransactionRecord): string {
+  const cached = trainerForRecordCache.get(r);
+  if (cached !== undefined) return cached;
+
   const sales = (r.SALES || '').toUpperCase();
   const store = (r.NAMA_STORE || '').toUpperCase();
   const area = (r.COVER_AREA || '').toUpperCase();
   const reg = (r.REGION || '').toUpperCase();
 
-  // 1. Sales-based coveran
-  if (sales.includes('ALBERT FERNANDO')) return 'ARA';
-  if (sales.includes('ABDUL RAHIM')) return 'RATIH';
-
-  // 2. Specific store matching from master image table
-  // Stores strictly assigned to ARA
-  if (
+  let res = 'ARA';
+  if (sales.includes('ALBERT FERNANDO')) res = 'ARA';
+  else if (sales.includes('ABDUL RAHIM')) res = 'RATIH';
+  else if (
     store.includes('CITRA SWALAYAN') ||
     store.includes('HIDAYAH') ||
     store.includes('IDOLA KOSMETIK') ||
@@ -2131,11 +2236,8 @@ export function getTrainerForRecord(r: TransactionRecord): string {
     store.includes('PANAM') ||
     store.includes('TEMBILAHAN')
   ) {
-    return 'ARA';
-  }
-
-  // Stores strictly assigned to RATIH
-  if (
+    res = 'ARA';
+  } else if (
     store.includes('ANNISA') ||
     store.includes('GHANAYA') ||
     store.includes('GLOBAL KOSMETIK') ||
@@ -2161,51 +2263,59 @@ export function getTrainerForRecord(r: TransactionRecord): string {
     store.includes('DELIMA') ||
     store.includes('MARPOYAN')
   ) {
-    return 'RATIH';
+    res = 'RATIH';
+  } else if (reg.includes('DURI') || reg.includes('BAGAN') || area.includes('DURI') || area.includes('BAGAN')) {
+    res = 'RATIH';
   }
 
-  // 3. Fallback based on region / area
-  if (reg.includes('DURI') || reg.includes('BAGAN') || area.includes('DURI') || area.includes('BAGAN')) {
-    return 'RATIH';
-  }
-
-  return 'ARA';
+  trainerForRecordCache.set(r, res);
+  return res;
 }
 
-export function extractDayOfMonth(record: TransactionRecord): number | null {
-  const raw = (record.TANGGAL || '').trim();
-  if (!raw) return null;
+const extractDayCache = new WeakMap<TransactionRecord, number | null>();
 
-  // ISO format: YYYY-MM-DD or YYYY/MM/DD
+export function extractDayOfMonth(record: TransactionRecord): number | null {
+  const cached = extractDayCache.get(record);
+  if (cached !== undefined) return cached;
+
+  const raw = (record.TANGGAL || '').trim();
+  if (!raw) {
+    extractDayCache.set(record, null);
+    return null;
+  }
+
+  let dayVal: number | null = null;
   const isoMatch = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
   if (isoMatch) {
     const day = parseInt(isoMatch[3], 10);
-    return day >= 1 && day <= 31 ? day : null;
-  }
+    dayVal = day >= 1 && day <= 31 ? day : null;
+  } else {
+    const slashMatch = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})/);
+    if (slashMatch) {
+      const a = parseInt(slashMatch[1], 10);
+      const b = parseInt(slashMatch[2], 10);
+      const expectedMonth = MONTH_ORDER[(record.BULAN || '').trim().toUpperCase()];
 
-  // Slash or dash format: A/B/C or A-B-C
-  const slashMatch = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})/);
-  if (slashMatch) {
-    const a = parseInt(slashMatch[1], 10);
-    const b = parseInt(slashMatch[2], 10);
-    const expectedMonth = MONTH_ORDER[(record.BULAN || '').trim().toUpperCase()];
+      if (expectedMonth) {
+        if (a === expectedMonth && b >= 1 && b <= 31) dayVal = b;
+        else if (b === expectedMonth && a >= 1 && a <= 31) dayVal = a;
+      }
 
-    if (expectedMonth) {
-      if (a === expectedMonth && b >= 1 && b <= 31) return b;
-      if (b === expectedMonth && a >= 1 && a <= 31) return a;
+      if (dayVal === null) {
+        if (b > 12 && b <= 31) dayVal = b;
+        else if (a > 12 && a <= 31) dayVal = a;
+        else if (b >= 1 && b <= 31) dayVal = b;
+      }
+    } else {
+      const parsed = new Date(raw);
+      if (!isNaN(parsed.getTime())) {
+        const day = parsed.getDate();
+        dayVal = day >= 1 && day <= 31 ? day : null;
+      }
     }
-
-    if (b > 12 && b <= 31) return b;
-    if (a > 12 && a <= 31) return a;
-    if (b >= 1 && b <= 31) return b;
   }
-
-  const parsed = new Date(raw);
-  if (!isNaN(parsed.getTime())) {
-    const day = parsed.getDate();
-    return day >= 1 && day <= 31 ? day : null;
-  }
-  return null;
+  extractDayCache.set(record, dayVal);
+  return dayVal;
 }
 
 // Gap & Root Cause Diagnosis: Why did sales drop?

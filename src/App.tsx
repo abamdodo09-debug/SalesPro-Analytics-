@@ -295,6 +295,11 @@ export default function App() {
   }, [records, deferredFilters]);
 
   const isExecutiveDashboard = activeTab === 'executive_dashboard';
+  const hasVisitedExecDashboardRef = useRef(false);
+  if (isExecutiveDashboard) {
+    hasVisitedExecDashboardRef.current = true;
+  }
+  const keepExecDashboardMounted = isExecutiveDashboard || hasVisitedExecDashboardRef.current;
   const isOverviewTab = activeTab === 'overview';
 
   // Summary KPIs (skipped when inside Executive Dashboard which computes its own scoped snapshot)
@@ -625,19 +630,22 @@ export default function App() {
             </div>
           }
         >
-        {/* Tab: Dashboard Eksekutif (Dark Executive View) */}
-        {activeTab === 'executive_dashboard' && (
-          <ExecutiveSalesDashboardView
-            allRecords={records}
-            filteredRecords={filteredRecords}
-            filters={filters}
-            cascadingOptions={cascadingOptions}
-            onChangeFilter={handleFilterChange}
-            onExportPdf={handleExportPdf}
-            onNavigateTab={handleTabChange}
-            isFullScreen={isDashboardFullScreen}
-            onToggleFullScreen={handleToggleDashboardFullScreen}
-          />
+        {/* Tab: Dashboard Eksekutif (Dark Executive View - Keep Alive once visited for instant tab return) */}
+        {keepExecDashboardMounted && (
+          <div className={isExecutiveDashboard ? 'block' : 'hidden'}>
+            <ExecutiveSalesDashboardView
+              allRecords={records}
+              filteredRecords={filteredRecords}
+              filters={filters}
+              cascadingOptions={cascadingOptions}
+              onChangeFilter={handleFilterChange}
+              onExportPdf={handleExportPdf}
+              onNavigateTab={handleTabChange}
+              isFullScreen={isDashboardFullScreen}
+              onToggleFullScreen={handleToggleDashboardFullScreen}
+              isActive={isExecutiveDashboard}
+            />
+          </div>
         )}
 
         {/* View Routing */}

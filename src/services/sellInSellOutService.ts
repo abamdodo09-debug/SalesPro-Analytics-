@@ -293,10 +293,13 @@ export function resetEntitySellInOutOverride(
   }
 }
 
-export function resolveRecordMonthAndYear(r: TransactionRecord): { month: string; year: number } {
-  const dt = parseTransactionDate(r);
-  const rawBulan = (r.BULAN || '').trim().toUpperCase();
+const resolvedMonthYearCache = new WeakMap<TransactionRecord, { month: string; year: number }>();
 
+export function resolveRecordMonthAndYear(r: TransactionRecord): { month: string; year: number } {
+  const cached = resolvedMonthYearCache.get(r);
+  if (cached !== undefined) return cached;
+
+  const rawBulan = (r.BULAN || '').trim().toUpperCase();
   let resolvedMonth = '';
   if (rawBulan) {
     if (MONTH_ALIASES[rawBulan]) {
@@ -306,11 +309,15 @@ export function resolveRecordMonthAndYear(r: TransactionRecord): { month: string
       if (matched) resolvedMonth = matched;
     }
   }
+
+  const parsedYear = Number(r.TAHUN);
+  const needDate = !resolvedMonth || isNaN(parsedYear) || parsedYear <= 1900;
+  const dt = needDate ? parseTransactionDate(r) : null;
+
   if (!resolvedMonth && dt) {
     resolvedMonth = MONTHS_12[dt.getMonth()] || '';
   }
 
-  const parsedYear = Number(r.TAHUN);
   const resolvedYear =
     !isNaN(parsedYear) && parsedYear > 1900
       ? parsedYear
@@ -318,7 +325,9 @@ export function resolveRecordMonthAndYear(r: TransactionRecord): { month: string
       ? dt.getFullYear()
       : 0;
 
-  return { month: resolvedMonth, year: resolvedYear };
+  const res = { month: resolvedMonth, year: resolvedYear };
+  resolvedMonthYearCache.set(r, res);
+  return res;
 }
 
 export function classifyRecordKet(ketRaw?: string): 'SELL IN' | 'SELL OUT' | 'RETURN' {

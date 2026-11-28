@@ -92,7 +92,9 @@ export async function captureElementToPng({
       logging: false,
       width: captureWidth,
       windowWidth: Math.max(1280, captureWidth),
-      ignoreElements: (el) => el.getAttribute('data-capture-hide') === 'true',
+      ignoreElements: (el) =>
+        el.getAttribute('data-capture-hide') === 'true' ||
+        el.classList?.contains('hidden') === true,
       onclone: (clonedDoc) => {
         // 1. Sanitize inline <style> sheets in clonedDoc so CSS vars/gradients use rgba()
         const styleTags = clonedDoc.querySelectorAll('style');

@@ -6,6 +6,7 @@ import {
   SalesQuarterlySummaryItem,
   BaQuarterlySummaryItem,
   TrainerQuarterlySummaryItem,
+  StoreQuarterlySummaryItem,
 } from '../types/dashboard';
 import {
   calculateQuarterlySummary,
@@ -22,6 +23,7 @@ import {
 import { TARGETS_UPDATED_EVENT, syncQuarterBaSellInToStores } from '../services/targetManagementService';
 import { SALES_MASTER_6_CONFIG } from '../services/kpiSalesData';
 import { formatRupiah, formatPercent } from '../utils/analytics';
+import { normalizeStoreAlnum } from '../utils/weeklyBaRegistry';
 import {
   Award,
   TrendingUp,
@@ -69,7 +71,7 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
   const [selectedSpv, setSelectedSpv] = useState<string>('ALL');
   const [activeSubTab, setActiveSubTab] = useState<SubTabKey>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [hallOfFameTab, setHallOfFameTab] = useState<'sales' | 'ba' | 'trainer'>('sales');
+  const [hallOfFameTab, setHallOfFameTab] = useState<'sales' | 'store' | 'ba' | 'trainer'>('sales');
   const [modalPerson, setModalPerson] = useState<{
     type: 'sales' | 'ba' | 'trainer';
     data: SalesQuarterlySummaryItem | BaQuarterlySummaryItem | TrainerQuarterlySummaryItem;
@@ -193,7 +195,7 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
     );
   }, [sourceRecords, selectedQuarter, selectedYear, selectedArea, selectedSpv, activeKet, targetSyncVersion]);
 
-  const { overall: baseOverall, salesList, baList, trainerList } = rawSummaryData;
+  const { overall: baseOverall, salesList, baList, trainerList, storeList } = rawSummaryData;
 
   // Filtered lists based on global filters and search queries
   const effectiveSearch = (searchQuery || filters.searchQuery || '').trim().toLowerCase();
@@ -268,6 +270,48 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
     });
   }, [trainerList, effectiveSearch, filters.TRAINER, filters.REGION]);
 
+  const filteredStores: StoreQuarterlySummaryItem[] = useMemo(() => {
+    return (storeList || []).filter((st) => {
+      if (filters.SALES && filters.SALES !== 'ALL') {
+        const fSales = filters.SALES.trim().toUpperCase();
+        const canonicalFilter = fSales === 'ALBERT' ? 'ALBERT FERNANDO' : fSales;
+        if ((st.salesName || '').toUpperCase() !== canonicalFilter) return false;
+      }
+      if (filters.TRAINER && filters.TRAINER !== 'ALL') {
+        const fTrainer = filters.TRAINER.trim().toUpperCase();
+        const cfg = SALES_MASTER_6_CONFIG[st.salesName];
+        const trainerMatch =
+          (st.trainerName || '').toUpperCase().includes(fTrainer) ||
+          (cfg ? cfg.trainerCovered.toUpperCase().includes(fTrainer) : false);
+        if (!trainerMatch) return false;
+      }
+      if (filters.SPV && filters.SPV !== 'ALL' && (st.spvName || '').toUpperCase() !== filters.SPV.toUpperCase()) return false;
+      if (filters.NAMA_STORE && filters.NAMA_STORE !== 'ALL') {
+        const targetNorm = normalizeStoreAlnum(filters.NAMA_STORE);
+        const targetUp = filters.NAMA_STORE.trim().toUpperCase();
+        const stNorm = normalizeStoreAlnum(st.storeName);
+        if (st.storeName.trim().toUpperCase() !== targetUp && (!targetNorm || stNorm !== targetNorm)) return false;
+      }
+      if (filters.REGION && filters.REGION !== 'ALL') {
+        const targetReg = filters.REGION.toUpperCase().trim();
+        if (
+          (st.region || '').toUpperCase().trim() !== targetReg &&
+          (st.coverArea || '').toUpperCase().trim() !== targetReg
+        ) {
+          return false;
+        }
+      }
+      if (!effectiveSearch) return true;
+      return (
+        st.storeName.toLowerCase().includes(effectiveSearch) ||
+        (st.salesName && st.salesName.toLowerCase().includes(effectiveSearch)) ||
+        (st.coverArea && st.coverArea.toLowerCase().includes(effectiveSearch)) ||
+        (st.region && st.region.toLowerCase().includes(effectiveSearch)) ||
+        (st.baName && st.baName.toLowerCase().includes(effectiveSearch))
+      );
+    });
+  }, [storeList, effectiveSearch, filters.SALES, filters.TRAINER, filters.SPV, filters.NAMA_STORE, filters.REGION]);
+
   // Dynamically recalculated overall KPI summary cards for the filtered subset
   const overall = useMemo(() => {
     const hasActivePersonnelFilter =
@@ -328,6 +372,17 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
             percent: filteredBa[0].quarterAchievementPercent,
           }
         : null,
+      topStore: filteredStores[0]
+        ? {
+            storeName: filteredStores[0].storeName,
+            salesName: filteredStores[0].salesName,
+            coverArea: filteredStores[0].coverArea,
+            baName: filteredStores[0].baName || undefined,
+            actualSellIn: filteredStores[0].quarterActualSellIn,
+            targetSellIn: filteredStores[0].quarterTargetSellIn,
+            percent: filteredStores[0].quarterAchievementSellInPercent,
+          }
+        : null,
       topTrainer: filteredTrainer[0]
         ? {
             name: filteredTrainer[0].trainerName,
@@ -338,7 +393,7 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
           }
         : null,
     };
-  }, [baseOverall, filteredSales, filteredBa, filteredTrainer, filters, effectiveSearch]);
+  }, [baseOverall, filteredSales, filteredBa, filteredTrainer, filteredStores, filters, effectiveSearch]);
 
   // Modal computation for bulk quarter target settings (independent quarter/year switcher inside modal)
   const modalSummaryData = useMemo(() => {
@@ -601,8 +656,9 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
       salesList: filteredSales,
       baList: filteredBa,
       trainerList: filteredTrainer,
+      storeList: filteredStores,
     };
-  }, [overall, filteredSales, filteredBa, filteredTrainer]);
+  }, [overall, filteredSales, filteredBa, filteredTrainer, filteredStores]);
 
   const activeModalPersonData = useMemo(() => {
     if (!modalPerson) return null;
@@ -1028,38 +1084,77 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
             </div>
           </div>
 
-          {/* Top BA */}
-          <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden backdrop-blur-xs">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-pink-400 flex items-center gap-1.5">
-                <Medal className="w-4 h-4 text-pink-400" />
-                Top Beauty Advisor Star
-              </span>
-              <span className="text-xs font-black px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 border border-pink-400/30">
-                Peringkat 1
-              </span>
-            </div>
-            <div className="mt-3">
-              <h4 className="text-base font-extrabold text-white truncate">
-                {overall.topBa?.name || 'Tidak ada data'}
-              </h4>
-              <p className="text-xs text-slate-300 mt-0.5 truncate">
-                Outlet: <span className="font-bold text-pink-300">{overall.topBa?.store || '-'}</span>
-              </p>
-              <p className="text-xs text-slate-300 mt-0.5">
-                {isKetSellIn ? 'Realisasi Sell In:' : isKetSellOut ? 'Realisasi Sell Out:' : 'Omset Kuartal:'}{' '}
-                <span className="font-bold text-amber-300 font-mono">{formatRupiah(overall.topBa?.actual || 0, true)}</span>
-              </p>
-              <div className="mt-1.5 flex items-center justify-between text-xs">
-                <span className="text-slate-400">
-                  Target: {formatRupiah(overall.topBa?.target || 0, true)}
+          {/* Middle Hall of Fame Card: Top Beauty Advisor Star ONLY on SELL OUT, else Top Toko Champion (Sell In) */}
+          {isKetSellOut ? (
+            <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden backdrop-blur-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-pink-400 flex items-center gap-1.5">
+                  <Medal className="w-4 h-4 text-pink-400" />
+                  Top Beauty Advisor Star
                 </span>
-                <span className="font-black text-emerald-400">
-                  {formatPercent(overall.topBa?.percent || 0)}
+                <span className="text-xs font-black px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 border border-pink-400/30">
+                  Peringkat 1
                 </span>
               </div>
+              <div className="mt-3">
+                <h4 className="text-base font-extrabold text-white truncate">
+                  {overall.topBa?.name || 'Tidak ada data'}
+                </h4>
+                <p className="text-xs text-slate-300 mt-0.5 truncate">
+                  Outlet: <span className="font-bold text-pink-300">{overall.topBa?.store || '-'}</span>
+                </p>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  Realisasi Sell Out (26–25):{' '}
+                  <span className="font-bold text-amber-300 font-mono">{formatRupiah(overall.topBa?.actual || 0, true)}</span>
+                </p>
+                <div className="mt-1.5 flex items-center justify-between text-xs">
+                  <span className="text-slate-400">
+                    Target: {formatRupiah(overall.topBa?.target || 0, true)}
+                  </span>
+                  <span className="font-black text-emerald-400">
+                    {formatPercent(overall.topBa?.percent || 0)}
+                  </span>
+                </div>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden backdrop-blur-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-sky-400 flex items-center gap-1.5">
+                  <Medal className="w-4 h-4 text-sky-400" />
+                  Top Toko Champion (Sell In)
+                </span>
+                <span className="text-xs font-black px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-400/30">
+                  Peringkat 1
+                </span>
+              </div>
+              <div className="mt-3">
+                <h4 className="text-base font-extrabold text-white truncate">
+                  {overall.topStore?.storeName || 'Tidak ada data'}
+                </h4>
+                <p className="text-xs text-slate-300 mt-0.5 truncate">
+                  Sales: <span className="font-bold text-sky-300">{overall.topStore?.salesName || '-'}</span> · {overall.topStore?.coverArea || '-'}
+                </p>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  Realisasi Sell In:{' '}
+                  <span className="font-bold text-amber-300 font-mono">{formatRupiah(overall.topStore?.actualSellIn || 0, true)}</span>
+                </p>
+                <div className="mt-1.5 flex items-center justify-between text-xs">
+                  <span className="text-slate-400">
+                    Target: {formatRupiah(overall.topStore?.targetSellIn || 0, true)}
+                  </span>
+                  <span className="font-black text-emerald-400">
+                    {formatPercent(overall.topStore?.percent || 0)}
+                  </span>
+                </div>
+                {!isKetSellIn && (
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    Top Beauty Advisor Star tampil saat filter KET = SELL OUT
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Top Trainer */}
           <div className="bg-white/5 border border-white/10 rounded-xl p-4 relative overflow-hidden backdrop-blur-xs">
@@ -1106,10 +1201,15 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
               </h4>
               <p className="text-[11px] text-slate-400">
                 Urutan peringkat berdasarkan persentase pencapaian (%) tertinggi • Filter KET ({activeKetDisplayLabel})
+                {overall.baSellOutDateRangeLabel && (
+                  <span className="text-emerald-300 font-semibold">
+                    {' '}· Cut-off Sell Out BA (26–25): {overall.baSellOutDateRangeLabel}
+                  </span>
+                )}
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              {(isKetSellIn || !isKetSellOut) && (
+              {(isKetSellIn || !isKetSellOut) && hallOfFameTab !== 'store' && (
                 <button
                   type="button"
                   onClick={() => openBulkTargetModal(hallOfFameTab, 'actualSellIn')}
@@ -1123,6 +1223,7 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
               <div className="flex items-center gap-1 p-1 bg-white/10 rounded-xl border border-white/10">
                 {([
                   { id: 'sales', label: `Sales (${filteredSales.length})` },
+                  { id: 'store', label: `Toko (${filteredStores.length})` },
                   { id: 'ba', label: `BA (${filteredBa.length})` },
                   { id: 'trainer', label: `Trainer (${filteredTrainer.length})` },
                 ] as const).map((tab) => (
@@ -1150,27 +1251,48 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                   <th className="py-2.5 px-3">
                     {hallOfFameTab === 'sales'
                       ? 'Personil Sales'
+                      : hallOfFameTab === 'store'
+                      ? 'Nama Toko / Outlet'
                       : hallOfFameTab === 'ba'
                       ? 'Nama BA & Toko'
                       : 'Nama Trainer'}
                   </th>
-                  <th className="py-2.5 px-3">Area</th>
-                  {(isKetSellIn || !isKetSellOut) && (
+                  <th className="py-2.5 px-3">
+                    {hallOfFameTab === 'store' ? 'Sales & Area' : 'Area'}
+                  </th>
+                  {hallOfFameTab === 'store' ? (
                     <>
                       <th className="py-2.5 px-3 text-right">Target Sell In</th>
-                      <th className="py-2.5 px-3 text-right">Realisasi Sell In (Edit)</th>
+                      <th className="py-2.5 px-3 text-right">Realisasi Sell In</th>
                       <th className="py-2.5 px-3 text-center">% Sell In</th>
                     </>
-                  )}
-                  {(isKetSellOut || !isKetSellIn) && (
+                  ) : (
                     <>
-                      <th className="py-2.5 px-3 text-right">Target Sell Out</th>
-                      <th className="py-2.5 px-3 text-right">Realisasi Sell Out</th>
-                      <th className="py-2.5 px-3 text-center">% Sell Out</th>
+                      {(isKetSellIn || !isKetSellOut) && (
+                        <>
+                          <th className="py-2.5 px-3 text-right">Target Sell In</th>
+                          <th className="py-2.5 px-3 text-right">Realisasi Sell In (Edit)</th>
+                          <th className="py-2.5 px-3 text-center">% Sell In</th>
+                        </>
+                      )}
+                      {(isKetSellOut || !isKetSellIn) && (
+                        <>
+                          <th className="py-2.5 px-3 text-right">Target Sell Out</th>
+                          <th className="py-2.5 px-3 text-right">
+                            Realisasi Sell Out
+                            {hallOfFameTab === 'ba' && (
+                              <span className="ml-1 text-[9px] font-semibold text-emerald-300 normal-case">
+                                (26–25)
+                              </span>
+                            )}
+                          </th>
+                          <th className="py-2.5 px-3 text-center">% Sell Out</th>
+                        </>
+                      )}
+                      {!isKetSellIn && !isKetSellOut && (
+                        <th className="py-2.5 px-3 text-center">% Peringkat</th>
+                      )}
                     </>
-                  )}
-                  {!isKetSellIn && !isKetSellOut && (
-                    <th className="py-2.5 px-3 text-center">% Peringkat</th>
                   )}
                 </tr>
               </thead>
@@ -1227,6 +1349,31 @@ export const QuarterlySummaryView: React.FC<QuarterlySummaryViewProps> = ({
                           {formatPercent(s.quarterAchievementPercent, false)}
                         </td>
                       )}
+                    </tr>
+                  ))}
+                {hallOfFameTab === 'store' &&
+                  filteredStores.map((st, idx) => (
+                    <tr key={`${st.storeName}-${idx}`} className="hover:bg-white/5 transition-colors">
+                      <td className="py-2 px-3 text-center font-extrabold text-amber-300">#{idx + 1}</td>
+                      <td className="py-2 px-3">
+                        <span className="font-bold text-white block">{st.storeName}</span>
+                        {st.baName && (
+                          <span className="text-[10px] text-slate-400">BA: {st.baName}</span>
+                        )}
+                      </td>
+                      <td className="py-2 px-3 text-slate-400">
+                        <span className="text-slate-200 font-semibold block">{st.salesName}</span>
+                        <span className="text-[10px] text-slate-400">{st.coverArea}</span>
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono text-slate-300">
+                        {formatRupiah(st.quarterTargetSellIn, true)}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono font-bold text-sky-300">
+                        {formatRupiah(st.quarterActualSellIn, true)}
+                      </td>
+                      <td className="py-2 px-3 text-center font-bold text-emerald-300">
+                        {formatPercent(st.quarterAchievementSellInPercent, false)}
+                      </td>
                     </tr>
                   ))}
                 {hallOfFameTab === 'ba' &&

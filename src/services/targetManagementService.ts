@@ -28,7 +28,58 @@ import {
 
 export const TARGETS_UPDATED_EVENT = 'salespro-targets-updated';
 
+let targetsCacheRevision = 1;
+const parsedJsonCache = new Map<string, { raw: string | null; parsed: unknown }>();
+const targetMatrixLru: Array<{
+  records: TransactionRecord[];
+  key: string;
+  result: TargetMatrixData;
+}> = [];
+const monthlySpvTargetsLru: Array<{
+  records: TransactionRecord[];
+  key: string;
+  result: MonthlySpvTargetsResult;
+}> = [];
+
+export function getTargetsRevision(): number {
+  return targetsCacheRevision;
+}
+
+export function invalidateTargetManagementCaches(): void {
+  targetsCacheRevision += 1;
+  parsedJsonCache.clear();
+  targetMatrixLru.length = 0;
+  monthlySpvTargetsLru.length = 0;
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', () => {
+    invalidateTargetManagementCaches();
+  });
+  window.addEventListener(TARGETS_UPDATED_EVENT, () => {
+    targetsCacheRevision += 1;
+    targetMatrixLru.length = 0;
+    monthlySpvTargetsLru.length = 0;
+  });
+}
+
+function readCachedStorageJson<T>(storageKey: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    const entry = parsedJsonCache.get(storageKey);
+    if (entry && entry.raw === raw) {
+      return entry.parsed as T;
+    }
+    const parsed = raw ? (JSON.parse(raw) as T) : fallback;
+    parsedJsonCache.set(storageKey, { raw, parsed });
+    return parsed;
+  } catch {
+    return fallback;
+  }
+}
+
 export function notifyTargetsUpdated(detail?: { monthKey?: string; category?: string }): void {
+  invalidateTargetManagementCaches();
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(TARGETS_UPDATED_EVENT, { detail }));
   }
@@ -206,16 +257,9 @@ export const DEFAULT_TRAINERS: TrainerTargetConfig[] = [
 ];
 
 export function loadTrainerConfigs(): TrainerTargetConfig[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_TRAINER_LIST);
-    if (raw) {
-      const parsed: TrainerTargetConfig[] = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
-      }
-    }
-  } catch (e) {
-    console.warn('Gagal membaca trainer list dari localStorage', e);
+  const cached = readCachedStorageJson<TrainerTargetConfig[] | null>(STORAGE_KEY_TRAINER_LIST, null);
+  if (Array.isArray(cached) && cached.length > 0) {
+    return cached;
   }
   return DEFAULT_TRAINERS;
 }
@@ -230,12 +274,8 @@ export function saveTrainerConfigs(trainers: TrainerTargetConfig[]): void {
 }
 
 export function loadCustomBaProfiles(): Record<string, CustomBaProfile> {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_CUSTOM_BA_PROFILES);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
+  const parsed = readCachedStorageJson<Record<string, CustomBaProfile>>(STORAGE_KEY_CUSTOM_BA_PROFILES, {});
+  return parsed && typeof parsed === 'object' ? { ...parsed } : {};
 }
 
 export function saveCustomBaProfiles(profiles: Record<string, CustomBaProfile>): void {
@@ -267,35 +307,42 @@ export interface MonthlyTargetStore {
   [monthKey: string]: MonthlyTargetBucket;
 }
 
+function readMonthlyTargetsInternal(): MonthlyTargetStore {
+  const parsed = readCachedStorageJson<MonthlyTargetStore>(STORAGE_KEY_MONTHLY_TARGETS, {});
+  return parsed && typeof parsed === 'object' ? parsed : {};
+}
+
 export function loadMonthlyTargets(): MonthlyTargetStore {
+  const cached = readMonthlyTargetsInternal();
   try {
-    const saved = localStorage.getItem(STORAGE_KEY_MONTHLY_TARGETS);
-    return saved ? JSON.parse(saved) : {};
+    return JSON.parse(JSON.stringify(cached));
   } catch {
-    return {};
+    return { ...cached };
   }
 }
 
 export function saveMonthlyTargets(data: MonthlyTargetStore): void {
   try {
     localStorage.setItem(STORAGE_KEY_MONTHLY_TARGETS, JSON.stringify(data));
+    invalidateTargetManagementCaches();
   } catch {
     // ignore
   }
 }
 
+function readGlobalMapCached(storageKey: string): Record<string, number> {
+  const parsed = readCachedStorageJson<Record<string, number>>(storageKey, {});
+  return parsed && typeof parsed === 'object' ? parsed : {};
+}
+
 function readGlobalMap(storageKey: string): Record<string, number> {
-  try {
-    const saved = localStorage.getItem(storageKey);
-    return saved ? JSON.parse(saved) : {};
-  } catch {
-    return {};
-  }
+  return { ...readGlobalMapCached(storageKey) };
 }
 
 function writeGlobalMap(storageKey: string, targets: Record<string, number>): void {
   try {
     localStorage.setItem(storageKey, JSON.stringify(targets));
+    invalidateTargetManagementCaches();
   } catch {
     // ignore
   }
@@ -306,15 +353,15 @@ function writeGlobalMap(storageKey: string, targets: Record<string, number>): vo
 // -----------------------------------------------------------------------
 
 export function loadAreaTargets(monthKey?: string): Record<string, number> {
-  const base = readGlobalMap(STORAGE_KEY_AREA_TARGETS);
+  const base = readGlobalMapCached(STORAGE_KEY_AREA_TARGETS);
   const norm = normalizeMonthKey(monthKey);
   if (norm !== 'ALL') {
-    const monthly = loadMonthlyTargets();
+    const monthly = readMonthlyTargetsInternal();
     if (monthly[norm]?.area) {
       return { ...base, ...monthly[norm].area };
     }
   }
-  return base;
+  return { ...base };
 }
 
 export function saveAreaTargets(targets: Record<string, number>, monthKey?: string): void {
@@ -331,15 +378,15 @@ export function saveAreaTargets(targets: Record<string, number>, monthKey?: stri
 }
 
 export function loadAreaSellOutTargets(monthKey?: string): Record<string, number> {
-  const base = readGlobalMap(STORAGE_KEY_AREA_SELLOUT_TARGETS);
+  const base = readGlobalMapCached(STORAGE_KEY_AREA_SELLOUT_TARGETS);
   const norm = normalizeMonthKey(monthKey);
   if (norm !== 'ALL') {
-    const monthly = loadMonthlyTargets();
+    const monthly = readMonthlyTargetsInternal();
     if (monthly[norm]?.areaSellOut) {
       return { ...base, ...monthly[norm].areaSellOut };
     }
   }
-  return base;
+  return { ...base };
 }
 
 export function saveAreaSellOutTargets(targets: Record<string, number>, monthKey?: string): void {
@@ -356,15 +403,15 @@ export function saveAreaSellOutTargets(targets: Record<string, number>, monthKey
 }
 
 export function loadSpvTargets(monthKey?: string): Record<string, number> {
-  const base = readGlobalMap(STORAGE_KEY_SPV_TARGETS);
+  const base = readGlobalMapCached(STORAGE_KEY_SPV_TARGETS);
   const norm = normalizeMonthKey(monthKey);
   if (norm !== 'ALL') {
-    const monthly = loadMonthlyTargets();
+    const monthly = readMonthlyTargetsInternal();
     if (monthly[norm]?.spv) {
       return { ...base, ...monthly[norm].spv };
     }
   }
-  return base;
+  return { ...base };
 }
 
 export function saveSpvTargets(targets: Record<string, number>, monthKey?: string): void {
@@ -381,15 +428,15 @@ export function saveSpvTargets(targets: Record<string, number>, monthKey?: strin
 }
 
 export function loadSpvSellOutTargets(monthKey?: string): Record<string, number> {
-  const base = readGlobalMap(STORAGE_KEY_SPV_SELLOUT_TARGETS);
+  const base = readGlobalMapCached(STORAGE_KEY_SPV_SELLOUT_TARGETS);
   const norm = normalizeMonthKey(monthKey);
   if (norm !== 'ALL') {
-    const monthly = loadMonthlyTargets();
+    const monthly = readMonthlyTargetsInternal();
     if (monthly[norm]?.spvSellOut) {
       return { ...base, ...monthly[norm].spvSellOut };
     }
   }
-  return base;
+  return { ...base };
 }
 
 export function saveSpvSellOutTargets(targets: Record<string, number>, monthKey?: string): void {
@@ -409,7 +456,7 @@ export function getExplicitSpvTargetOverride(spvName: string, monthKey?: string)
   const norm = normalizeMonthKey(monthKey);
   const upperSpv = spvName.toUpperCase().trim();
   if (norm !== 'ALL') {
-    const monthly = loadMonthlyTargets();
+    const monthly = readMonthlyTargetsInternal();
     const bucket = monthly[norm]?.spv;
     if (bucket) {
       if (bucket[spvName] !== undefined) return bucket[spvName];
@@ -417,22 +464,22 @@ export function getExplicitSpvTargetOverride(spvName: string, monthKey?: string)
       if (matchKey !== undefined) return bucket[matchKey];
     }
   }
-  const globalSpv = readGlobalMap(STORAGE_KEY_SPV_TARGETS);
+  const globalSpv = readGlobalMapCached(STORAGE_KEY_SPV_TARGETS);
   if (globalSpv[spvName] !== undefined) return globalSpv[spvName];
   const gMatch = Object.keys(globalSpv).find((k) => k.toUpperCase().trim() === upperSpv);
   return gMatch !== undefined ? globalSpv[gMatch] : undefined;
 }
 
 export function loadSalesTargets(monthKey?: string): Record<string, number> {
-  const base = readGlobalMap(STORAGE_KEY_SALES_TARGETS);
+  const base = readGlobalMapCached(STORAGE_KEY_SALES_TARGETS);
   const norm = normalizeMonthKey(monthKey);
   if (norm !== 'ALL') {
-    const monthly = loadMonthlyTargets();
+    const monthly = readMonthlyTargetsInternal();
     if (monthly[norm]?.sales) {
       return { ...base, ...monthly[norm].sales };
     }
   }
-  return base;
+  return { ...base };
 }
 
 export function saveSalesTargets(targets: Record<string, number>, monthKey?: string): void {
@@ -450,15 +497,15 @@ export function saveSalesTargets(targets: Record<string, number>, monthKey?: str
 }
 
 export function loadSalesSellOutTargets(monthKey?: string): Record<string, number> {
-  const base = readGlobalMap(STORAGE_KEY_SALES_SELLOUT_TARGETS);
+  const base = readGlobalMapCached(STORAGE_KEY_SALES_SELLOUT_TARGETS);
   const norm = normalizeMonthKey(monthKey);
   if (norm !== 'ALL') {
-    const monthly = loadMonthlyTargets();
+    const monthly = readMonthlyTargetsInternal();
     if (monthly[norm]?.salesSellOut) {
       return { ...base, ...monthly[norm].salesSellOut };
     }
   }
-  return base;
+  return { ...base };
 }
 
 export function saveSalesSellOutTargets(targets: Record<string, number>, monthKey?: string): void {
@@ -475,15 +522,15 @@ export function saveSalesSellOutTargets(targets: Record<string, number>, monthKe
 }
 
 export function loadBaNonLavojoyTargets(monthKey?: string): Record<string, number> {
-  const base = readGlobalMap(STORAGE_KEY_BA_NON_LAVOJOY);
+  const base = readGlobalMapCached(STORAGE_KEY_BA_NON_LAVOJOY);
   const norm = normalizeMonthKey(monthKey);
   if (norm !== 'ALL') {
-    const monthly = loadMonthlyTargets();
+    const monthly = readMonthlyTargetsInternal();
     if (monthly[norm]?.baNonLavojoy) {
       return { ...base, ...monthly[norm].baNonLavojoy };
     }
   }
-  return base;
+  return { ...base };
 }
 
 export function saveBaNonLavojoyTargets(targets: Record<string, number>, monthKey?: string): void {
@@ -500,15 +547,15 @@ export function saveBaNonLavojoyTargets(targets: Record<string, number>, monthKe
 }
 
 export function loadBaLavojoyTargets(monthKey?: string): Record<string, number> {
-  const base = readGlobalMap(STORAGE_KEY_BA_LAVOJOY);
+  const base = readGlobalMapCached(STORAGE_KEY_BA_LAVOJOY);
   const norm = normalizeMonthKey(monthKey);
   if (norm !== 'ALL') {
-    const monthly = loadMonthlyTargets();
+    const monthly = readMonthlyTargetsInternal();
     if (monthly[norm]?.baLavojoy) {
       return { ...base, ...monthly[norm].baLavojoy };
     }
   }
-  return base;
+  return { ...base };
 }
 
 export function saveBaLavojoyTargets(targets: Record<string, number>, monthKey?: string): void {
@@ -545,7 +592,7 @@ export function loadBaFocusTargets(monthKey?: string): Record<string, number> {
   });
   const norm = normalizeMonthKey(monthKey);
   if (norm !== 'ALL') {
-    const monthly = loadMonthlyTargets();
+    const monthly = readMonthlyTargetsInternal();
     if (monthly[norm]?.baFocus) {
       return { ...base, ...monthly[norm].baFocus };
     }
@@ -574,16 +621,12 @@ export function saveBaFocusTargets(targets: Record<string, number>, monthKey?: s
 export function loadTrainerTargets(
   monthKey?: string
 ): Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; baSupervisedCount?: number; notes?: string }> {
-  let base: Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; baSupervisedCount?: number; notes?: string }> = {};
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY_TRAINER_TARGETS);
-    base = saved ? JSON.parse(saved) : {};
-  } catch {
-    base = {};
-  }
+  const base = readCachedStorageJson<
+    Record<string, { targetSellOut?: number; targetProdukFokusPcs?: number; baSupervisedCount?: number; notes?: string }>
+  >(STORAGE_KEY_TRAINER_TARGETS, {});
   const norm = normalizeMonthKey(monthKey);
   if (norm !== 'ALL') {
-    const monthly = loadMonthlyTargets();
+    const monthly = readMonthlyTargetsInternal();
     if (monthly[norm]?.trainer) {
       const merged: typeof base = { ...base };
       Object.entries(monthly[norm].trainer!).forEach(([k, v]) => {
@@ -592,7 +635,7 @@ export function loadTrainerTargets(
       return merged;
     }
   }
-  return base;
+  return base && typeof base === 'object' ? { ...base } : {};
 }
 
 export function saveTrainerTargets(
@@ -1390,6 +1433,26 @@ export function aggregateTargetMatrix(
   options?: AggregateTargetMatrixOptions
 ): TargetMatrixData {
   const normMonth = normalizeMonthKey(selectedMonth);
+  const matrixCacheKey = [
+    normMonth,
+    options?.singleMonthBaselineOnly ? 1 : 0,
+    options?.selectedYear || 0,
+    options?.excludeKaMg ? 1 : 0,
+    options?.baYear || 0,
+    options?.baKetFilter || 'ALL',
+    options?.baScopeFilters?.sales || 'ALL',
+    options?.baScopeFilters?.store || 'ALL',
+    options?.baScopeFilters?.region || 'ALL',
+    getTargetsRevision(),
+  ].join('|');
+
+  for (let i = 0; i < targetMatrixLru.length; i++) {
+    const c = targetMatrixLru[i];
+    if (c.records === records && c.key === matrixCacheKey) {
+      return c.result;
+    }
+  }
+
   const configuredMonthKeys = getConfiguredMonthKeys();
   const isMultiMonthAccumulated =
     normMonth === 'ALL' && !options?.singleMonthBaselineOnly && configuredMonthKeys.length > 0;
@@ -2226,7 +2289,7 @@ export function aggregateTargetMatrix(
   const totalTrainerActualFocusPcs = trainers.reduce((acc, t) => acc + t.actualProdukFokusPcs, 0);
   const trainerFocusAchievementPct = totalTrainerTargetFocusPcs > 0 ? (totalTrainerActualFocusPcs / totalTrainerTargetFocusPcs) * 100 : 0;
 
-  return {
+  const matrixResult: TargetMatrixData = {
     areas,
     spvs,
     sales,
@@ -2269,6 +2332,9 @@ export function aggregateTargetMatrix(
       isMultiMonthAccumulated,
     },
   };
+  targetMatrixLru.unshift({ records, key: matrixCacheKey, result: matrixResult as TargetMatrixData });
+  if (targetMatrixLru.length > 6) targetMatrixLru.pop();
+  return matrixResult;
 }
 
 // =========================================================================
@@ -3448,6 +3514,34 @@ export function buildMonthlySpvTargetsMap(
     NAMA_STORE?: string;
   }
 ): MonthlySpvTargetsResult {
+  const lruKey = [
+    targetsCacheRevision,
+    filters?.TAHUN || 'ALL',
+    filters?.SPV || 'ALL',
+    filters?.REGION || 'ALL',
+    filters?.SALES || 'ALL',
+    filters?.NAMA_STORE || 'ALL',
+  ].join('|');
+
+  for (let i = 0; i < monthlySpvTargetsLru.length; i++) {
+    const entry = monthlySpvTargetsLru[i];
+    if (entry.records === records && entry.key === lruKey) {
+      if (i > 0) {
+        monthlySpvTargetsLru.splice(i, 1);
+        monthlySpvTargetsLru.unshift(entry);
+      }
+      return entry.result;
+    }
+  }
+
+  const saveMonthlySpvTargetsLru = (result: MonthlySpvTargetsResult): MonthlySpvTargetsResult => {
+    monthlySpvTargetsLru.unshift({ records, key: lruKey, result });
+    if (monthlySpvTargetsLru.length > 6) {
+      monthlySpvTargetsLru.pop();
+    }
+    return result;
+  };
+
   const yearFilter = filters?.TAHUN && filters.TAHUN !== 'ALL' ? String(filters.TAHUN).trim() : '';
   let effectiveYear = yearFilter ? Number(yearFilter) : 0;
   if (!effectiveYear || effectiveYear < 1900) {
@@ -3591,12 +3685,12 @@ export function buildMonthlySpvTargetsMap(
       spvLabel: storeFilterRaw,
     };
 
-    return {
+    return saveMonthlySpvTargetsLru({
       byKey,
       spvScopeLabel: `Target Toko: ${storeFilterRaw}`,
       targetMode: 'store',
       targetEntityLabel: storeFilterRaw,
-    };
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -3645,12 +3739,12 @@ export function buildMonthlySpvTargetsMap(
       spvLabel: salesFilterRaw,
     };
 
-    return {
+    return saveMonthlySpvTargetsLru({
       byKey,
       spvScopeLabel: `Target ${salesFilterRaw}`,
       targetMode: 'sales',
       targetEntityLabel: salesFilterRaw,
-    };
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -3832,12 +3926,12 @@ export function buildMonthlySpvTargetsMap(
     spvLabel: 'ALL',
   };
 
-  return {
+  return saveMonthlySpvTargetsLru({
     byKey,
     spvScopeLabel,
     targetMode: 'spv',
     targetEntityLabel: 'ALL',
-  };
+  });
 }
 
 
